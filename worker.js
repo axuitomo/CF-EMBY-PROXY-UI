@@ -1,10 +1,8 @@
 /**
- * EMBY-PROXY-PRO V11.3 (Data Management Edition)
- * 核心特性：
- * 1. 数据导入/导出 (JSON格式)
- * 2. 原生 WebSocketPair 转发
- * 3. 视频切片 Header 瘦身 & 禁用 Buffer
- * 4. JWT 安全管理后台
+ * EMBY-PROXY-PRO V11.4 (Final Polish)
+ * 1. 登录防爆破 (5次锁定)
+ * 2. 友好错误页 (Emby风格)
+ * 3. 数据导入/导出 + 完整功能集
  */
 
 const STATIC_REGEX = /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json)$/i;
@@ -19,7 +17,14 @@ export default {
 
     // --- 1. 管理后台逻辑 ---
     if (segments[0] === "admin") {
-      if (segments[1] === "login" && request.method === "POST") return await handleLogin(request, env);
+      // 1.1 登录限流检查
+      if (segments[1] === "login" && request.method === "POST") {
+        const clientIp = request.headers.get("cf-connecting-ip") || "unknown";
+        if (await isIpLocked(env, clientIp)) {
+          return new Response("Too many failed attempts. Try again in 15 minutes.", { status: 429 });
+        }
+        return await handleLogin(request, env, clientIp);
+      }
       
       const cookie = request.headers.get("Cookie");
       const token = parseCookie(cookie, "auth_token");
@@ -65,13 +70,22 @@ export default {
 };
 
 // ==========================================
-// JWT & Crypto Helpers
+// Security: Login & Rate Limit
 // ==========================================
-async function handleLogin(request, env) {
+
+async function isIpLocked(env, ip) {
+    const count = await env.ENI_KV.get(`fail:${ip}`);
+    return count && parseInt(count) >= 5;
+}
+
+async function handleLogin(request, env, ip) {
   try {
     const formData = await request.formData();
     const password = formData.get("password");
+    
     if (password === env.ADMIN_PASS) {
+      // 登录成功，清除错误计数
+      await env.ENI_KV.delete(`fail:${ip}`);
       const jwt = await generateJwt(env.ADMIN_PASS, 60 * 60 * 24 * 7);
       return new Response("Login Success", {
         status: 302,
@@ -81,10 +95,18 @@ async function handleLogin(request, env) {
         }
       });
     }
-    return renderLoginPage("密码错误");
+    
+    // 登录失败，增加计数 (TTL 15分钟)
+    let count = await env.ENI_KV.get(`fail:${ip}`);
+    count = count ? parseInt(count) + 1 : 1;
+    await env.ENI_KV.put(`fail:${ip}`, count, { expirationTtl: 900 });
+    
+    return renderLoginPage(`密码错误 (剩余次数: ${5 - count})`);
   } catch (e) { return renderLoginPage("请求无效"); }
 }
 
+// ... (JWT Helpers 保持不变: generateJwt, verifyJwt, importKey, sign, etc.) ...
+// 请务必保留之前版本的 JWT 辅助函数！
 async function generateJwt(secret, expiresIn) {
   const header = { alg: "HS256", typ: "JWT" };
   const payload = { sub: "admin", exp: Math.floor(Date.now() / 1000) + expiresIn };
@@ -94,7 +116,6 @@ async function generateJwt(secret, expiresIn) {
   const signature = await sign(key, `${encHeader}.${encPayload}`);
   return `${encHeader}.${encPayload}.${signature}`;
 }
-
 async function verifyJwt(token, secret) {
   if (!token) return false;
   const parts = token.split('.');
@@ -109,7 +130,6 @@ async function verifyJwt(token, secret) {
     return true;
   } catch (e) { return false; }
 }
-
 function base64UrlEncode(str) { return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 function base64UrlDecode(str) {
   str = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -165,7 +185,6 @@ async function handleProxy(request, node, path, name, key) {
   const isStreaming = STREAMING_REGEX.test(finalUrl.pathname);
   const isStatic = STATIC_REGEX.test(finalUrl.pathname);
 
-  // CORS Preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -185,12 +204,10 @@ async function handleProxy(request, node, path, name, key) {
   const realIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "127.0.0.1";
   newHeaders.set("X-Real-IP", realIp);
   newHeaders.set("X-Forwarded-For", realIp);
-  newHeaders.set("X-Emby-Proxy", "Worker-V11.3");
+  newHeaders.set("X-Emby-Proxy", "Worker-V11.4");
 
   if (isStreaming) {
-      newHeaders.delete("Cookie");
-      newHeaders.delete("Referer");
-      newHeaders.delete("User-Agent"); 
+      newHeaders.delete("Cookie"); newHeaders.delete("Referer"); newHeaders.delete("User-Agent"); 
   }
 
   if (isWS) {
@@ -212,13 +229,9 @@ async function handleProxy(request, node, path, name, key) {
   }
 
   let cfOptions = {};
-  if (isStreaming) {
-    cfOptions = { cacheEverything: false, cacheTtl: 0 };
-  } else if (isStatic) {
-    cfOptions = { cacheEverything: true, cacheTtlByStatus: { "200-299": 86400, "404": 1, "500-599": 0 } };
-  } else {
-    cfOptions = { cacheTtl: 0 };
-  }
+  if (isStreaming) { cfOptions = { cacheEverything: false, cacheTtl: 0 }; } 
+  else if (isStatic) { cfOptions = { cacheEverything: true, cacheTtlByStatus: { "200-299": 86400, "404": 1, "500-599": 0 } }; } 
+  else { cfOptions = { cacheTtl: 0 }; }
 
   try {
     const controller = new AbortController();
@@ -233,9 +246,7 @@ async function handleProxy(request, node, path, name, key) {
     let modifiedHeaders = new Headers(response.headers);
     modifiedHeaders.set("Access-Control-Allow-Origin", "*");
     
-    if (isStreaming) {
-        modifiedHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    }
+    if (isStreaming) { modifiedHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate"); }
 
     const location = modifiedHeaders.get("Location");
     if (location && (response.status >= 300 && response.status < 400)) {
@@ -252,17 +263,15 @@ async function handleProxy(request, node, path, name, key) {
       }
     }
 
-    return new Response(response.body, { 
-        status: response.status, 
-        statusText: response.statusText, 
-        headers: modifiedHeaders 
-    });
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers: modifiedHeaders });
 
   } catch (err) {
-    return new Response(`Proxy Error: ${err.message}`, { status: 502 });
+    // [改进] 友好的错误页面，而非枯燥的 502
+    return renderErrorPage(err.message, name);
   }
 }
 
+// ... (safeAddLog, handleApi 保持不变) ...
 async function safeAddLog(env, request, name, target) {
   try {
     const ip = request.headers.get("cf-connecting-ip") || "Unknown";
@@ -287,14 +296,12 @@ async function safeAddLog(env, request, name, target) {
 
 async function handleApi(request, env) {
   const data = await request.json();
-  // [新增] 批量导入接口
   if (data.action === "import") {
     const nodes = data.nodes;
     if (Array.isArray(nodes)) {
         const cache = caches.default;
         for (const n of nodes) {
            if (n.name && n.target) {
-               // 清理缓存以确保配置即时生效
                await cache.delete(`https://internal-config-cache/${n.name}`);
                await env.ENI_KV.put(`node:${n.name}`, JSON.stringify({ secret: n.secret || "", target: n.target }));
            }
@@ -302,7 +309,6 @@ async function handleApi(request, env) {
     }
     return new Response(JSON.stringify({ success: true }));
   }
-  
   if (data.action === "save") {
     const cache = caches.default;
     await cache.delete(`https://internal-config-cache/${data.name}`);
@@ -327,6 +333,36 @@ async function handleApi(request, env) {
 // ==========================================
 // UI Functions
 // ==========================================
+
+// [新增] 错误页面渲染
+function renderErrorPage(msg, nodeName) {
+    return new Response(`
+    <html>
+    <head>
+        <title>Emby Proxy Error</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { background: #101010; color: #ccc; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .box { text-align: center; max-width: 400px; padding: 20px; }
+            .icon { font-size: 60px; margin-bottom: 20px; opacity: 0.5; }
+            h2 { color: #52B54B; margin: 0 0 10px; }
+            p { font-size: 14px; line-height: 1.5; opacity: 0.8; }
+            .meta { font-family: monospace; background: #222; padding: 10px; border-radius: 5px; font-size: 11px; margin-top: 20px; color: #ff6b6b; }
+            .btn { display: inline-block; margin-top: 20px; padding: 10px 25px; background: #52B54B; color: #fff; text-decoration: none; border-radius: 5px; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <div class="icon">⚠️</div>
+            <h2>连接中断</h2>
+            <p>无法连接到媒体服务器 <strong>${nodeName}</strong>。<br>可能是家庭宽带断网，或服务器正在重启。</p>
+            <div class="meta">Error: ${msg}</div>
+            <a href="javascript:location.reload()" class="btn">重试连接</a>
+        </div>
+    </body>
+    </html>
+    `, { status: 502, headers: { "Content-Type": "text/html;charset=UTF-8" } });
+}
 
 function renderLoginPage(error = "") {
   return new Response(`
@@ -508,18 +544,13 @@ function renderAdminUI(env) {
     </div>
 
     <script>
-        // 全局变量缓存节点数据，供导出使用
         let currentNodes = [];
-
         async function refresh() {
             try {
                 const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'list' }) });
                 if (res.status === 401) { location.reload(); return; }
                 const data = await res.json();
-                
-                // 更新全局数据
                 currentNodes = data.nodes;
-
                 const nodeHtml = data.nodes.map(n => {
                     const fullLink = window.location.origin + '/' + n.name + (n.secret ? '/' + n.secret : '');
                     const isSecured = !!n.secret;
@@ -545,10 +576,8 @@ function renderAdminUI(env) {
                         </tr>
                     \`;
                 }).join('');
-                
                 document.getElementById('nodeTable').innerHTML = nodeHtml || '<tr><td colspan="3" class="text-center py-12 opacity-30 text-xs">暂无活跃代理，请在左侧添加</td></tr>';
                 document.getElementById('nodes-label').innerHTML = \`<span class="w-1.5 h-1.5 rounded-full bg-white"></span> \${data.nodes.length} 个运行中\`;
-
                 const logHtml = data.logs.map(l => \`
                     <div class="flex gap-3 hover:bg-white/5 p-1 rounded cursor-default items-center">
                         <span class="text-emerald-500 w-[60px] shrink-0 opacity-80">\${l.time}</span>
@@ -562,7 +591,6 @@ function renderAdminUI(env) {
                 document.getElementById('logViewer').innerHTML = logHtml || '<div class="opacity-30 text-center mt-12 text-slate-600">// 等待流量接入...</div>';
             } catch(e) { console.error(e); }
         }
-
         async function saveNode() {
             const btn = document.querySelector('button[onclick="saveNode()"]');
             const originalText = btn.innerText;
@@ -582,69 +610,38 @@ function renderAdminUI(env) {
             btn.innerText = originalText;
             btn.disabled = false;
         }
-
         async function deleteNode(name) {
             if(!confirm('确定要删除代理 [' + name + '] 吗？')) return;
             const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'delete', name }) });
             if (res.status === 401) { location.reload(); return; }
             refresh();
         }
-
-        // [新增] 导出功能
         async function exportData() {
-            if(!currentNodes || currentNodes.length === 0) {
-                alert("当前列表为空，无法导出");
-                return;
-            }
+            if(!currentNodes || currentNodes.length === 0) { alert("当前列表为空，无法导出"); return; }
             const blob = new Blob([JSON.stringify(currentNodes, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
-            a.download = 'emby_nodes_backup.json';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            a.href = url; a.download = 'emby_nodes_backup.json';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
         }
-
-        // [新增] 导入功能
         async function importData(input) {
             const file = input.files[0];
             if (!file) return;
-
             const reader = new FileReader();
             reader.onload = async (e) => {
                 try {
                     const nodes = JSON.parse(e.target.result);
                     if (!Array.isArray(nodes)) throw new Error('文件格式错误：必须是 JSON 数组');
-                    
-                    if(!confirm(\`确认导入 \${nodes.length} 个节点吗？\n如果存在同名节点，将被覆盖。\n(导入后会自动刷新)\`)) {
-                        input.value = '';
-                        return;
-                    }
-                    
-                    // 调用后端批量导入
-                    const res = await fetch('/admin', { 
-                        method: 'POST', 
-                        body: JSON.stringify({ action: 'import', nodes }) 
-                    });
-                    
+                    if(!confirm(\`确认导入 \${nodes.length} 个节点吗？\n如果存在同名节点，将被覆盖。\n(导入后会自动刷新)\`)) { input.value = ''; return; }
+                    const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'import', nodes }) });
                     if (res.status === 401) { location.reload(); return; }
-                    
                     const result = await res.json();
-                    if(result.success) {
-                        alert('导入成功！');
-                        await refresh();
-                    } else {
-                        alert('导入失败，请检查文件。');
-                    }
-                } catch (err) {
-                    alert('导入失败: ' + err.message);
-                }
+                    if(result.success) { alert('导入成功！'); await refresh(); } else { alert('导入失败，请检查文件。'); }
+                } catch (err) { alert('导入失败: ' + err.message); }
             };
             reader.readAsText(file);
-            input.value = ''; // 重置文件选择器，允许重复导入同一文件
+            input.value = '';
         }
-
         function copy(text) { 
             navigator.clipboard.writeText(text);
             const el = document.activeElement;
@@ -652,13 +649,11 @@ function renderAdminUI(env) {
             el.innerText = "已复制 ✓";
             setTimeout(() => el.innerText = original, 1000);
         }
-
         function updateClock() {
             const now = new Date();
             const timeString = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
             document.getElementById('clock').innerText = timeString + " CST";
         }
-
         refresh();
         setInterval(refresh, 5000);
         setInterval(updateClock, 1000);
