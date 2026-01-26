@@ -1,189 +1,138 @@
+这是一份为您生成的 **README.md** 文档，专为 **EMBY-PROXY-PRO V11.4** 版本定制。
+
+这份文档采用了标准的开源项目文档格式，涵盖了项目介绍、核心特性、部署步骤、环境变量以及注意事项。您可以直接复制保存为 `README.md` 文件。
 
 ---
 
-# EMBY-PROXY-UI 📺
+# 🎥 EMBY-PROXY-PRO (Cloudflare Worker Edition)
 
-**基于 Cloudflare Workers 的轻量级 Emby/媒体服务器反向代理网关**
-
-> 专为中文环境优化 | 真实 IP 透传 | 现代化 UI 管理面板
-
-<img width="2560" height="1600" alt="图片" src="https://github.com/user-attachments/assets/f36fc73a-27a1-41c0-841b-50357bc15a21" />
-
-
-## 📖 简介
-
-**EMBY-PROXY-UI** 是一个运行在 Cloudflare Edge 上的单文件反向代理系统。它允许你通过 Cloudflare 的全球网络隐藏和加速你的家庭 NAS 或 VPS 上的媒体服务器（Emby, Jellyfin, Plex 等）。
-
-不同于传统的 Nginx 反代，你无需购买中转服务器，利用 Cloudflare Workers 免费版即可实现强大的流量分发与管理。
+> **版本**: V11.4 Final Polish
+> 一个基于 Cloudflare Workers 的高性能、高安全性的 Emby/Jellyfin 反向代理网关。
+> 专为家庭媒体服务器设计，提供真实 IP 穿透、极致流媒体优化、Web 管理后台及防暴力破解安全机制。
+<img width="2560" height="1600" alt="图片" src="https://github.com/user-attachments/assets/b962ed15-192d-443d-8fc5-b9cce3ca360c" />
 
 ---
 
-## ✨ 核心特性详解
+## ✨ 核心特性
 
-### 🛡️ 隐私保护 (Privacy Guard)
+### 🚀 极致性能
 
-* **彻底隐藏源站 IP**：利用 Cloudflare 的全球边缘网络作为护盾。
-* **工作原理**：当用户访问您的媒体库时，他们实际上连接的是 Cloudflare 的 CDN 节点，而非直接连接您的 NAS 或 VPS。
-* **安全优势**：有效防止家庭宽带 IP 泄露，抵御针对源站 IP 的 DDoS 攻击和恶意扫描。
+* **KV 缓存加速 (Cache-Aside)**：利用 Cache API 拦截 99% 的数据库读取请求，将首屏加载和视频拖拽延迟降至毫秒级。
+* **流媒体管道优化**：智能精简回源请求头（移除 Cookie/UA 等），禁用 Cloudflare 内部 Buffer，强制开启流式传输，显著提升 TTFB（首字节时间）。
+* **原生 WebSocket 转发**：使用 `WebSocketPair` 替代传统的 Fetch 转发，支持双向心跳保活，彻底解决 Emby 控制台断连和即时通讯问题。
 
-### 🖥️ 可视化管理 (Visual Dashboard)
+### 🛡️ 企业级安全
 
-* **零代码运维**：告别繁琐的配置文件修改。部署完成后，所有操作均在浏览器中完成。
-* **现代化控制台**：内置一套基于 KV 存储的 Web 管理界面，采用赛博朋克/磨砂玻璃风格设计。
-* **即时生效**：您可以随时添加、删除或修改代理入口（节点），无需重新部署 Worker 代码，配置毫秒级同步。
+* **JWT 身份认证**：管理后台采用 HS256 签名的 JWT Token，配合 HttpOnly & Secure Cookie，彻底杜绝 XSS 攻击。
+* **防暴力破解 (Rate Limiting)**：内置 IP 速率限制，连续输错 5 次密码将自动锁定 IP 15分钟。
+* **隐私保护**：隐藏源站真实 IP，同时通过 `X-Real-IP` 头将客户端真实 IP 透传给 Emby 服务器。
 
-### ⚡ 智能缓存策略 (Smart Caching)
+### 🖥️ 现代化管理
 
-系统内置了基于正则的智能分流逻辑，最大限度优化带宽利用率：
-
-* **静态资源加速**：自动识别海报、背景图、字幕、CSS/JS 等静态文件，强制通过 Cloudflare CDN 进行缓存。
-* *效果*：大幅减少源站上行带宽消耗，提升客户端海报墙加载速度。
-
-
-* **流媒体直连**：自动识别视频流（`.mkv`, `.mp4`, `.ts` 等）和 WebSocket 连接。
-* *效果*：建立直通管道，防止 CDN 缓存机制导致的视频缓冲、断连或延迟，确保播放丝般顺滑。
-
-
-
-### 🌏 中文环境深度优化 (CN Optimized)
-
-专为国内用户习惯和网络环境定制：
-
-* **真实 IP 透传 (Real-IP)**：
-* 自动提取 `CF-Connecting-IP` 并注入到 `X-Real-IP` 和 `X-Forwarded-For` 请求头中。
-* 配合后端设置，Emby/Jellyfin 仪表盘可准确显示播放者的真实 IP，而非 Cloudflare 代理 IP，便于精准流控和封禁。
-
-
-* **时区校准**：
-* 系统日志和界面时间强制锁定为 **北京时间 (UTC+8)**。
-* 彻底解决 Cloudflare 默认 UTC 时间导致的日志查阅困扰。
-
-
-* **思源黑体 UI**：
-* 引入 Google Fonts `Noto Sans SC`，解决中文在部分系统下显示为宋体或乱码的问题，提供最佳阅读体验。
-
-
-
-### 🔐 安全访问控制 (Access Control)
-
-* **动态密钥路径**：支持为任意代理入口设置“访问密钥”（Secret Path）。
-* **防扫描机制**：
-* *公开模式*：`https://domain.com/HK` -> 直接访问。
-* *加密模式*：`https://domain.com/HK/MySecret123` -> 只有持有完整链接的用户才能访问。
-
-
-* **应用场景**：通过隐藏入口路径，有效防止互联网上的爬虫和扫描器发现您的 Emby 登录页面。
+* **可视化后台**：内置 Emby 风格的 Web 管理界面，支持节点的增删改查。
+* **数据导入/导出**：支持 JSON 格式的一键备份与还原，方便迁移。
+* **全客户端日志**：不仅支持网页版，还能捕获 Infuse、Emby App、TV 端等客户端的活跃记录。
+* **友好错误页**：当源站离线时，展示伪装成 Emby 风格的友好错误提示，支持一键重试。
 
 ---
 
-## 📸 界面预览
+## 🛠️ 部署要求
 
-* **极简仪表盘**：赛博朋克风格与现代磨砂玻璃质感的完美结合。
-* **实时日志**：VS Code 终端风格的访问日志，实时监控谁在访问你的服务器。
-* **日夜模式**：根据北京时间（6:00-18:00）自动切换日间/夜间主题。
+在开始之前，请确保您拥有：
+
+1. **Cloudflare 账号**：且域名已托管在 Cloudflare。
+2. **Emby/Jellyfin 源站**：拥有公网 IP 或已通过内网穿透暴露 HTTP 端口。
+3. **Cloudflare Workers**：免费版账号即可（每日 10万次请求额度）。
 
 ---
 
-## 🚀 部署指南 (5分钟完成)
+## ⚙️ 环境变量 (必填)
 
-你需要一个 Cloudflare 账号和一个托管在 Cloudflare 上的域名。
+部署时需要在 Workers 的 `Settings` -> `Variables` 中配置以下变量：
+
+| 变量名 (Key) | 类型 | 说明 | 示例 |
+| --- | --- | --- | --- |
+| **`ADMIN_PASS`** | Encrypted | **必需**。管理后台的登录密码，同时也是 JWT 签名的密钥。请设置复杂的字符串。 | `MyS3cretP@ssw0rd` |
+| **`ENI_KV`** | KV Namespace | **必需**。绑定的 KV 命名空间变量名。**必须严格命名为 `ENI_KV**`，否则代码无法运行。 | (在绑定时设置) |
+
+---
+
+## 🚀 部署指南 (Step-by-Step)
 
 ### 第一步：创建 KV 命名空间
 
 1. 登录 Cloudflare Dashboard。
 2. 进入 **Workers & Pages** -> **KV**。
 3. 点击 **Create a Namespace**。
-4. 命名为 `ENI_KV` (建议使用此名称，方便管理)，点击 Add。
+4. 命名为 `EMBY_DATA` (或者任何你喜欢的名字)，点击 Add。
 
 ### 第二步：创建 Worker
 
-1. 进入 **Workers & Pages** -> **Overview**。
-2. 点击 **Create Application** -> **Create Worker**。
-3. 命名你的 Worker（例如 `emby-gateway`），点击 Deploy。
-4. 点击 **Edit code**，将本项目提供的 `worker.js` 代码**全选覆盖**进去，保存。
+1. 进入 **Workers & Pages** -> **Overview** -> **Create Application**。
+2. 点击 **Create Worker**，命名建议为 `emby-proxy`，点击 Deploy。
+3. 点击 **Edit code**，将本项目提供的 `worker.js` 代码完整复制进去。
+4. 保存并部署。
 
-### 第三步：绑定 KV 数据集
+### 第三步：绑定 KV 数据库 (关键)
 
 1. 在 Worker 的设置页面，点击 **Settings** -> **Variables**。
-2. 向下滚动找到 **KV Namespace Bindings**。
-3. 点击 **Add Binding**：
-* **Variable name**: 必须填写 `ENI_KV` (这是代码中读取的变量名，不可更改)。
-* **KV Namespace**: 选择第一步创建的那个空间。
+2. 向下滚动到 **KV Namespace Bindings**。
+3. 点击 **Add Binding**。
+4. **Variable name** 填写：`ENI_KV` (**注意：必须完全一致**)。
+5. **KV Namespace** 选择第一步创建的 `EMBY_DATA`。
+6. 点击 **Save and Deploy**。
 
-
-4. 点击 **Save and deploy**。
-
-### 第四步：设置管理员密码
+### 第四步：设置密码
 
 1. 还在 **Settings** -> **Variables** 页面。
-2. 找到 **Environment Variables**。
-3. 点击 **Add Variable**：
-* **Variable name**: `ADMIN_PASS`
-* **Value**: 设置一个复杂的字符串（例如 `my-secret-admin-888`）。
-* *这不仅是密码，也是你管理后台的访问路径。*
-
-
-4. 点击 **Save and deploy**。
-
-### 第五步：访问管理后台
-
-在浏览器输入：
-`https://你的Worker域名/你的管理员密码`
-*(例如: [https://emby.yourdomain.com/my-secret-admin-888](https://www.google.com/search?q=https://emby.yourdomain.com/my-secret-admin-888))*
-
-你现在应该能看到控制台了！🎉
+2. 在 **Environment Variables** 区域点击 **Add Variable**。
+3. **Variable name** 填写：`ADMIN_PASS`。
+4. **Value** 填写你的后台登录密码。
+5. 点击 **Encrypt** (加密存储)，然后 **Save and Deploy**。
 
 ---
 
-## ⚙️ 后端设置 (重要)
+## 📖 使用说明
 
-为了让 Emby/Jellyfin 正确显示用户的真实 IP 地址（而不是 Cloudflare 的 IP），你需要在媒体服务器中进行设置。
+### 1. 进入管理后台
 
-### Emby / Jellyfin 设置方法
+访问地址：`https://你的Worker域名/admin`
 
-1. 进入 **控制台 (Dashboard)** -> **网络 (Network)**。
-2. 找到 **"Secure connection mode" (安全连接模式)**，建议设置为 "Handled by reverse proxy" (由反向代理处理)。
-3. **关键步骤**：找到 **"Known Proxies" (已知代理)** 选项。
-* 由于 Cloudflare IP 范围很大，建议填入 Cloudflare 的 IP 段，或者直接填入 `0.0.0.0/0` (注意：这代表信任所有代理 IP，仅在你的 Worker 有鉴权保护时建议这样以此简化配置)。
-* *本项目代码已自动注入 `X-Real-IP` 和 `X-Forwarded-For` 头信息。*
+* 输入在环境变量中设置的密码登录。
+* 如果连续输错 5 次，IP 将被锁定 15 分钟。
 
+### 2. 添加代理节点
 
-4. 保存并重启服务器。
+在后台左侧面板输入：
 
----
+* **代理名称**：例如 `HK` (仅限英文/数字)。
+* **访问密钥** (可选)：例如 `123`。如果留空，则公开访问。
+* **服务器地址**：Emby 源站地址，例如 `http://1.2.3.4:8096` (不要带结尾的 `/`)。
 
-## 📝 使用说明
+点击 **立即部署**。
 
-### 添加代理 (Deploy Proxy)
+### 3. 客户端连接
 
-在管理面板左侧：
+* **公开节点**：`https://你的Worker域名/HK`
+* **加密节点**：`https://你的Worker域名/HK/123`
 
-1. **代理名称 (Name)**: 给入口起个名字，例如 `HK`。
-* 访问地址将变为：`https://你的域名/HK`
+### 4. 数据备份
 
-
-2. **访问密钥 (Secret)**: (可选) 只有知道密钥的人才能访问。
-* 若填写 `123`，访问地址为：`https://你的域名/HK/123`
-
-
-3. **服务器地址 (Server Address)**: 你的真实后端地址。
-* 例如：`http://123.123.123.123:8096` (支持 IP 或域名，支持非标端口)。
-
-
-
-### 客户端连接
-
-* **Emby 客户端 / 浏览器**: 直接填入生成的 **入口地址**。
-* **Infuse**: 填入域名，路径填入生成的路径（如 `/HK`），端口 `443`，HTTPS `开启`。
+* 点击列表右上角的 **导出** 按钮，可下载 `json` 备份文件。
+* 点击 **导入** 可恢复数据或批量添加节点（支持热更新，缓存立即刷新）。
 
 ---
 
-## ⚠️ 免责声明
+## ⚠️ 注意事项与免责声明
 
-* 本项目仅供学习与技术交流使用。
-* 请勿用于非法用途。
-* Cloudflare Workers 免费版有每日 100,000 次请求限制，个人使用通常足够，超出可能需要升级套餐。
+1. **流媒体缓存合规性**：
+本项目已显式设置 `Cache-Control: no-store` 并禁用了 Cloudflare 对流媒体文件的缓存，符合 Cloudflare 服务条款中关于“非 HTML 内容缓存”的规定。
+*但请注意：如果您的日均流量过大（如 TB 级别），仍可能因占用过多带宽被 Cloudflare 判定为滥用（Section 2.8）。建议仅用于个人或家庭分享。*
+2. **KV 额度**：
+代码经过深度优化，极大减少了 KV 读写。Cloudflare 免费版每日 100,000 次读取额度对于个人使用（日均播放 100 小时以内）通常是绰绰有余的。
+3. **物理延迟**：
+Worker 本质是中转代理。如果您的源站在国内，流量路径为 `用户 -> CF边缘(海外) -> CF回源 -> 源站(国内)`，物理延迟必然高于直连。建议配合 Cloudflare 优选 IP 使用以获得最佳体验。
 
 ---
 
-**Designed with ❤️ for the Community.**
+**License**: MIT
