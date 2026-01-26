@@ -1,8 +1,8 @@
 /**
- * EMBY-PROXY-PRO V11.4 (Final Polish)
- * 1. 登录防爆破 (5次锁定)
- * 2. 友好错误页 (Emby风格)
- * 3. 数据导入/导出 + 完整功能集
+ * EMBY-PROXY-PRO V11.5 (Smart Error Handling)
+ * 1. 智能错误响应 (浏览器返回HTML，客户端返回JSON)
+ * 2. 登录防爆破 + 安全后台
+ * 3. 极致流媒体优化 + 导入导出
  */
 
 const STATIC_REGEX = /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json)$/i;
@@ -17,7 +17,6 @@ export default {
 
     // --- 1. 管理后台逻辑 ---
     if (segments[0] === "admin") {
-      // 1.1 登录限流检查
       if (segments[1] === "login" && request.method === "POST") {
         const clientIp = request.headers.get("cf-connecting-ip") || "unknown";
         if (await isIpLocked(env, clientIp)) {
@@ -70,7 +69,7 @@ export default {
 };
 
 // ==========================================
-// Security: Login & Rate Limit
+// Security & Auth
 // ==========================================
 
 async function isIpLocked(env, ip) {
@@ -84,7 +83,6 @@ async function handleLogin(request, env, ip) {
     const password = formData.get("password");
     
     if (password === env.ADMIN_PASS) {
-      // 登录成功，清除错误计数
       await env.ENI_KV.delete(`fail:${ip}`);
       const jwt = await generateJwt(env.ADMIN_PASS, 60 * 60 * 24 * 7);
       return new Response("Login Success", {
@@ -96,17 +94,14 @@ async function handleLogin(request, env, ip) {
       });
     }
     
-    // 登录失败，增加计数 (TTL 15分钟)
     let count = await env.ENI_KV.get(`fail:${ip}`);
     count = count ? parseInt(count) + 1 : 1;
     await env.ENI_KV.put(`fail:${ip}`, count, { expirationTtl: 900 });
-    
     return renderLoginPage(`密码错误 (剩余次数: ${5 - count})`);
   } catch (e) { return renderLoginPage("请求无效"); }
 }
 
-// ... (JWT Helpers 保持不变: generateJwt, verifyJwt, importKey, sign, etc.) ...
-// 请务必保留之前版本的 JWT 辅助函数！
+// JWT Helpers
 async function generateJwt(secret, expiresIn) {
   const header = { alg: "HS256", typ: "JWT" };
   const payload = { sub: "admin", exp: Math.floor(Date.now() / 1000) + expiresIn };
@@ -156,7 +151,7 @@ function parseCookie(cookieString, key) {
 }
 
 // ==========================================
-// 业务逻辑
+// Proxy Logic (Smart Error Handling Added)
 // ==========================================
 
 async function getNodeConfigWithCache(nodeName, env, ctx) {
@@ -204,7 +199,7 @@ async function handleProxy(request, node, path, name, key) {
   const realIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "127.0.0.1";
   newHeaders.set("X-Real-IP", realIp);
   newHeaders.set("X-Forwarded-For", realIp);
-  newHeaders.set("X-Emby-Proxy", "Worker-V11.4");
+  newHeaders.set("X-Emby-Proxy", "Worker-V11.5");
 
   if (isStreaming) {
       newHeaders.delete("Cookie"); newHeaders.delete("Referer"); newHeaders.delete("User-Agent"); 
@@ -224,7 +219,8 @@ async function handleProxy(request, node, path, name, key) {
           wsSession.addEventListener('error', () => server.close());
           return new Response(null, { status: 101, webSocket: client });
       } catch (e) {
-          return new Response("WebSocket Tunnel Error", { status: 502 });
+          // WS 错误也走智能响应
+          return renderSmartError(request, "WebSocket Tunnel Error", name);
       }
   }
 
@@ -266,12 +262,11 @@ async function handleProxy(request, node, path, name, key) {
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: modifiedHeaders });
 
   } catch (err) {
-    // [改进] 友好的错误页面，而非枯燥的 502
-    return renderErrorPage(err.message, name);
+    // [修复] 传递 request 对象以识别客户端类型
+    return renderSmartError(request, err.message, name);
   }
 }
 
-// ... (safeAddLog, handleApi 保持不变) ...
 async function safeAddLog(env, request, name, target) {
   try {
     const ip = request.headers.get("cf-connecting-ip") || "Unknown";
@@ -331,37 +326,56 @@ async function handleApi(request, env) {
 }
 
 // ==========================================
-// UI Functions
+// UI & Error Rendering (Smart Switching)
 // ==========================================
 
-// [新增] 错误页面渲染
-function renderErrorPage(msg, nodeName) {
-    return new Response(`
-    <html>
-    <head>
-        <title>Emby Proxy Error</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            body { background: #101010; color: #ccc; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .box { text-align: center; max-width: 400px; padding: 20px; }
-            .icon { font-size: 60px; margin-bottom: 20px; opacity: 0.5; }
-            h2 { color: #52B54B; margin: 0 0 10px; }
-            p { font-size: 14px; line-height: 1.5; opacity: 0.8; }
-            .meta { font-family: monospace; background: #222; padding: 10px; border-radius: 5px; font-size: 11px; margin-top: 20px; color: #ff6b6b; }
-            .btn { display: inline-block; margin-top: 20px; padding: 10px 25px; background: #52B54B; color: #fff; text-decoration: none; border-radius: 5px; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <div class="icon">⚠️</div>
-            <h2>连接中断</h2>
-            <p>无法连接到媒体服务器 <strong>${nodeName}</strong>。<br>可能是家庭宽带断网，或服务器正在重启。</p>
-            <div class="meta">Error: ${msg}</div>
-            <a href="javascript:location.reload()" class="btn">重试连接</a>
-        </div>
-    </body>
-    </html>
-    `, { status: 502, headers: { "Content-Type": "text/html;charset=UTF-8" } });
+// [核心修复] 智能错误渲染函数
+function renderSmartError(request, msg, nodeName) {
+    const accept = request.headers.get("Accept") || "";
+    
+    // 只有明确请求 text/html 的（浏览器）才返回网页
+    // Infuse/Emby App 通常请求 json 或 */*，这里优先返回 JSON
+    if (accept.includes("text/html")) {
+        return new Response(`
+        <html>
+        <head>
+            <title>Emby Proxy Error</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body { background: #101010; color: #ccc; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .box { text-align: center; max-width: 400px; padding: 20px; }
+                .icon { font-size: 60px; margin-bottom: 20px; opacity: 0.5; }
+                h2 { color: #52B54B; margin: 0 0 10px; }
+                p { font-size: 14px; line-height: 1.5; opacity: 0.8; }
+                .meta { font-family: monospace; background: #222; padding: 10px; border-radius: 5px; font-size: 11px; margin-top: 20px; color: #ff6b6b; }
+                .btn { display: inline-block; margin-top: 20px; padding: 10px 25px; background: #52B54B; color: #fff; text-decoration: none; border-radius: 5px; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <div class="icon">⚠️</div>
+                <h2>连接中断</h2>
+                <p>无法连接到媒体服务器 <strong>${nodeName}</strong>。<br>可能是家庭宽带断网，或服务器正在重启。</p>
+                <div class="meta">Error: ${msg}</div>
+                <a href="javascript:location.reload()" class="btn">重试连接</a>
+            </div>
+        </body>
+        </html>
+        `, { status: 502, headers: { "Content-Type": "text/html;charset=UTF-8" } });
+    }
+
+    // 对于 API 客户端 (Infuse/APP)，返回 JSON
+    return new Response(JSON.stringify({
+        message: `Proxy Error: Unable to connect to node [${nodeName}]`,
+        details: msg,
+        status: 502
+    }), { 
+        status: 502, 
+        headers: { 
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*" // 确保 Web APP 不会跨域报错
+        } 
+    });
 }
 
 function renderLoginPage(error = "") {
@@ -418,26 +432,10 @@ function renderAdminUI(env) {
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
-        body { 
-            font-family: 'Noto Sans SC', system-ui, -apple-system, sans-serif; 
-            background-color: ${isDark ? '#050505' : '#f8fafc'};
-            background-image: ${isDark ? 'radial-gradient(#ffffff08 1px, transparent 1px)' : 'radial-gradient(#00000008 1px, transparent 1px)'};
-            background-size: 20px 20px;
-        }
+        body { font-family: 'Noto Sans SC', system-ui, -apple-system, sans-serif; background-color: ${isDark ? '#050505' : '#f8fafc'}; background-image: ${isDark ? 'radial-gradient(#ffffff08 1px, transparent 1px)' : 'radial-gradient(#00000008 1px, transparent 1px)'}; background-size: 20px 20px; }
         .mono { font-family: 'JetBrains Mono', monospace; }
-        .glass-panel {
-            background: ${isDark ? 'rgba(20, 20, 20, 0.7)' : 'rgba(255, 255, 255, 0.8)'};
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid ${isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'};
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        }
-        .status-dot {
-            width: 6px; height: 6px; border-radius: 50%;
-            background-color: ${embyGreen};
-            box-shadow: 0 0 12px ${embyGreen};
-            animation: pulse 3s infinite ease-in-out;
-        }
+        .glass-panel { background: ${isDark ? 'rgba(20, 20, 20, 0.7)' : 'rgba(255, 255, 255, 0.8)'}; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid ${isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'}; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background-color: ${embyGreen}; box-shadow: 0 0 12px ${embyGreen}; animation: pulse 3s infinite ease-in-out; }
         @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.8); } }
         .terminal-box { background-color: #0d1117; border: 1px solid #30363d; color: #c9d1d9; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
@@ -448,9 +446,7 @@ function renderAdminUI(env) {
         <header class="navbar glass-panel rounded-2xl px-8 py-5 flex justify-between items-center">
             <div class="flex items-center gap-4">
                 <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-[#52B54B] to-[#3e8d38] flex items-center justify-center text-white shadow-lg shadow-emerald-900/20">
-                    <svg viewBox="0 0 100 100" class="h-7 w-7 fill-current ml-1">
-                        <path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z" />
-                    </svg>
+                    <svg viewBox="0 0 100 100" class="h-7 w-7 fill-current ml-1"><path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z" /></svg>
                 </div>
                 <div>
                     <h1 class="text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}">EMBY-PROXY-UI</h1>
@@ -464,7 +460,6 @@ function renderAdminUI(env) {
                 <div class="font-mono text-xs opacity-40 bg-base-content/5 px-3 py-1.5 rounded-md" id="clock">Connecting...</div>
             </div>
         </header>
-
         <main class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             <aside class="lg:col-span-4 xl:col-span-3 flex flex-col gap-6">
                 <div class="card glass-panel shadow-xl">
@@ -485,25 +480,20 @@ function renderAdminUI(env) {
                             <label class="label p-0 mb-1"><span class="label-text text-xs font-bold opacity-70">服务器地址 (Target)</span></label>
                             <input id="inTarget" type="text" placeholder="http://1.2.3.4:8096" class="input input-bordered input-sm w-full bg-base-100/50 focus:border-[${embyGreen}] font-mono text-xs" />
                         </div>
-                        <button onclick="saveNode()" class="btn btn-neutral w-full mt-4 bg-gradient-to-r from-slate-800 to-slate-900 text-white border-0 shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300">
-                            立即部署
-                        </button>
+                        <button onclick="saveNode()" class="btn btn-neutral w-full mt-4 bg-gradient-to-r from-slate-800 to-slate-900 text-white border-0 shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300">立即部署</button>
                     </div>
                 </div>
             </aside>
-
             <section class="lg:col-span-8 xl:col-span-9 flex flex-col gap-6 h-full">
                 <div class="card glass-panel shadow-xl overflow-hidden min-h-[280px]">
                     <div class="px-6 py-4 border-b border-base-content/5 flex justify-between items-center bg-base-content/5">
                         <h2 class="text-sm font-bold opacity-70">活跃代理列表</h2>
                         <div class="flex items-center gap-2">
                              <button onclick="exportData()" class="btn btn-xs btn-ghost text-xs opacity-60 hover:opacity-100 font-mono tracking-wide" title="导出备份">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                                导出
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>导出
                              </button>
                              <button onclick="document.getElementById('importFile').click()" class="btn btn-xs btn-ghost text-xs opacity-60 hover:opacity-100 font-mono tracking-wide" title="从 JSON 导入">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                                导入
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>导入
                              </button>
                              <input type="file" id="importFile" style="display:none" accept=".json" onchange="importData(this)" />
                              <div id="nodes-label" class="badge badge-success gap-1 badge-sm text-white border-0 ml-2" style="background-color: ${embyGreen}">
@@ -514,35 +504,22 @@ function renderAdminUI(env) {
                     <div class="overflow-x-auto">
                         <table class="table w-full">
                             <thead>
-                                <tr class="text-xs uppercase opacity-50 bg-base-200/30 font-medium">
-                                    <th class="pl-6 py-4">代理 ID</th>
-                                    <th>入口地址 (点击复制)</th>
-                                    <th class="text-right pr-6">操作</th>
-                                </tr>
+                                <tr class="text-xs uppercase opacity-50 bg-base-200/30 font-medium"><th class="pl-6 py-4">代理 ID</th><th>入口地址 (点击复制)</th><th class="text-right pr-6">操作</th></tr>
                             </thead>
                             <tbody id="nodeTable" class="text-sm font-medium opacity-90"></tbody>
                         </table>
                     </div>
                 </div>
-
                 <div class="card terminal-box shadow-2xl overflow-hidden rounded-xl flex flex-col h-[320px]">
                     <div class="px-4 py-2 border-b border-white/10 flex justify-between items-center bg-[#161b22]">
-                        <div class="flex gap-2">
-                            <div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div>
-                            <div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div>
-                            <div class="w-3 h-3 rounded-full bg-[#27c93f]"></div>
-                        </div>
-                        <div class="flex items-center gap-2 text-[10px] font-mono text-slate-500">
-                            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                            access.log (Real-IP)
-                        </div>
+                        <div class="flex gap-2"><div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div><div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div><div class="w-3 h-3 rounded-full bg-[#27c93f]"></div></div>
+                        <div class="flex items-center gap-2 text-[10px] font-mono text-slate-500"><svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>access.log (Real-IP)</div>
                     </div>
                     <div id="logViewer" class="p-4 overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-hide flex-1"></div>
                 </div>
             </section>
         </main>
     </div>
-
     <script>
         let currentNodes = [];
         async function refresh() {
@@ -556,59 +533,28 @@ function renderAdminUI(env) {
                     const isSecured = !!n.secret;
                     return \`
                         <tr class="hover:bg-base-content/5 transition-colors border-b border-base-content/5 last:border-0 group">
-                            <td class="pl-6 py-3">
-                                <div class="flex items-center gap-3">
-                                    <div class="w-2 h-2 rounded-full \${isSecured ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'bg-[#52B54B] shadow-[0_0_8px_rgba(82,181,75,0.5)]'}"></div>
-                                    <span class="font-bold tracking-wide">\${n.name}</span>
-                                    \${isSecured ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-500 font-bold border border-amber-500/20">密</span>' : ''}
-                                </div>
-                            </td>
-                            <td>
-                                <button onclick="copy('\${fullLink}')" class="text-left font-mono text-xs opacity-60 hover:opacity-100 hover:text-[#52B54B] transition-colors select-all truncate max-w-[200px] md:max-w-xs bg-base-content/5 px-2 py-1 rounded">
-                                    \${fullLink}
-                                </button>
-                            </td>
-                            <td class="text-right pr-6">
-                                <button onclick="deleteNode('\${n.name}')" class="btn btn-ghost btn-xs text-rose-500 opacity-60 hover:opacity-100 hover:bg-rose-500/10">
-                                    删除
-                                </button>
-                            </td>
-                        </tr>
-                    \`;
+                            <td class="pl-6 py-3"><div class="flex items-center gap-3"><div class="w-2 h-2 rounded-full \${isSecured ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'bg-[#52B54B] shadow-[0_0_8px_rgba(82,181,75,0.5)]'}"></div><span class="font-bold tracking-wide">\${n.name}</span>\${isSecured ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-500 font-bold border border-amber-500/20">密</span>' : ''}</div></td>
+                            <td><button onclick="copy('\${fullLink}')" class="text-left font-mono text-xs opacity-60 hover:opacity-100 hover:text-[#52B54B] transition-colors select-all truncate max-w-[200px] md:max-w-xs bg-base-content/5 px-2 py-1 rounded">\${fullLink}</button></td>
+                            <td class="text-right pr-6"><button onclick="deleteNode('\${n.name}')" class="btn btn-ghost btn-xs text-rose-500 opacity-60 hover:opacity-100 hover:bg-rose-500/10">删除</button></td>
+                        </tr>\`;
                 }).join('');
                 document.getElementById('nodeTable').innerHTML = nodeHtml || '<tr><td colspan="3" class="text-center py-12 opacity-30 text-xs">暂无活跃代理，请在左侧添加</td></tr>';
                 document.getElementById('nodes-label').innerHTML = \`<span class="w-1.5 h-1.5 rounded-full bg-white"></span> \${data.nodes.length} 个运行中\`;
-                const logHtml = data.logs.map(l => \`
-                    <div class="flex gap-3 hover:bg-white/5 p-1 rounded cursor-default items-center">
-                        <span class="text-emerald-500 w-[60px] shrink-0 opacity-80">\${l.time}</span>
-                        <span class="text-cyan-400 w-[110px] shrink-0 font-bold bg-cyan-400/10 px-1 rounded text-center">\${l.ip}</span>
-                        <span class="text-slate-500 w-[120px] shrink-0 truncate text-[10px]">\${l.geo}</span>
-                        <span class="text-amber-400 w-[80px] shrink-0 font-bold">\${l.node}</span>
-                        <span class="text-slate-600 shrink-0 select-none">→</span>
-                        <span class="text-slate-400 truncate flex-1 italic opacity-60">\${l.target}</span>
-                    </div>
-                \`).join('');
+                const logHtml = data.logs.map(l => \`<div class="flex gap-3 hover:bg-white/5 p-1 rounded cursor-default items-center"><span class="text-emerald-500 w-[60px] shrink-0 opacity-80">\${l.time}</span><span class="text-cyan-400 w-[110px] shrink-0 font-bold bg-cyan-400/10 px-1 rounded text-center">\${l.ip}</span><span class="text-slate-500 w-[120px] shrink-0 truncate text-[10px]">\${l.geo}</span><span class="text-amber-400 w-[80px] shrink-0 font-bold">\${l.node}</span><span class="text-slate-600 shrink-0 select-none">→</span><span class="text-slate-400 truncate flex-1 italic opacity-60">\${l.target}</span></div>\`).join('');
                 document.getElementById('logViewer').innerHTML = logHtml || '<div class="opacity-30 text-center mt-12 text-slate-600">// 等待流量接入...</div>';
             } catch(e) { console.error(e); }
         }
         async function saveNode() {
-            const btn = document.querySelector('button[onclick="saveNode()"]');
-            const originalText = btn.innerText;
-            btn.innerText = "部署中...";
-            btn.disabled = true;
-            const name = document.getElementById('inName').value.trim();
-            const path = document.getElementById('inPath').value.trim();
-            const target = document.getElementById('inTarget').value.trim();
+            const btn = document.querySelector('button[onclick="saveNode()"]'); const originalText = btn.innerText;
+            btn.innerText = "部署中..."; btn.disabled = true;
+            const name = document.getElementById('inName').value.trim(); const path = document.getElementById('inPath').value.trim(); const target = document.getElementById('inTarget').value.trim();
             if(name && target) {
                 const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'save', name, path, target }) });
                 if (res.status === 401) { location.reload(); return; }
-                document.getElementById('inName').value = '';
-                document.getElementById('inPath').value = '';
-                document.getElementById('inTarget').value = '';
+                document.getElementById('inName').value = ''; document.getElementById('inPath').value = ''; document.getElementById('inTarget').value = '';
                 await refresh();
             }
-            btn.innerText = originalText;
-            btn.disabled = false;
+            btn.innerText = originalText; btn.disabled = false;
         }
         async function deleteNode(name) {
             if(!confirm('确定要删除代理 [' + name + '] 吗？')) return;
@@ -620,43 +566,28 @@ function renderAdminUI(env) {
             if(!currentNodes || currentNodes.length === 0) { alert("当前列表为空，无法导出"); return; }
             const blob = new Blob([JSON.stringify(currentNodes, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = 'emby_nodes_backup.json';
+            const a = document.createElement('a'); a.href = url; a.download = 'emby_nodes_backup.json';
             document.body.appendChild(a); a.click(); document.body.removeChild(a);
         }
         async function importData(input) {
-            const file = input.files[0];
-            if (!file) return;
+            const file = input.files[0]; if (!file) return;
             const reader = new FileReader();
             reader.onload = async (e) => {
                 try {
                     const nodes = JSON.parse(e.target.result);
-                    if (!Array.isArray(nodes)) throw new Error('文件格式错误：必须是 JSON 数组');
-                    if(!confirm(\`确认导入 \${nodes.length} 个节点吗？\n如果存在同名节点，将被覆盖。\n(导入后会自动刷新)\`)) { input.value = ''; return; }
+                    if (!Array.isArray(nodes)) throw new Error('文件格式错误');
+                    if(!confirm(\`确认导入 \${nodes.length} 个节点吗？\n存在同名节点将被覆盖。\n(导入后会自动刷新)\`)) { input.value = ''; return; }
                     const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'import', nodes }) });
                     if (res.status === 401) { location.reload(); return; }
                     const result = await res.json();
-                    if(result.success) { alert('导入成功！'); await refresh(); } else { alert('导入失败，请检查文件。'); }
+                    if(result.success) { alert('导入成功！'); await refresh(); } else { alert('导入失败。'); }
                 } catch (err) { alert('导入失败: ' + err.message); }
             };
-            reader.readAsText(file);
-            input.value = '';
+            reader.readAsText(file); input.value = '';
         }
-        function copy(text) { 
-            navigator.clipboard.writeText(text);
-            const el = document.activeElement;
-            const original = el.innerText;
-            el.innerText = "已复制 ✓";
-            setTimeout(() => el.innerText = original, 1000);
-        }
-        function updateClock() {
-            const now = new Date();
-            const timeString = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-            document.getElementById('clock').innerText = timeString + " CST";
-        }
-        refresh();
-        setInterval(refresh, 5000);
-        setInterval(updateClock, 1000);
+        function copy(text) { navigator.clipboard.writeText(text); const el = document.activeElement; const original = el.innerText; el.innerText = "已复制 ✓"; setTimeout(() => el.innerText = original, 1000); }
+        function updateClock() { const now = new Date(); document.getElementById('clock').innerText = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + " CST"; }
+        refresh(); setInterval(refresh, 5000); setInterval(updateClock, 1000);
     </script>
 </body>
 </html>
