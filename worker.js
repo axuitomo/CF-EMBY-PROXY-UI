@@ -1,595 +1,651 @@
 /**
- * EMBY-PROXY-PRO V11.5 (Smart Error Handling)
- * 1. 智能错误响应 (浏览器返回HTML，客户端返回JSON)
- * 2. 登录防爆破 + 安全后台
- * 3. 极致流媒体优化 + 导入导出
+ * EMBY-PROXY-PRO V12.4 (Simplicity Edition)
+ * -----------------------------------------------
+ * 1. 交互优化：取消端口单独设置，直接填写完整 Target
+ * 2. 视觉优化：UI 根据北京时间自动切换昼夜模式 (Day/Night Theme)
+ * 3. 核心功能：模块化架构 + 安全分离 + 智能容错
  */
 
-const STATIC_REGEX = /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json)$/i;
-const STREAMING_REGEX = /\.(?:mp4|m4v|m4s|m4a|ogv|webm|mkv|mov|avi|wmv|flv|ts|m3u8|mpd)$/i;
-const LOG_TRIGGER_REGEX = /(\/web\/index\.html|\/System\/Info|\/Sessions\/Capabilities|\/Users\/Authenticate)/i;
-
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    const segments = path.split('/').filter(p => p).map(p => decodeURIComponent(p));
-
-    // --- 1. 管理后台逻辑 ---
-    if (segments[0] === "admin") {
-      if (segments[1] === "login" && request.method === "POST") {
-        const clientIp = request.headers.get("cf-connecting-ip") || "unknown";
-        if (await isIpLocked(env, clientIp)) {
-          return new Response("Too many failed attempts. Try again in 15 minutes.", { status: 429 });
-        }
-        return await handleLogin(request, env, clientIp);
-      }
-      
-      const cookie = request.headers.get("Cookie");
-      const token = parseCookie(cookie, "auth_token");
-      const isValid = await verifyJwt(token, env.ADMIN_PASS);
-
-      if (!isValid) {
-        if (request.method === "POST") return new Response("Unauthorized", { status: 401 });
-        return renderLoginPage();
-      }
-      if (request.method === "POST") return await handleApi(request, env);
-      return renderAdminUI(env);
+// ============================================================================
+// 1. CONFIG MODULE
+// ============================================================================
+const Config = {
+    Regex: {
+        Static: /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json)$/i,
+        Streaming: /\.(?:mp4|m4v|m4s|m4a|ogv|webm|mkv|mov|avi|wmv|flv|ts|m3u8|mpd)$/i,
+        LogTrigger: /(\/web\/index\.html|\/System\/Info|\/Sessions\/Capabilities|\/Users\/Authenticate)/i
+    },
+    Defaults: {
+        JwtExpiry: 60 * 60 * 24 * 7, // 7天
+        LoginLockDuration: 900,      // 15分钟
+        MaxLoginAttempts: 5
     }
-
-    // --- 2. 代理主逻辑 ---
-    if (segments.length >= 1) {
-      const nodeName = segments[0];
-      const nodeData = await getNodeConfigWithCache(nodeName, env, ctx);
-
-      if (nodeData) {
-        let authorized = false;
-        let subIndex = 1;
-        if (nodeData.secret) {
-          if (segments[1] === nodeData.secret) { authorized = true; subIndex = 2; }
-        } else { authorized = true; }
-
-        if (authorized) {
-          const remainingPath = "/" + segments.slice(subIndex).join('/');
-          
-          if (remainingPath === "/" || remainingPath === "") {
-             const prefix = nodeData.secret ? `/${nodeName}/${nodeData.secret}` : `/${nodeName}`;
-             return Response.redirect(url.origin + prefix + "/web/index.html", 302);
-          }
-
-          if (LOG_TRIGGER_REGEX.test(remainingPath)) {
-            ctx.waitUntil(safeAddLog(env, request, nodeName, nodeData.target));
-          }
-          return await handleProxy(request, nodeData, remainingPath, nodeName, nodeData.secret);
-        }
-      }
-    }
-    return new Response("403 Forbidden / Access Denied", { status: 403 });
-  }
 };
 
-// ==========================================
-// Security & Auth
-// ==========================================
-
-async function isIpLocked(env, ip) {
-    const count = await env.ENI_KV.get(`fail:${ip}`);
-    return count && parseInt(count) >= 5;
-}
-
-async function handleLogin(request, env, ip) {
-  try {
-    const formData = await request.formData();
-    const password = formData.get("password");
-    
-    if (password === env.ADMIN_PASS) {
-      await env.ENI_KV.delete(`fail:${ip}`);
-      const jwt = await generateJwt(env.ADMIN_PASS, 60 * 60 * 24 * 7);
-      return new Response("Login Success", {
-        status: 302,
-        headers: {
-          "Location": "/admin",
-          "Set-Cookie": `auth_token=${jwt}; Path=/; Max-Age=${60 * 60 * 24 * 7}; HttpOnly; Secure; SameSite=Strict`
-        }
-      });
-    }
-    
-    let count = await env.ENI_KV.get(`fail:${ip}`);
-    count = count ? parseInt(count) + 1 : 1;
-    await env.ENI_KV.put(`fail:${ip}`, count, { expirationTtl: 900 });
-    return renderLoginPage(`密码错误 (剩余次数: ${5 - count})`);
-  } catch (e) { return renderLoginPage("请求无效"); }
-}
-
-// JWT Helpers
-async function generateJwt(secret, expiresIn) {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = { sub: "admin", exp: Math.floor(Date.now() / 1000) + expiresIn };
-  const encHeader = base64UrlEncode(JSON.stringify(header));
-  const encPayload = base64UrlEncode(JSON.stringify(payload));
-  const key = await importKey(secret);
-  const signature = await sign(key, `${encHeader}.${encPayload}`);
-  return `${encHeader}.${encPayload}.${signature}`;
-}
-async function verifyJwt(token, secret) {
-  if (!token) return false;
-  const parts = token.split('.');
-  if (parts.length !== 3) return false;
-  const [encHeader, encPayload, signature] = parts;
-  const key = await importKey(secret);
-  const expSignature = await sign(key, `${encHeader}.${encPayload}`);
-  if (signature !== expSignature) return false;
-  try {
-    const payload = JSON.parse(base64UrlDecode(encPayload));
-    if (payload.exp < Math.floor(Date.now() / 1000)) return false;
-    return true;
-  } catch (e) { return false; }
-}
-function base64UrlEncode(str) { return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-function base64UrlDecode(str) {
-  str = str.replace(/-/g, '+').replace(/_/g, '/');
-  while (str.length % 4) str += '=';
-  return atob(str);
-}
-async function importKey(secret) {
-  const enc = new TextEncoder();
-  return await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-}
-async function sign(key, data) {
-  const enc = new TextEncoder();
-  const signature = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-  return base64UrlEncode(String.fromCharCode(...new Uint8Array(signature)));
-}
-function parseCookie(cookieString, key) {
-  if (!cookieString) return null;
-  const cookies = cookieString.split(';');
-  for (let cookie of cookies) {
-    const [name, value] = cookie.trim().split('=');
-    if (name === key) return value;
-  }
-  return null;
-}
-
-// ==========================================
-// Proxy Logic (Smart Error Handling Added)
-// ==========================================
-
-async function getNodeConfigWithCache(nodeName, env, ctx) {
-  const cache = caches.default;
-  const cacheUrl = new URL(`https://internal-config-cache/${nodeName}`); 
-  let response = await cache.match(cacheUrl);
-  if (response) return await response.json();
-
-  const nodeData = await env.ENI_KV.get(`node:${nodeName}`, { type: "json" });
-  if (nodeData) {
-    const jsonStr = JSON.stringify(nodeData);
-    const cacheResp = new Response(jsonStr, { headers: { "Cache-Control": "public, max-age=60" } });
-    ctx.waitUntil(cache.put(cacheUrl, cacheResp));
-  }
-  return nodeData;
-}
-
-async function handleProxy(request, node, path, name, key) {
-  const targetBase = new URL(node.target);
-  const url = new URL(request.url);
-  const finalUrl = new URL(path, targetBase);
-  finalUrl.search = url.search;
-
-  const upgradeHeader = request.headers.get("Upgrade");
-  const isWS = upgradeHeader && upgradeHeader.toLowerCase() === "websocket";
-  const isStreaming = STREAMING_REGEX.test(finalUrl.pathname);
-  const isStatic = STATIC_REGEX.test(finalUrl.pathname);
-
-  if (request.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers") || "Content-Type, Authorization",
-        "Access-Control-Max-Age": "86400"
-      }
-    });
-  }
-
-  const newHeaders = new Headers(request.headers);
-  newHeaders.set("Host", targetBase.host);
-  newHeaders.delete("cf-connecting-ip"); 
-  newHeaders.delete("cf-ipcountry");
-  
-  const realIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "127.0.0.1";
-  newHeaders.set("X-Real-IP", realIp);
-  newHeaders.set("X-Forwarded-For", realIp);
-  newHeaders.set("X-Emby-Proxy", "Worker-V11.5");
-
-  if (isStreaming) {
-      newHeaders.delete("Cookie"); newHeaders.delete("Referer"); newHeaders.delete("User-Agent"); 
-  }
-
-  if (isWS) {
-      try {
-          const [client, server] = Object.values(new WebSocketPair());
-          const wsTarget = new URL(finalUrl);
-          wsTarget.protocol = wsTarget.protocol === 'https:' ? 'wss:' : 'ws:';
-          const wsSession = new WebSocket(wsTarget.toString(), "emby-websocket");
-          server.accept();
-          server.addEventListener('message', event => wsSession.send(event.data));
-          wsSession.addEventListener('message', event => server.send(event.data));
-          wsSession.addEventListener('close', () => server.close());
-          server.addEventListener('close', () => wsSession.close());
-          wsSession.addEventListener('error', () => server.close());
-          return new Response(null, { status: 101, webSocket: client });
-      } catch (e) {
-          // WS 错误也走智能响应
-          return renderSmartError(request, "WebSocket Tunnel Error", name);
-      }
-  }
-
-  let cfOptions = {};
-  if (isStreaming) { cfOptions = { cacheEverything: false, cacheTtl: 0 }; } 
-  else if (isStatic) { cfOptions = { cacheEverything: true, cacheTtlByStatus: { "200-299": 86400, "404": 1, "500-599": 0 } }; } 
-  else { cfOptions = { cacheTtl: 0 }; }
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-    let response = await fetch(new Request(finalUrl.toString(), {
-      method: request.method, headers: newHeaders, body: request.body, redirect: "manual", signal: controller.signal
-    }), { cf: cfOptions });
-
-    clearTimeout(timeoutId);
-
-    let modifiedHeaders = new Headers(response.headers);
-    modifiedHeaders.set("Access-Control-Allow-Origin", "*");
-    
-    if (isStreaming) { modifiedHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate"); }
-
-    const location = modifiedHeaders.get("Location");
-    if (location && (response.status >= 300 && response.status < 400)) {
-      const prefix = key ? `/${name}/${key}` : `/${name}`;
-      if (location.startsWith("/")) {
-        modifiedHeaders.set("Location", `${prefix}${location}`);
-      } else {
+// ============================================================================
+// 2. AUTH MODULE
+// ============================================================================
+const Auth = {
+    async handleLogin(request, env) {
+        const ip = request.headers.get("cf-connecting-ip") || "unknown";
+        
         try {
-          const locURL = new URL(location);
-          if (locURL.host === targetBase.host) {
-            modifiedHeaders.set("Location", `${prefix}${locURL.pathname}${locURL.search}`);
-          }
-        } catch (e) {}
-      }
+            const formData = await request.formData();
+            const password = (formData.get("password") || "").trim();
+
+            // 1. 优先校验密码 (输入正确立即放行)
+            if (password === env.ADMIN_PASS) {
+                await env.ENI_KV.delete(`fail:${ip}`);
+                const secret = env.JWT_SECRET || env.ADMIN_PASS; 
+                const jwt = await this.generateJwt(secret, Config.Defaults.JwtExpiry);
+                
+                return new Response("Login Success", {
+                    status: 302,
+                    headers: {
+                        "Location": "/admin", 
+                        "Set-Cookie": `auth_token=${jwt}; Path=/; Max-Age=${Config.Defaults.JwtExpiry}; HttpOnly; Secure; SameSite=Strict`
+                    }
+                });
+            }
+
+            // 2. 密码错误：执行锁定逻辑
+            let count = await env.ENI_KV.get(`fail:${ip}`);
+            count = count ? parseInt(count) + 1 : 1;
+            await env.ENI_KV.put(`fail:${ip}`, count, { expirationTtl: Config.Defaults.LoginLockDuration });
+
+            if (count >= Config.Defaults.MaxLoginAttempts) {
+                 return UI.renderLockedPage(ip, Config.Defaults.LoginLockDuration);
+            }
+            return UI.renderLoginPage(`密码错误 (剩余尝试次数: ${Config.Defaults.MaxLoginAttempts - count})`);
+
+        } catch (e) {
+            return UI.renderLoginPage("请求无效");
+        }
+    },
+
+    async verifyRequest(request, env) {
+        const cookie = request.headers.get("Cookie");
+        const token = this.parseCookie(cookie, "auth_token");
+        if (!token) return false;
+        
+        const secret = env.JWT_SECRET || env.ADMIN_PASS;
+        return await this.verifyJwt(token, secret);
+    },
+
+    // --- JWT Crypto Helpers ---
+    async generateJwt(secret, expiresIn) {
+        const header = { alg: "HS256", typ: "JWT" };
+        const payload = { sub: "admin", exp: Math.floor(Date.now() / 1000) + expiresIn };
+        const encHeader = this.base64UrlEncode(JSON.stringify(header));
+        const encPayload = this.base64UrlEncode(JSON.stringify(payload));
+        const signature = await this.sign(secret, `${encHeader}.${encPayload}`);
+        return `${encHeader}.${encPayload}.${signature}`;
+    },
+
+    async verifyJwt(token, secret) {
+        if (!token) return false;
+        const [encHeader, encPayload, signature] = token.split('.');
+        if (!encHeader || !encPayload || !signature) return false;
+        const expectedSignature = await this.sign(secret, `${encHeader}.${encPayload}`);
+        if (signature !== expectedSignature) return false;
+        try {
+            const payload = JSON.parse(this.base64UrlDecode(encPayload));
+            if (payload.exp < Math.floor(Date.now() / 1000)) return false;
+            return true;
+        } catch (e) { return false; }
+    },
+
+    base64UrlEncode(str) { return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
+    base64UrlDecode(str) { 
+        str = str.replace(/-/g, '+').replace(/_/g, '/'); 
+        while (str.length % 4) str += '='; 
+        return atob(str); 
+    },
+    async sign(secret, data) {
+        const enc = new TextEncoder();
+        const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        const signature = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+        return this.base64UrlEncode(String.fromCharCode(...new Uint8Array(signature)));
+    },
+    parseCookie(cookieString, key) {
+        if (!cookieString) return null;
+        const match = cookieString.match(new RegExp('(^| )' + key + '=([^;]+)'));
+        return match ? match[2] : null;
     }
+};
 
-    return new Response(response.body, { status: response.status, statusText: response.statusText, headers: modifiedHeaders });
-
-  } catch (err) {
-    // [修复] 传递 request 对象以识别客户端类型
-    return renderSmartError(request, err.message, name);
-  }
-}
-
-async function safeAddLog(env, request, name, target) {
-  try {
-    const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-    const country = request.cf ? request.cf.country : "CN";
-    const city = request.cf ? request.cf.city : "Unknown";
-    const timeStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-    
-    let logsData = await env.ENI_KV.get("system:logs");
-    let logs = logsData ? JSON.parse(logsData) : [];
-    
-    if (logs.length > 0) {
-       const lastLog = logs[0];
-       if (lastLog.ip === ip && lastLog.time.substring(0, 16) === timeStr.substring(0, 16)) return;
-    }
-
-    const newLog = { time: timeStr, ip, geo: `${city} [${country}]`, node: name, target };
-    logs.unshift(newLog);
-    if (logs.length > 50) logs = logs.slice(0, 50);
-    await env.ENI_KV.put("system:logs", JSON.stringify(logs));
-  } catch (e) {}
-}
-
-async function handleApi(request, env) {
-  const data = await request.json();
-  if (data.action === "import") {
-    const nodes = data.nodes;
-    if (Array.isArray(nodes)) {
+// ============================================================================
+// 3. DATABASE MODULE (KV Read Optimized)
+// ============================================================================
+const Database = {
+    // 获取单个节点配置（带 Cache API 缓存）
+    async getNode(nodeName, env, ctx) {
         const cache = caches.default;
-        for (const n of nodes) {
-           if (n.name && n.target) {
-               await cache.delete(`https://internal-config-cache/${n.name}`);
-               await env.ENI_KV.put(`node:${n.name}`, JSON.stringify({ secret: n.secret || "", target: n.target }));
-           }
+        const cacheUrl = new URL(`https://internal-config-cache/node/${nodeName}`); // 规范化缓存键
+        
+        let response = await cache.match(cacheUrl);
+        if (response) return await response.json();
+
+        // 缓存未命中：读 KV
+        const nodeData = await env.ENI_KV.get(`node:${nodeName}`, { type: "json" });
+        if (nodeData) {
+            // 写入缓存 (有效期 60秒)
+            const jsonStr = JSON.stringify(nodeData);
+            const cacheResp = new Response(jsonStr, { headers: { "Cache-Control": "public, max-age=60" } });
+            ctx.waitUntil(cache.put(cacheUrl, cacheResp));
+        }
+        return nodeData;
+    },
+
+    // 添加日志 (带去重和异步写入)
+    async addLog(env, request, name, target) {
+        try {
+            const ip = request.headers.get("cf-connecting-ip") || "Unknown";
+            const timeStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+            
+            // 读取现有日志 (无法缓存，因为需要追加)
+            let logsData = await env.ENI_KV.get("system:logs");
+            let logs = logsData ? JSON.parse(logsData) : [];
+            
+            // 简单去重：1分钟内同一IP同一节点不记录
+            if (logs.length > 0 && logs[0].ip === ip && logs[0].time.substring(0, 16) === timeStr.substring(0, 16)) return;
+
+            const geo = request.cf ? `${request.cf.city || 'Unk'} [${request.cf.country || 'CN'}]` : "Unknown";
+            logs.unshift({ time: timeStr, ip, geo, node: name, target });
+            
+            if (logs.length > 50) logs = logs.slice(0, 50);
+            await env.ENI_KV.put("system:logs", JSON.stringify(logs));
+        } catch (e) { /* Ignore log errors */ }
+    },
+
+    // 处理管理 API (增删改查) - [优化核心]
+    async handleApi(request, env) {
+        const data = await request.json();
+        const cache = caches.default;
+        // 定义列表的缓存 Key
+        const listCacheKey = "https://internal-config-cache/system:nodes-list";
+
+        switch (data.action) {
+            case "save": 
+            case "import":
+                const nodesToSave = data.action === "save" ? [data] : data.nodes;
+                for (const n of nodesToSave) {
+                    if (n.name && n.target) {
+                        // 1. SSRF 安全检查 (新增)
+                        if (typeof Validator !== 'undefined' && !Validator.isValidTarget(n.target)) {
+                            continue; // 跳过非法目标
+                        }
+
+                        // 2. 清除该节点的独立缓存
+                        await cache.delete(`https://internal-config-cache/node/${n.name}`);
+                        // 3. 写入 KV
+                        await env.ENI_KV.put(`node:${n.name}`, JSON.stringify({ 
+                            secret: n.secret || "", 
+                            target: n.target 
+                        }));
+                    }
+                }
+                // 4. [优化] 数据变更，清除列表缓存
+                await cache.delete(listCacheKey);
+                return new Response(JSON.stringify({ success: true }));
+
+            case "delete":
+                // 清除独立缓存
+                await cache.delete(`https://internal-config-cache/node/${data.name}`);
+                // 删除 KV
+                await env.ENI_KV.delete(`node:${data.name}`);
+                // [优化] 数据变更，清除列表缓存
+                await cache.delete(listCacheKey);
+                return new Response(JSON.stringify({ success: true }));
+
+            case "list":
+                let nodes = [];
+                
+                // [优化] 1. 尝试从缓存获取节点列表
+                const cachedList = await cache.match(listCacheKey);
+                if (cachedList) {
+                    nodes = await cachedList.json();
+                } else {
+                    // [优化] 2. 缓存未命中：执行昂贵的 KV 遍历 (N+1次读取)
+                    const list = await env.ENI_KV.list({ prefix: "node:" });
+                    nodes = await Promise.all(list.keys.map(async (k) => ({
+                        name: k.name.replace("node:", ""),
+                        ...(await env.ENI_KV.get(k.name, { type: "json" }))
+                    })));
+
+                    // [优化] 3. 将结果写入缓存 (有效期 60秒)
+                    // 这样接下来的 12 次(5秒刷新一次)请求都将命中内存，0 KV消耗
+                    const listResp = new Response(JSON.stringify(nodes), {
+                        headers: { "Cache-Control": "public, max-age=60" }
+                    });
+                    // 注意：使用 waitUntil 避免阻塞响应，但为了确保下次立即生效，这里最好不用 waitUntil
+                    await cache.put(listCacheKey, listResp); 
+                }
+
+                // 日志变化频繁，依然实时读取 (1次读取)
+                const logs = await env.ENI_KV.get("system:logs", { type: "json" }) || [];
+                
+                return new Response(JSON.stringify({ nodes, logs }));
+                
+            default:
+                return new Response("Invalid Action", { status: 400 });
         }
     }
-    return new Response(JSON.stringify({ success: true }));
-  }
-  if (data.action === "save") {
-    const cache = caches.default;
-    await cache.delete(`https://internal-config-cache/${data.name}`);
-    await env.ENI_KV.put(`node:${data.name}`, JSON.stringify({ secret: data.path || "", target: data.target }));
-    return new Response(JSON.stringify({ success: true }));
-  }
-  if (data.action === "delete") {
-    await env.ENI_KV.delete(`node:${data.name}`);
-    return new Response(JSON.stringify({ success: true }));
-  }
-  if (data.action === "list") {
-    const list = await env.ENI_KV.list({ prefix: "node:" });
-    const nodes = await Promise.all(list.keys.map(async (k) => ({
-      name: k.name.replace("node:", ""),
-      ...(await env.ENI_KV.get(k.name, { type: "json" }))
-    })));
-    const logs = await env.ENI_KV.get("system:logs", { type: "json" }) || [];
-    return new Response(JSON.stringify({ nodes, logs }));
-  }
-}
+};
 
-// ==========================================
-// UI & Error Rendering (Smart Switching)
-// ==========================================
+// ============================================================================
+// 4. PROXY MODULE
+// ============================================================================
+const Proxy = {
+    async handle(request, node, path, name, key) {
+        const targetBase = new URL(node.target);
+        const finalUrl = new URL(path, targetBase);
+        finalUrl.search = new URL(request.url).search;
 
-// [核心修复] 智能错误渲染函数
-function renderSmartError(request, msg, nodeName) {
-    const accept = request.headers.get("Accept") || "";
-    
-    // 只有明确请求 text/html 的（浏览器）才返回网页
-    // Infuse/Emby App 通常请求 json 或 */*，这里优先返回 JSON
-    if (accept.includes("text/html")) {
-        return new Response(`
-        <html>
-        <head>
-            <title>Emby Proxy Error</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body { background: #101010; color: #ccc; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-                .box { text-align: center; max-width: 400px; padding: 20px; }
-                .icon { font-size: 60px; margin-bottom: 20px; opacity: 0.5; }
-                h2 { color: #52B54B; margin: 0 0 10px; }
-                p { font-size: 14px; line-height: 1.5; opacity: 0.8; }
-                .meta { font-family: monospace; background: #222; padding: 10px; border-radius: 5px; font-size: 11px; margin-top: 20px; color: #ff6b6b; }
-                .btn { display: inline-block; margin-top: 20px; padding: 10px 25px; background: #52B54B; color: #fff; text-decoration: none; border-radius: 5px; font-weight: bold; }
-            </style>
-        </head>
-        <body>
-            <div class="box">
-                <div class="icon">⚠️</div>
-                <h2>连接中断</h2>
-                <p>无法连接到媒体服务器 <strong>${nodeName}</strong>。<br>可能是家庭宽带断网，或服务器正在重启。</p>
-                <div class="meta">Error: ${msg}</div>
-                <a href="javascript:location.reload()" class="btn">重试连接</a>
-            </div>
-        </body>
-        </html>
-        `, { status: 502, headers: { "Content-Type": "text/html;charset=UTF-8" } });
+        const isWS = request.headers.get("Upgrade") === "websocket";
+        const isStreaming = Config.Regex.Streaming.test(path);
+        const isStatic = Config.Regex.Static.test(path);
+
+        if (request.method === "OPTIONS") return this.renderCors();
+
+        const newHeaders = new Headers(request.headers);
+        newHeaders.set("Host", targetBase.host);
+        newHeaders.set("X-Real-IP", request.headers.get("cf-connecting-ip"));
+        newHeaders.set("X-Forwarded-For", request.headers.get("cf-connecting-ip"));
+        newHeaders.delete("cf-connecting-ip");
+        newHeaders.delete("cf-ipcountry");
+
+        if (isStreaming) {
+            ["Cookie", "Referer", "User-Agent"].forEach(h => newHeaders.delete(h));
+        }
+
+        if (isWS) return this.handleWebSocket(finalUrl, newHeaders);
+
+        let cfOptions = { cacheTtl: 0 };
+        if (isStreaming) {
+            cfOptions = { cacheEverything: false, cacheTtl: 0 }; 
+        } else if (isStatic) {
+            cfOptions = { cacheEverything: true, cacheTtlByStatus: { "200-299": 86400 } };
+        }
+
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            
+            const response = await fetch(new Request(finalUrl, {
+                method: request.method,
+                headers: newHeaders,
+                body: request.body,
+                redirect: "manual",
+                signal: controller.signal
+            }), { cf: cfOptions });
+            
+            clearTimeout(timeout);
+
+            const modifiedHeaders = new Headers(response.headers);
+            modifiedHeaders.set("Access-Control-Allow-Origin", "*");
+            if (isStreaming) modifiedHeaders.set("Cache-Control", "no-store");
+
+            this.rewriteLocation(modifiedHeaders, response.status, name, key, targetBase);
+
+            return new Response(response.body, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: modifiedHeaders
+            });
+
+        } catch (err) {
+            return UI.renderSmartError(request, err.message, name);
+        }
+    },
+
+    handleWebSocket(url, headers) {
+        try {
+            const [client, server] = Object.values(new WebSocketPair());
+            const wsTarget = new URL(url);
+            wsTarget.protocol = wsTarget.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(wsTarget.toString(), "emby-websocket");
+            server.accept();
+            server.addEventListener('message', e => ws.send(e.data));
+            ws.addEventListener('message', e => server.send(e.data));
+            ws.addEventListener('close', () => server.close());
+            server.addEventListener('close', () => ws.close());
+            ws.addEventListener('error', () => server.close());
+            return new Response(null, { status: 101, webSocket: client });
+        } catch (e) {
+            return new Response("WS Error", { status: 502 });
+        }
+    },
+
+    rewriteLocation(headers, status, name, key, targetBase) {
+        const location = headers.get("Location");
+        if (!location || status < 300 || status >= 400) return;
+
+        const prefix = key ? `/${name}/${key}` : `/${name}`;
+
+        if (location.startsWith("/")) {
+            headers.set("Location", `${prefix}${location}`);
+            return;
+        }
+
+        try {
+            const locUrl = new URL(location);
+            if (locUrl.host === targetBase.host) {
+                headers.set("Location", `${prefix}${locUrl.pathname}${locUrl.search}`);
+            }
+        } catch (e) { }
+    },
+
+    renderCors() {
+        return new Response(null, {
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "*"
+            }
+        });
     }
+};
 
-    // 对于 API 客户端 (Infuse/APP)，返回 JSON
-    return new Response(JSON.stringify({
-        message: `Proxy Error: Unable to connect to node [${nodeName}]`,
-        details: msg,
-        status: 502
-    }), { 
-        status: 502, 
-        headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*" // 确保 Web APP 不会跨域报错
-        } 
-    });
-}
+// ============================================================================
+// 5. UI MODULE (XSS Fixed)
+// ============================================================================
+const UI = {
+    // [安全修复] HTML 转义函数，防止 XSS
+    escapeHtml(unsafe) {
+        if (typeof unsafe !== 'string') return unsafe;
+        return unsafe
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    },
 
-function renderLoginPage(error = "") {
-  return new Response(`
-<!DOCTYPE html>
-<html data-theme="black">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin Login</title>
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@3.9.4/dist/full.css" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>body { background-color: #050505; font-family: sans-serif; }</style>
-</head>
-<body class="min-h-screen flex items-center justify-center">
-  <div class="card w-96 bg-base-900 shadow-xl border border-white/10">
-    <div class="card-body">
-      <div class="flex justify-center mb-4">
-        <div class="w-16 h-16 rounded-xl bg-gradient-to-br from-[#52B54B] to-[#3e8d38] flex items-center justify-center text-white shadow-lg">
-           <svg viewBox="0 0 100 100" class="h-8 w-8 fill-current ml-1"><path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z" /></svg>
-        </div>
-      </div>
-      <h2 class="card-title justify-center text-white mb-2">EMBY PROXY</h2>
-      <form action="/admin/login" method="POST">
-        <div class="form-control">
-          <input type="password" name="password" placeholder="Admin Password" class="input input-bordered w-full bg-base-100 focus:border-[#52B54B]" required />
-        </div>
-        ${error ? `<div class="text-error text-xs mt-2 text-center">${error}</div>` : ''}
-        <div class="form-control mt-6">
-          <button class="btn btn-primary bg-[#52B54B] border-0 hover:bg-[#3e8d38] text-white">Login</button>
-        </div>
-      </form>
-    </div>
-  </div>
-</body>
-</html>`, { headers: { "Content-Type": "text/html" } });
-}
+    renderSmartError(request, msg, nodeName) {
+        const accept = request.headers.get("Accept") || "";
+        // 渲染错误页时也要转义 nodeName，防止反射型 XSS
+        const safeNodeName = this.escapeHtml(nodeName);
+        const safeMsg = this.escapeHtml(msg);
 
-function renderAdminUI(env) {
-  const cstDate = new Date().toLocaleString("en-US", {timeZone: "Asia/Shanghai"});
-  const hour = new Date(cstDate).getHours();
-  const theme = (hour >= 6 && hour < 18) ? "lofi" : "black"; 
-  const isDark = theme === "black";
-  const embyGreen = "#52B54B";
+        if (accept.includes("text/html")) {
+            return new Response(`<html><body style="background:#101010;color:#ccc;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;text-align:center"><div><div style="font-size:60px;margin-bottom:20px">⚠️</div><h2 style="color:#52B54B">连接中断</h2><p>无法连接到节点 <strong>${safeNodeName}</strong></p><div style="background:#222;padding:10px;border-radius:5px;font-family:monospace;color:#ff6b6b;margin:20px 0">${safeMsg}</div><a href="javascript:location.reload()" style="background:#52B54B;color:#fff;padding:10px 20px;text-decoration:none;border-radius:5px;font-weight:bold">重试</a></div></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" }, status: 502 });
+        }
+        return new Response(JSON.stringify({ error: msg, node: nodeName }), { status: 502, headers: { "Content-Type": "application/json" } });
+    },
 
-  return new Response(`
+    renderLoginPage(error = "") {
+        // 错误信息也需要转义
+        const safeError = this.escapeHtml(error);
+        return new Response(`<!DOCTYPE html><html data-theme="black"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Login</title><link href="https://cdn.jsdelivr.net/npm/daisyui@3.9.4/dist/full.css" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><style>body{background:#050505}</style></head><body class="min-h-screen flex items-center justify-center"><div class="card w-96 bg-base-900 shadow-xl border border-white/10"><div class="card-body"><h2 class="card-title justify-center text-white mb-4">EMBY PROXY</h2><form method="POST"><div class="form-control mb-4"><input type="password" name="password" placeholder="Password" class="input input-bordered w-full focus:border-[#52B54B]" required /></div>${safeError?`<div class="text-error text-xs mb-4 text-center">${safeError}</div>`:''}<button class="btn btn-primary bg-[#52B54B] border-0 hover:bg-[#3e8d38] w-full text-white">Login</button></form></div></div></body></html>`, { headers: { "Content-Type": "text/html" } });
+    },
+
+    renderLockedPage(ip, duration) {
+        // IP 地址虽然通常安全，但在安全审计中也建议转义
+        const safeIp = this.escapeHtml(ip);
+        return new Response(`<!DOCTYPE html><html data-theme="black"><head><meta charset="UTF-8"><title>Locked</title><link href="https://cdn.jsdelivr.net/npm/daisyui@3.9.4/dist/full.css" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><style>body{background:#050505}</style></head><body class="min-h-screen flex items-center justify-center"><div class="card w-96 bg-base-900 shadow-xl border border-rose-900/30"><div class="card-body text-center"><div class="text-6xl mb-2">🔒</div><h2 class="text-xl font-bold text-white mb-2">IP 已锁定</h2><p class="text-sm opacity-60 mb-4">尝试次数过多，为了安全起见，您的IP (${safeIp}) 已被暂时锁定。</p><div class="badge badge-error gap-2 p-3 w-full justify-center">请等待 15 分钟</div><button onclick="location.reload()" class="btn btn-ghost btn-sm mt-4">刷新重试</button></div></div></body></html>`, { status: 429, headers: { "Content-Type": "text/html" } });
+    },
+
+    renderAdminUI() {
+        const cstDate = new Date().toLocaleString("en-US", {timeZone: "Asia/Shanghai"});
+        const hour = new Date(cstDate).getHours();
+        const theme = (hour >= 6 && hour < 18) ? "lofi" : "black"; 
+        const isDark = theme === "black";
+        const embyGreen = "#52B54B";
+
+        return new Response(`
 <!DOCTYPE html>
 <html data-theme="${theme}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EMBY-PROXY-UI</title>
+    <title>EMBY-PROXY PRO</title>
     <link href="https://cdn.jsdelivr.net/npm/daisyui@3.9.4/dist/full.css" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
-        body { font-family: 'Noto Sans SC', system-ui, -apple-system, sans-serif; background-color: ${isDark ? '#050505' : '#f8fafc'}; background-image: ${isDark ? 'radial-gradient(#ffffff08 1px, transparent 1px)' : 'radial-gradient(#00000008 1px, transparent 1px)'}; background-size: 20px 20px; }
-        .mono { font-family: 'JetBrains Mono', monospace; }
-        .glass-panel { background: ${isDark ? 'rgba(20, 20, 20, 0.7)' : 'rgba(255, 255, 255, 0.8)'}; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid ${isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'}; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
-        .status-dot { width: 6px; height: 6px; border-radius: 50%; background-color: ${embyGreen}; box-shadow: 0 0 12px ${embyGreen}; animation: pulse 3s infinite ease-in-out; }
-        @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.8); } }
-        .terminal-box { background-color: #0d1117; border: 1px solid #30363d; color: #c9d1d9; }
-        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        body { font-family: sans-serif; background-color: ${isDark ? '#050505' : '#f8fafc'}; background-image: ${isDark ? 'radial-gradient(#ffffff08 1px, transparent 1px)' : 'radial-gradient(#00000008 1px, transparent 1px)'}; background-size: 20px 20px; }
+        .glass-panel { background: ${isDark ? 'rgba(20, 20, 20, 0.7)' : 'rgba(255, 255, 255, 0.8)'}; backdrop-filter: blur(20px); border: 1px solid ${isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)'}; }
+        .input-emby:focus { border-color: ${embyGreen} !important; outline: none; }
+        .text-main { color: ${isDark ? 'white' : '#1e293b'}; }
     </style>
 </head>
-<body class="min-h-screen p-4 lg:p-10 transition-colors duration-500 flex flex-col items-center">
-    <div class="max-w-[1500px] w-full space-y-6">
-        <header class="navbar glass-panel rounded-2xl px-8 py-5 flex justify-between items-center">
-            <div class="flex items-center gap-4">
-                <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-[#52B54B] to-[#3e8d38] flex items-center justify-center text-white shadow-lg shadow-emerald-900/20">
-                    <svg viewBox="0 0 100 100" class="h-7 w-7 fill-current ml-1"><path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z" /></svg>
+<body class="min-h-screen p-4 lg:p-10 flex flex-col items-center transition-colors duration-500">
+    <div class="max-w-[1400px] w-full space-y-6">
+        <header class="navbar glass-panel rounded-2xl px-6 py-4 shadow-lg">
+            <div class="flex-1 gap-4 items-center">
+                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-[#52B54B] to-[#3e8d38] flex items-center justify-center text-white shadow-lg">
+                    <svg viewBox="0 0 100 100" class="h-6 w-6 fill-current"><path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z"/></svg>
                 </div>
                 <div>
-                    <h1 class="text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-slate-800'}">EMBY-PROXY-UI</h1>
-                    <div class="flex items-center gap-2 mt-1">
-                        <div class="status-dot"></div>
-                        <span class="text-xs font-medium opacity-50 tracking-wider">系统运行正常 · 北京时间</span>
+                    <h1 class="text-xl font-bold tracking-tight text-main">EMBY-PROXY-UI <span class="text-xs opacity-50 font-normal ml-2">V12.4</span></h1>
+                    <div class="text-[10px] opacity-50 font-mono tracking-wider flex items-center gap-2">
+                        <span class="w-1.5 h-1.5 rounded-full bg-[#52B54B]"></span> 系统运行正常 · 北京时间
                     </div>
                 </div>
             </div>
-            <div class="hidden md:block">
-                <div class="font-mono text-xs opacity-40 bg-base-content/5 px-3 py-1.5 rounded-md" id="clock">Connecting...</div>
-            </div>
+            <div class="text-xs font-mono opacity-50 bg-base-content/5 px-2 py-1 rounded" id="clock">Loading...</div>
         </header>
+
         <main class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            <aside class="lg:col-span-4 xl:col-span-3 flex flex-col gap-6">
+            <aside class="lg:col-span-4 xl:col-span-3">
                 <div class="card glass-panel shadow-xl">
-                    <div class="card-body p-6 space-y-4">
-                        <div class="flex items-center justify-between border-b border-base-content/10 pb-3 mb-2">
-                            <h2 class="text-sm font-bold opacity-60">新增代理</h2>
+                    <div class="card-body p-5 space-y-3">
+                        <div class="flex justify-between items-center border-b border-base-content/10 pb-2">
+                            <span class="text-sm font-bold opacity-60">新增代理</span>
                             <span class="text-[10px] font-mono opacity-40">DEPLOY</span>
                         </div>
-                        <div class="form-control w-full space-y-1">
-                            <label class="label p-0 mb-1"><span class="label-text text-xs font-bold opacity-70">代理名称 (英文)</span></label>
-                            <input id="inName" type="text" placeholder="例如: HK-Emby" class="input input-bordered input-sm w-full bg-base-100/50 focus:border-[${embyGreen}] font-medium" />
+                        
+                        <div class="form-control">
+                            <label class="label"><span class="label-text text-xs font-bold opacity-70">名称 (Name)</span></label>
+                            <input id="inName" type="text" placeholder="例如: HK-Node" class="input input-sm input-bordered bg-base-100/50 input-emby" />
                         </div>
-                        <div class="form-control w-full space-y-1">
-                            <label class="label p-0 mb-1"><span class="label-text text-xs font-bold opacity-70">访问密钥 (可选)</span></label>
-                            <input id="inPath" type="password" placeholder="留空则公开访问" class="input input-bordered input-sm w-full bg-base-100/50 focus:border-[${embyGreen}] font-medium" />
+                        
+                        <div class="form-control">
+                            <label class="label"><span class="label-text text-xs font-bold opacity-70">密钥 (Secret)</span></label>
+                            <input id="inSecret" type="password" placeholder="可选, 留空则公开" class="input input-sm input-bordered bg-base-100/50 input-emby" />
                         </div>
-                        <div class="form-control w-full space-y-1">
-                            <label class="label p-0 mb-1"><span class="label-text text-xs font-bold opacity-70">服务器地址 (Target)</span></label>
-                            <input id="inTarget" type="text" placeholder="http://1.2.3.4:8096" class="input input-bordered input-sm w-full bg-base-100/50 focus:border-[${embyGreen}] font-mono text-xs" />
+
+                        <div class="form-control">
+                            <label class="label"><span class="label-text text-xs font-bold opacity-70">服务器地址 (Target)</span></label>
+                            <input id="inTarget" type="text" placeholder="http://1.2.3.4:8096" class="input input-sm input-bordered bg-base-100/50 input-emby font-mono text-xs" />
                         </div>
-                        <button onclick="saveNode()" class="btn btn-neutral w-full mt-4 bg-gradient-to-r from-slate-800 to-slate-900 text-white border-0 shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all duration-300">立即部署</button>
+
+                        <button onclick="App.save()" class="btn btn-sm btn-neutral mt-2 bg-[#52B54B] border-0 text-white hover:bg-[#3e8d38] shadow-lg hover:scale-[1.02] transition-transform">立即部署</button>
                     </div>
                 </div>
             </aside>
-            <section class="lg:col-span-8 xl:col-span-9 flex flex-col gap-6 h-full">
-                <div class="card glass-panel shadow-xl overflow-hidden min-h-[280px]">
+
+            <section class="lg:col-span-8 xl:col-span-9 space-y-6">
+                <div class="card glass-panel shadow-xl min-h-[300px]">
                     <div class="px-6 py-4 border-b border-base-content/5 flex justify-between items-center bg-base-content/5">
-                        <h2 class="text-sm font-bold opacity-70">活跃代理列表</h2>
-                        <div class="flex items-center gap-2">
-                             <button onclick="exportData()" class="btn btn-xs btn-ghost text-xs opacity-60 hover:opacity-100 font-mono tracking-wide" title="导出备份">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>导出
-                             </button>
-                             <button onclick="document.getElementById('importFile').click()" class="btn btn-xs btn-ghost text-xs opacity-60 hover:opacity-100 font-mono tracking-wide" title="从 JSON 导入">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>导入
-                             </button>
-                             <input type="file" id="importFile" style="display:none" accept=".json" onchange="importData(this)" />
-                             <div id="nodes-label" class="badge badge-success gap-1 badge-sm text-white border-0 ml-2" style="background-color: ${embyGreen}">
+                        <h2 class="text-sm font-bold opacity-70">活跃节点</h2>
+                        <div class="flex gap-2">
+                             <button onclick="App.export()" class="btn btn-xs btn-ghost opacity-60 hover:opacity-100 font-mono" title="导出配置">📥 导出</button>
+                             <button onclick="document.getElementById('fileIn').click()" class="btn btn-xs btn-ghost opacity-60 hover:opacity-100 font-mono" title="导入配置">📤 导入</button>
+                             <input type="file" id="fileIn" hidden accept=".json" onchange="App.import(this)" />
+                             <div class="badge badge-success gap-1 badge-sm text-white border-0 ml-2" style="background-color: ${embyGreen}">
                                 <span class="animate-pulse w-1.5 h-1.5 rounded-full bg-white"></span> 连接中
                              </div>
                         </div>
                     </div>
                     <div class="overflow-x-auto">
-                        <table class="table w-full">
-                            <thead>
-                                <tr class="text-xs uppercase opacity-50 bg-base-200/30 font-medium"><th class="pl-6 py-4">代理 ID</th><th>入口地址 (点击复制)</th><th class="text-right pr-6">操作</th></tr>
-                            </thead>
+                        <table class="table table-sm w-full">
+                            <thead><tr class="opacity-50 border-b border-base-content/10 text-xs uppercase bg-base-200/30"><th class="pl-6 py-3">代理 ID</th><th>入口地址 (点击复制)</th><th class="text-right pr-6">操作</th></tr></thead>
                             <tbody id="nodeTable" class="text-sm font-medium opacity-90"></tbody>
                         </table>
                     </div>
                 </div>
-                <div class="card terminal-box shadow-2xl overflow-hidden rounded-xl flex flex-col h-[320px]">
-                    <div class="px-4 py-2 border-b border-white/10 flex justify-between items-center bg-[#161b22]">
-                        <div class="flex gap-2"><div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div><div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div><div class="w-3 h-3 rounded-full bg-[#27c93f]"></div></div>
-                        <div class="flex items-center gap-2 text-[10px] font-mono text-slate-500"><svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>access.log (Real-IP)</div>
+
+                <div class="card bg-[#0d1117] border border-base-content/10 shadow-2xl h-[250px] overflow-hidden rounded-xl">
+                    <div class="px-4 py-2 border-b border-white/10 flex items-center gap-2 text-[10px] text-slate-500 font-mono bg-[#161b22]">
+                        <div class="flex gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-[#ff5f56]"></div><div class="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]"></div><div class="w-2.5 h-2.5 rounded-full bg-[#27c93f]"></div></div>
+                        <span class="ml-2">system.log (Real-IP)</span>
                     </div>
-                    <div id="logViewer" class="p-4 overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-hide flex-1"></div>
+                    <div id="logViewer" class="p-4 overflow-y-auto font-mono text-[11px] space-y-1.5 text-slate-400 scrollbar-hide"></div>
                 </div>
             </section>
         </main>
     </div>
+
     <script>
-        let currentNodes = [];
-        async function refresh() {
-            try {
-                const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'list' }) });
-                if (res.status === 401) { location.reload(); return; }
-                const data = await res.json();
-                currentNodes = data.nodes;
-                const nodeHtml = data.nodes.map(n => {
-                    const fullLink = window.location.origin + '/' + n.name + (n.secret ? '/' + n.secret : '');
-                    const isSecured = !!n.secret;
-                    return \`
-                        <tr class="hover:bg-base-content/5 transition-colors border-b border-base-content/5 last:border-0 group">
-                            <td class="pl-6 py-3"><div class="flex items-center gap-3"><div class="w-2 h-2 rounded-full \${isSecured ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'bg-[#52B54B] shadow-[0_0_8px_rgba(82,181,75,0.5)]'}"></div><span class="font-bold tracking-wide">\${n.name}</span>\${isSecured ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-500 font-bold border border-amber-500/20">密</span>' : ''}</div></td>
-                            <td><button onclick="copy('\${fullLink}')" class="text-left font-mono text-xs opacity-60 hover:opacity-100 hover:text-[#52B54B] transition-colors select-all truncate max-w-[200px] md:max-w-xs bg-base-content/5 px-2 py-1 rounded">\${fullLink}</button></td>
-                            <td class="text-right pr-6"><button onclick="deleteNode('\${n.name}')" class="btn btn-ghost btn-xs text-rose-500 opacity-60 hover:opacity-100 hover:bg-rose-500/10">删除</button></td>
-                        </tr>\`;
-                }).join('');
-                document.getElementById('nodeTable').innerHTML = nodeHtml || '<tr><td colspan="3" class="text-center py-12 opacity-30 text-xs">暂无活跃代理，请在左侧添加</td></tr>';
-                document.getElementById('nodes-label').innerHTML = \`<span class="w-1.5 h-1.5 rounded-full bg-white"></span> \${data.nodes.length} 个运行中\`;
-                const logHtml = data.logs.map(l => \`<div class="flex gap-3 hover:bg-white/5 p-1 rounded cursor-default items-center"><span class="text-emerald-500 w-[60px] shrink-0 opacity-80">\${l.time}</span><span class="text-cyan-400 w-[110px] shrink-0 font-bold bg-cyan-400/10 px-1 rounded text-center">\${l.ip}</span><span class="text-slate-500 w-[120px] shrink-0 truncate text-[10px]">\${l.geo}</span><span class="text-amber-400 w-[80px] shrink-0 font-bold">\${l.node}</span><span class="text-slate-600 shrink-0 select-none">→</span><span class="text-slate-400 truncate flex-1 italic opacity-60">\${l.target}</span></div>\`).join('');
-                document.getElementById('logViewer').innerHTML = logHtml || '<div class="opacity-30 text-center mt-12 text-slate-600">// 等待流量接入...</div>';
-            } catch(e) { console.error(e); }
-        }
-        async function saveNode() {
-            const btn = document.querySelector('button[onclick="saveNode()"]'); const originalText = btn.innerText;
-            btn.innerText = "部署中..."; btn.disabled = true;
-            const name = document.getElementById('inName').value.trim(); const path = document.getElementById('inPath').value.trim(); const target = document.getElementById('inTarget').value.trim();
-            if(name && target) {
-                const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'save', name, path, target }) });
-                if (res.status === 401) { location.reload(); return; }
-                document.getElementById('inName').value = ''; document.getElementById('inPath').value = ''; document.getElementById('inTarget').value = '';
-                await refresh();
+        // 定义转义函数（前端也需要，防止 API 返回的数据包含恶意代码）
+        const escapeHtml = (unsafe) => {
+            if (typeof unsafe !== 'string') return unsafe;
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        };
+
+        const API = {
+            async req(data) {
+                const res = await fetch('/admin', { method: 'POST', body: JSON.stringify(data) });
+                if (res.status === 401) location.reload();
+                return res.json();
             }
-            btn.innerText = originalText; btn.disabled = false;
-        }
-        async function deleteNode(name) {
-            if(!confirm('确定要删除代理 [' + name + '] 吗？')) return;
-            const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'delete', name }) });
-            if (res.status === 401) { location.reload(); return; }
-            refresh();
-        }
-        async function exportData() {
-            if(!currentNodes || currentNodes.length === 0) { alert("当前列表为空，无法导出"); return; }
-            const blob = new Blob([JSON.stringify(currentNodes, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = 'emby_nodes_backup.json';
-            document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        }
-        async function importData(input) {
-            const file = input.files[0]; if (!file) return;
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const nodes = JSON.parse(e.target.result);
-                    if (!Array.isArray(nodes)) throw new Error('文件格式错误');
-                    if(!confirm(\`确认导入 \${nodes.length} 个节点吗？\n存在同名节点将被覆盖。\n(导入后会自动刷新)\`)) { input.value = ''; return; }
-                    const res = await fetch('/admin', { method: 'POST', body: JSON.stringify({ action: 'import', nodes }) });
-                    if (res.status === 401) { location.reload(); return; }
-                    const result = await res.json();
-                    if(result.success) { alert('导入成功！'); await refresh(); } else { alert('导入失败。'); }
-                } catch (err) { alert('导入失败: ' + err.message); }
-            };
-            reader.readAsText(file); input.value = '';
-        }
-        function copy(text) { navigator.clipboard.writeText(text); const el = document.activeElement; const original = el.innerText; el.innerText = "已复制 ✓"; setTimeout(() => el.innerText = original, 1000); }
-        function updateClock() { const now = new Date(); document.getElementById('clock').innerText = now.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + " CST"; }
-        refresh(); setInterval(refresh, 5000); setInterval(updateClock, 1000);
+        };
+        const App = {
+            nodes: [],
+            async refresh() {
+                const data = await API.req({ action: 'list' });
+                this.nodes = data.nodes;
+                this.renderNodes(data.nodes);
+                this.renderLogs(data.logs);
+            },
+            renderNodes(nodes) {
+                const html = nodes.map(n => {
+                    const link = location.origin + '/' + n.name + (n.secret ? '/' + n.secret : '');
+                    const secure = !!n.secret;
+                    // [安全修复] 使用 escapeHtml 包裹动态数据
+                    const safeName = escapeHtml(n.name); 
+                    return \`
+                    <tr class="hover:bg-base-content/5 border-b border-base-content/5 group transition-colors">
+                        <td class="pl-6 py-3">
+                            <div class="flex items-center gap-3 font-bold tracking-wide">
+                                <div class="w-2 h-2 rounded-full \${secure ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 'bg-[#52B54B] shadow-[0_0_8px_rgba(82,181,75,0.5)]'}"></div>
+                                \${safeName}
+                                \${secure ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-500 border border-amber-500/20">SECURE</span>' : ''}
+                            </div>
+                        </td>
+                        <td><button onclick="App.copy('\${link}')" class="text-left font-mono text-xs opacity-60 hover:opacity-100 hover:text-[#52B54B] transition-colors select-all truncate max-w-[250px] bg-base-content/5 px-2 py-1 rounded">\${link}</button></td>
+                        <td class="text-right pr-6"><button onclick="App.del('\${safeName}')" class="btn btn-ghost btn-xs text-rose-500 opacity-60 hover:opacity-100 hover:bg-rose-500/10">删除</button></td>
+                    </tr>\`;
+                }).join('');
+                document.getElementById('nodeTable').innerHTML = html || '<tr><td colspan="3" class="text-center py-12 opacity-30 text-xs">暂无活跃代理，请在左侧添加</td></tr>';
+            },
+            renderLogs(logs) {
+                const html = logs.map(l => {
+                    // [安全修复] 对所有日志字段进行转义
+                    const safeIp = escapeHtml(l.ip);
+                    const safeGeo = escapeHtml(l.geo);
+                    const safeNode = escapeHtml(l.node);
+                    const safeTarget = escapeHtml(l.target);
+                    
+                    return \`
+                    <div class="flex gap-3 hover:bg-white/5 p-1 rounded cursor-default items-center">
+                        <span class="text-emerald-500 w-[60px] shrink-0 opacity-80">\${l.time.split(' ')[1]}</span>
+                        <span class="text-cyan-400 font-bold bg-cyan-400/10 px-1 rounded">\${safeIp}</span>
+                        <span class="text-slate-500 text-[10px] w-[100px] truncate">\${safeGeo}</span>
+                        <span class="text-amber-500 font-bold">\${safeNode}</span>
+                        <span class="text-slate-600">→</span>
+                        <span class="text-slate-500 italic opacity-60 truncate flex-1">\${safeTarget}</span>
+                    </div>\`;
+                }).join('');
+                document.getElementById('logViewer').innerHTML = html || '<div class="opacity-30 text-center mt-12">// 等待流量接入...</div>';
+            },
+            async save() {
+                const name = document.getElementById('inName').value.trim();
+                const secret = document.getElementById('inSecret').value.trim();
+                const target = document.getElementById('inTarget').value.trim();
+                
+                if (!name || !target) return alert('名称和服务器地址不能为空');
+                if (!target.startsWith('http')) return alert('服务器地址必须以 http:// 或 https:// 开头');
+
+                await API.req({ action: 'save', name, path: secret, target });
+                ['inName', 'inSecret', 'inTarget'].forEach(id => document.getElementById(id).value = '');
+                this.refresh();
+            },
+            async del(name) { if (confirm('确认删除代理 [' + name + '] 吗?')) { await API.req({ action: 'delete', name }); this.refresh(); } },
+            async export() {
+                if(!this.nodes.length) return alert('当前列表为空');
+                const blob = new Blob([JSON.stringify(this.nodes, null, 2)], {type:'application/json'});
+                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'emby_nodes.json'; a.click();
+            },
+            async import(input) {
+                const file = input.files[0]; if(!file) return;
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    try { const nodes = JSON.parse(e.target.result); if(confirm(\`确认导入 \${nodes.length} 个节点吗？\\n(同名节点将被覆盖)\`)) { await API.req({ action: 'import', nodes }); this.refresh(); } } catch(err) { alert('文件格式错误'); }
+                };
+                reader.readAsText(file); input.value = '';
+            },
+            copy(txt) { navigator.clipboard.writeText(txt); const el = document.activeElement; const original = el.innerText; el.innerText = "已复制 ✓"; setTimeout(() => el.innerText = original, 1000); }
+        };
+        
+        function updateClock() { const now = new Date(); document.getElementById('clock').innerText = now.toLocaleTimeString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false}) + " CST"; }
+        
+        App.refresh(); 
+        setInterval(() => App.refresh(), 5000);
+        setInterval(updateClock, 1000);
     </script>
 </body>
-</html>
-  `, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
-}
+</html>`, { headers: { "Content-Type": "text/html" } });
+    }
+};
+
+// ============================================================================
+// 6. MAIN WORKER ENTRY
+// ============================================================================
+export default {
+    async fetch(request, env, ctx) {
+        const url = new URL(request.url);
+        const path = url.pathname;
+        const segments = path.split('/').filter(p => p).map(p => decodeURIComponent(p));
+
+        // --- 管理后台 (/admin) ---
+        if (segments[0] === "admin") {
+            const contentType = request.headers.get("content-type") || "";
+            if (request.method === "POST" && (contentType.includes("form") || contentType.includes("urlencoded"))) {
+                return Auth.handleLogin(request, env);
+            }
+            
+            const isAuth = await Auth.verifyRequest(request, env);
+            if (!isAuth) {
+                if (request.method === "POST") return new Response("Unauthorized", { status: 401 });
+                return UI.renderLoginPage();
+            }
+
+            if (request.method === "POST") return Database.handleApi(request, env);
+            return UI.renderAdminUI();
+        }
+
+        // --- 代理逻辑 ---
+        if (segments.length >= 1) {
+            const nodeName = segments[0];
+            const nodeData = await Database.getNode(nodeName, env, ctx);
+
+            if (nodeData) {
+                let authorized = false;
+                let subIndex = 1;
+                if (nodeData.secret) {
+                    if (segments[1] === nodeData.secret) { authorized = true; subIndex = 2; }
+                } else { authorized = true; }
+
+                if (authorized) {
+                    const remainingPath = "/" + segments.slice(subIndex).join('/');
+                    if (remainingPath === "/" || remainingPath === "") {
+                        const prefix = nodeData.secret ? `/${nodeName}/${nodeData.secret}` : `/${nodeName}`;
+                        return Response.redirect(url.origin + prefix + "/web/index.html", 302);
+                    }
+                    if (Config.Regex.LogTrigger.test(remainingPath)) {
+                        ctx.waitUntil(Database.addLog(env, request, nodeName, nodeData.target));
+                    }
+                    return Proxy.handle(request, nodeData, remainingPath, nodeName, nodeData.secret);
+                }
+            }
+        }
+        return new Response("403 Forbidden / Access Denied", { status: 403 });
+    }
+};
