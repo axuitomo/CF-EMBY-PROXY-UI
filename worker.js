@@ -1,5 +1,6 @@
 //EMBY-PROXY-PRO V13.1 (Simplicity Edition)
 //放弃原先“每个节点一个 KV Key”的存储方式，改为使用一个 KV Key（例如 system:nodes）存储所有节点的配置 JSON。
+//修改UI界面版本号
 
 // ============================================================================
 // 1. CONFIG MODULE
@@ -433,7 +434,7 @@ const UI = {
                     <svg viewBox="0 0 100 100" class="h-6 w-6 fill-current"><path d="M84.3,44.4L24.7,4.8c-4.4-2.9-10.3,0.2-10.3,5.6v79.2c0,5.3,5.9,8.5,10.3,5.6l59.7-39.6C88.4,53.1,88.4,47.1,84.3,44.4z"/></svg>
                 </div>
                 <div>
-                    <h1 class="text-xl font-bold tracking-tight text-main">EMBY-PROXY-UI <span class="text-xs opacity-50 font-normal ml-2">V12.4</span></h1>
+                    <h1 class="text-xl font-bold tracking-tight text-main">EMBY-PROXY-UI <span class="text-xs opacity-50 font-normal ml-2">V13.1</span></h1>
                     <div class="text-[10px] opacity-50 font-mono tracking-wider flex items-center gap-2">
                         <span class="w-1.5 h-1.5 rounded-full bg-[#52B54B]"></span> 系统运行正常 · 北京时间
                     </div>
