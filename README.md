@@ -1,4 +1,4 @@
-# CF-EMBY-PROXY-UI
+# CF-EMBY-PROXY-UI 最新版本：V16.0
 
 ## 描述
 
