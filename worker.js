@@ -1,7 +1,7 @@
-// EMBY-PROXY-ULTIMATE V16.8
-// [V16.8] Personalization+: Accent Colors, Border Radius, Theme Presets
-// [V16.7] UI Refactor: Feature Toggles, Restore Defaults
-// 核心特性：L1 内存级缓存 | 零延迟 | 稳健 JWT | 极致资源优化 | 个性化主题 | 即时预览
+// EMBY-PROXY-ULTIMATE V17.2 (BugFix)
+// [V17.2] 紧急修复: 前端 escapeHtml 报错
+// [V17.1] 修复: 列表空白 (增加KV读取容错)
+// [V17] 特性: 动态代理计算 | 旧数据兼容 | 极速缓存
 
 // ============================================================================
 // 0. GLOBAL CONFIG & STATE
@@ -32,15 +32,22 @@ const Config = {
 // 1. AUTH MODULE
 // ============================================================================
 const Auth = {
+    // 辅助：获取 KV (兼容 ENI_KV 和其他常见命名)
+    getKV(env) {
+        return env.ENI_KV || env.KV || env.EMBY_KV || env.EMBY_PROXY;
+    },
+
     async handleLogin(request, env) {
         const ip = request.headers.get("cf-connecting-ip") || "unknown";
+        const kv = this.getKV(env);
+
         try {
             const formData = await request.formData();
             const password = (formData.get("password") || "").trim();
             const secret = env.JWT_SECRET || env.ADMIN_PASS;
 
             if (password === env.ADMIN_PASS) {
-                if (env.ENI_KV) env.ENI_KV.delete(`fail:${ip}`).catch(() => { });
+                if (kv) kv.delete(`fail:${ip}`).catch(() => { });
                 const jwt = await this.generateJwt(secret, Config.Defaults.JwtExpiry);
                 return new Response("Login Success", {
                     status: 302,
@@ -52,12 +59,12 @@ const Auth = {
             }
 
             let count = 0;
-            if (env.ENI_KV) {
+            if (kv) {
                 const failKey = `fail:${ip}`;
-                const prev = await env.ENI_KV.get(failKey);
+                const prev = await kv.get(failKey);
                 count = prev ? parseInt(prev) + 1 : 1;
                 if (count <= Config.Defaults.MaxLoginAttempts) {
-                    env.ENI_KV.put(failKey, count.toString(), { expirationTtl: Config.Defaults.LoginLockDuration }).catch(() => { });
+                    kv.put(failKey, count.toString(), { expirationTtl: Config.Defaults.LoginLockDuration }).catch(() => { });
                 }
             }
             if (count >= Config.Defaults.MaxLoginAttempts) return UI.renderLockedPage(ip);
@@ -107,14 +114,20 @@ const Auth = {
 };
 
 // ============================================================================
-// 2. DATABASE MODULE
+// 2. DATABASE MODULE (Enhanced Robustness)
 // ============================================================================
 const Database = {
     PREFIX: "node:",
     CONFIG_KEY: "sys:theme",
 
+    getKV(env) {
+        return Auth.getKV(env);
+    },
+
     async getNode(nodeName, env, ctx) {
-        if (!env.ENI_KV) return null;
+        const kv = this.getKV(env);
+        if (!kv) return null;
+
         const now = Date.now();
         const mem = GLOBALS.NodeCache.get(nodeName);
         if (mem && mem.exp > now) return mem.data;
@@ -129,7 +142,7 @@ const Database = {
         }
 
         try {
-            const nodeData = await env.ENI_KV.get(`${this.PREFIX}${nodeName}`, { type: "json" });
+            const nodeData = await kv.get(`${this.PREFIX}${nodeName}`, { type: "json" });
             if (nodeData) {
                 const jsonStr = JSON.stringify(nodeData);
                 const cacheResp = new Response(jsonStr, {
@@ -144,7 +157,9 @@ const Database = {
     },
 
     async handleApi(request, env) {
-        if (!env.ENI_KV) return new Response(JSON.stringify({ error: "KV Not Bound" }), { status: 500 });
+        const kv = this.getKV(env);
+        if (!kv) return new Response(JSON.stringify({ error: "严重错误: 无法连接数据库(KV)。请检查Cloudflare后台变量绑定是否为 ENI_KV" }), { status: 500 });
+        
         const data = await request.json();
         const cache = caches.default;
 
@@ -157,7 +172,7 @@ const Database = {
             case "loadConfig":
                 let config = GLOBALS.ConfigCache;
                 if (!config) {
-                    config = await env.ENI_KV.get(this.CONFIG_KEY, { type: "json" }) || {};
+                    config = await kv.get(this.CONFIG_KEY, { type: "json" }) || {};
                     GLOBALS.ConfigCache = config;
                 }
                 return new Response(JSON.stringify(config));
@@ -169,7 +184,7 @@ const Database = {
                             return new Response(JSON.stringify({ error: "Invalid File Type" }), { status: 400 });
                         }
                     }
-                    await env.ENI_KV.put(this.CONFIG_KEY, JSON.stringify(data.config));
+                    await kv.put(this.CONFIG_KEY, JSON.stringify(data.config));
                     GLOBALS.ConfigCache = data.config;
                 }
                 return new Response(JSON.stringify({ success: true }));
@@ -182,9 +197,9 @@ const Database = {
                         const val = {
                             secret: n.secret || n.path || "",
                             target: n.target,
-                            tag: n.tag || ""
+                            tag: n.tag || "" 
                         };
-                        await env.ENI_KV.put(`${this.PREFIX}${n.name}`, JSON.stringify(val));
+                        await kv.put(`${this.PREFIX}${n.name}`, JSON.stringify(val));
                         await invalidate(n.name);
                     }
                 }
@@ -192,7 +207,7 @@ const Database = {
 
             case "delete":
                 if (data.name) {
-                    await env.ENI_KV.delete(`${this.PREFIX}${data.name}`);
+                    await kv.delete(`${this.PREFIX}${data.name}`);
                     await invalidate(data.name);
                 }
                 return new Response(JSON.stringify({ success: true }));
@@ -200,21 +215,30 @@ const Database = {
             case "batchDelete":
                 if (Array.isArray(data.names)) {
                     for (const name of data.names) {
-                        await env.ENI_KV.delete(`${this.PREFIX}${name}`);
+                        await kv.delete(`${this.PREFIX}${name}`);
                         await invalidate(name);
                     }
                 }
                 return new Response(JSON.stringify({ success: true }));
 
             case "list":
-                const list = await env.ENI_KV.list({ prefix: this.PREFIX });
-                const nodesList = await Promise.all(list.keys.map(async (key) => {
-                    const name = key.name.replace(this.PREFIX, "");
-                    let val = GLOBALS.NodeCache.get(name)?.data;
-                    if (!val) val = await env.ENI_KV.get(key.name, { type: "json" });
-                    return val ? { name, ...val } : null;
-                }));
-                return new Response(JSON.stringify({ nodes: nodesList.filter(n => n) }));
+                try {
+                    const list = await kv.list({ prefix: this.PREFIX });
+                    const nodesList = await Promise.all(list.keys.map(async (key) => {
+                        try {
+                            const name = key.name.replace(this.PREFIX, "");
+                            let val = GLOBALS.NodeCache.get(name)?.data;
+                            if (!val) val = await kv.get(key.name, { type: "json" });
+                            return val ? { name, ...val } : null;
+                        } catch (e) {
+                            console.error(`Error reading key ${key.name}:`, e);
+                            return null;
+                        }
+                    }));
+                    return new Response(JSON.stringify({ nodes: nodesList.filter(n => n) }));
+                } catch (e) {
+                    return new Response(JSON.stringify({ error: `读取列表失败: ${e.message}` }), { status: 500 });
+                }
 
             default: return new Response("Invalid Action", { status: 400 });
         }
@@ -330,13 +354,12 @@ const Proxy = {
 };
 
 // ============================================================================
-// 4. UI MODULE
+// 4. UI MODULE (V17.2 Fixed)
 // ============================================================================
 const UI = {
     getHead(title) {
         const isLight = GLOBALS.isDaytimeCN();
-        // [V16.8] Added variables for accent color (--a) and radius (--radius)
-        return `<!DOCTYPE html><html class="${isLight ? 'light' : ''}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>:root{--bg:#111;--p:rgba(34,34,34,var(--bg-op,1));--b:rgba(51,51,51,var(--bg-op,1));--t:#eee;--ts:#888;--a:#22c55e;--ah:#16a34a;--e:#ef4444;--blue:#3b82f6;--blur:0px;--mask:rgba(0,0,0,0);--shadow:none;--radius:8px}html.light{--bg:#f5f5f5;--p:rgba(255,255,255,var(--bg-op,1));--b:rgba(224,224,224,var(--bg-op,1));--t:#333;--ts:#666;--a:#16a34a;--ah:#15803d}/* Text Theme Overrides */html.text-dark{--t:#111 !important;--ts:#444 !important}html.text-light{--t:#fff !important;--ts:#ccc !important}body{background:var(--bg);color:var(--t);font-family:system-ui,-apple-system,sans-serif;margin:0;display:flex;flex-direction:column;min-height:100vh;text-shadow:var(--shadow)}/* Background Overlay Mask */body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:var(--mask);pointer-events:none;z-index:-1}input,button,textarea,select{transition:all .3s}.panel{background:var(--p);border:1px solid var(--b);border-radius:var(--radius);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur))}.btn{cursor:pointer;border:none;border-radius:var(--radius);font-weight:700}.btn-p{background:var(--a);color:#fff}.btn-p:hover{filter:brightness(1.1)}.btn-icon{padding:5px;background:transparent;color:var(--ts)}.btn-icon:hover{color:var(--t)}.lang-btn{cursor:pointer;padding:5px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--t)}.lang-btn:hover{background:var(--b)}.gh-icon{color:var(--ts);transition:color .3s}.gh-icon:hover{color:var(--t)}.tag-badge{font-size:10px;padding:2px 6px;border-radius:var(--radius);font-weight:bold;margin-left:6px;display:inline-block}.tag-blue{background:rgba(59,130,246,0.2);color:var(--blue)}.tag-sec{background:rgba(239,68,68,0.2);color:var(--e)}.scroll-area{flex:1;min-height:0;overflow-y:auto;scrollbar-width:thin}.scroll-area::-webkit-scrollbar{width:6px}.scroll-area::-webkit-scrollbar-thumb{background:var(--b);border-radius:3px}input[type=checkbox]:not(.toggle-input){accent-color:var(--a);cursor:pointer;width:16px;height:16px}tr.selected{background:rgba(var(--a-rgb, 34,197,94), 0.1)}.settings-btn{position:fixed;bottom:20px;left:20px;background:var(--p);border:1px solid var(--b);color:var(--t);border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.2);z-index:100}.settings-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--p);border:1px solid var(--b);border-radius:var(--radius);padding:20px;width:90%;max-width:400px;z-index:101;box-shadow:0 10px 30px rgba(0,0,0,0.5);display:none;max-height:85vh;overflow-y:auto}.settings-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:100;display:none}.s-group{margin-bottom:15px}.s-label{display:block;margin-bottom:5px;font-size:12px;color:var(--ts)}input[type=range]{-webkit-appearance:none;width:100%;background:transparent}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:16px;width:16px;border-radius:50%;background:var(--a);cursor:pointer;margin-top:-6px;box-shadow:0 1px 3px rgba(0,0,0,0.3)}input[type=range]::-webkit-slider-runnable-track{width:100%;height:4px;cursor:pointer;background:var(--b);border-radius:2px}select, input[type=text], input[type=password]{width:100%;padding:8px;background:rgba(255,255,255,0.05);border:1px solid var(--b);color:var(--t);border-radius:var(--radius)}hr{border:0;border-top:1px solid var(--b);margin:15px 0}.switch-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding:5px 0}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:var(--b);transition:.4s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;left:3px;bottom:3px;background-color:#fff;transition:.4s;border-radius:50%}input:checked+.slider{background-color:var(--a)}input:checked+.slider:before{transform:translateX(16px)}.s-section{display:none;padding:12px;background:rgba(0,0,0,0.03);border-radius:var(--radius);margin-bottom:15px;border:1px solid var(--b)}.s-section.active{display:block}.color-picker-wrapper{display:flex;align-items:center;gap:10px}input[type=color]{-webkit-appearance:none;border:none;width:30px;height:30px;padding:0;overflow:hidden;border-radius:50%;cursor:pointer;background:none}input[type=color]::-webkit-color-swatch-wrapper{padding:0}input[type=color]::-webkit-color-swatch{border:1px solid var(--b);border-radius:50%}</style></head>`;
+        return `<!DOCTYPE html><html class="${isLight ? 'light' : ''}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>:root{--bg:#111;--p:rgba(34,34,34,var(--bg-op,1));--b:rgba(51,51,51,var(--bg-op,1));--t:#eee;--ts:#888;--a:#22c55e;--ah:#16a34a;--e:#ef4444;--blue:#3b82f6;--blur:0px;--mask:rgba(0,0,0,0);--shadow:none;--radius:8px}html.light{--bg:#f5f5f5;--p:rgba(255,255,255,var(--bg-op,1));--b:rgba(224,224,224,var(--bg-op,1));--t:#333;--ts:#666;--a:#16a34a;--ah:#15803d}html.text-dark{--t:#111 !important;--ts:#444 !important}html.text-light{--t:#fff !important;--ts:#ccc !important}body{background:var(--bg);color:var(--t);font-family:system-ui,-apple-system,sans-serif;margin:0;display:flex;flex-direction:column;min-height:100vh;text-shadow:var(--shadow)}body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:var(--mask);pointer-events:none;z-index:-1}input,button,textarea,select{transition:all .3s}.panel{background:var(--p);border:1px solid var(--b);border-radius:var(--radius);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur))}.btn{cursor:pointer;border:none;border-radius:var(--radius);font-weight:700}.btn-p{background:var(--a);color:#fff}.btn-p:hover{filter:brightness(1.1)}.btn-icon{cursor:pointer;border:none;padding:5px;background:transparent;color:var(--ts)}.btn-icon:hover{color:var(--t)}.lang-btn{cursor:pointer;padding:5px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--t)}.lang-btn:hover{background:var(--b)}.gh-icon{color:var(--ts);transition:color .3s}.gh-icon:hover{color:var(--t)}.tag-badge{font-size:10px;padding:2px 6px;border-radius:var(--radius);font-weight:bold;margin-left:6px;display:inline-block}.tag-blue{background:rgba(59,130,246,0.2);color:var(--blue)}.tag-sec{background:rgba(239,68,68,0.2);color:var(--e)}.scroll-area{flex:1;min-height:0;overflow-y:auto;scrollbar-width:thin}.scroll-area::-webkit-scrollbar{width:6px}.scroll-area::-webkit-scrollbar-thumb{background:var(--b);border-radius:3px}input[type=checkbox]:not(.toggle-input){accent-color:var(--a);cursor:pointer;width:16px;height:16px}tr.selected{background:rgba(var(--a-rgb, 34,197,94), 0.1)}.settings-btn{position:fixed;bottom:20px;left:20px;background:var(--p);border:1px solid var(--b);color:var(--t);border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.2);z-index:100}.settings-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--p);border:1px solid var(--b);border-radius:var(--radius);padding:20px;width:90%;max-width:400px;z-index:101;box-shadow:0 10px 30px rgba(0,0,0,0.5);display:none;max-height:85vh;overflow-y:auto}.settings-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:100;display:none}.s-group{margin-bottom:15px}.s-label{display:block;margin-bottom:5px;font-size:12px;color:var(--ts)}input[type=range]{-webkit-appearance:none;width:100%;background:transparent}input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:16px;width:16px;border-radius:50%;background:var(--a);cursor:pointer;margin-top:-6px;box-shadow:0 1px 3px rgba(0,0,0,0.3)}input[type=range]::-webkit-slider-runnable-track{width:100%;height:4px;cursor:pointer;background:var(--b);border-radius:2px}select, input[type=text], input[type=password]{width:100%;padding:8px;background:rgba(255,255,255,0.05);border:1px solid var(--b);color:var(--t);border-radius:var(--radius)}hr{border:0;border-top:1px solid var(--b);margin:15px 0}.switch-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding:5px 0}.switch{position:relative;display:inline-block;width:36px;height:20px}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:var(--b);transition:.4s;border-radius:20px}.slider:before{position:absolute;content:"";height:14px;width:14px;left:3px;bottom:3px;background-color:#fff;transition:.4s;border-radius:50%}input:checked+.slider{background-color:var(--a)}input:checked+.slider:before{transform:translateX(16px)}.s-section{display:none;padding:12px;background:rgba(0,0,0,0.03);border-radius:var(--radius);margin-bottom:15px;border:1px solid var(--b)}.s-section.active{display:block}.color-picker-wrapper{display:flex;align-items:center;gap:10px}input[type=color]{-webkit-appearance:none;border:none;width:30px;height:30px;padding:0;overflow:hidden;border-radius:50%;cursor:pointer;background:none}input[type=color]::-webkit-color-swatch-wrapper{padding:0}input[type=color]::-webkit-color-swatch{border:1px solid var(--b);border-radius:50%}</style></head>`;
     },
 
     escapeHtml(unsafe) {
@@ -373,7 +396,7 @@ const UI = {
 ${this.getHead("Admin")}
 <body style="padding:20px;max-width:1100px;margin:0 auto;width:100%;box-sizing:border-box">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:15px;border-bottom:1px solid var(--b)">
-        <h2 style="margin:0">Emby Proxy <span style="font-size:12px;color:var(--ts);font-weight:normal">V16.8</span></h2>
+        <h2 style="margin:0">Emby Proxy <span style="font-size:12px;color:var(--ts);font-weight:normal">V17.2</span></h2>
         <div style="display:flex;align-items:center;gap:15px">
              <div id="clk" style="font-family:monospace;font-size:12px;color:var(--ts)"></div>
              <div class="lang-btn" onclick="App.toggleLang()" title="Switch Language">
@@ -387,10 +410,27 @@ ${this.getHead("Admin")}
         
         <div class="panel" style="padding:20px;height:fit-content">
             <h3 style="margin-top:0" id="t-new">New Node</h3>
-            <input id="inName" placeholder="Name (e.g. HK)" style="margin-bottom:10px">
-            <input id="inTag" placeholder="Tag (e.g. VIP)" style="margin-bottom:10px">
-            <input id="inTarget" placeholder="Target (http://1.2.3.4:8096)" style="margin-bottom:10px">
-            <input id="inSec" placeholder="Secret Path (Optional)" style="margin-bottom:15px">
+            
+            <div style="margin-bottom:10px">
+                <label style="display:block;font-size:12px;color:var(--ts);margin-bottom:4px" id="l-name">Name</label>
+                <input id="inName" style="width:100%">
+            </div>
+            
+            <div style="margin-bottom:10px">
+                <label style="display:block;font-size:12px;color:var(--ts);margin-bottom:4px" id="l-tag">Tag</label>
+                <input id="inTag" style="width:100%">
+            </div>
+            
+            <div style="margin-bottom:10px">
+                <label style="display:block;font-size:12px;color:var(--ts);margin-bottom:4px" id="l-target">Target</label>
+                <input id="inTarget" style="width:100%">
+            </div>
+            
+            <div style="margin-bottom:15px">
+                <label style="display:block;font-size:12px;color:var(--ts);margin-bottom:4px" id="l-sec">Secret Path</label>
+                <input id="inSec" style="width:100%">
+            </div>
+
             <button class="btn btn-p" onclick="App.save()" style="width:100%;padding:8px" id="t-deploy">Deploy</button>
         </div>
 
@@ -424,6 +464,7 @@ ${this.getHead("Admin")}
                             </th>
                             <th style="text-align:left;padding:10px;border-bottom:1px solid var(--b)" id="th-name">Name</th>
                             <th style="text-align:left;padding:10px;border-bottom:1px solid var(--b)" id="th-target">Target</th>
+                            <th style="text-align:left;padding:10px;border-bottom:1px solid var(--b)" id="th-proxy">Proxy</th>
                             <th style="text-align:right;padding:10px;border-bottom:1px solid var(--b)" id="th-action">Action</th>
                         </tr>
                     </thead>
@@ -442,7 +483,8 @@ ${this.getHead("Admin")}
             <label class="s-label">Theme Preset / 预设主题</label>
             <select id="s-preset" onchange="App.applyPreset(this.value)">
                 <option value="custom">Custom / 自定义</option>
-                <option value="default">Default Green / 默认绿</option>
+                <option value="white">Minimal White / 极简白</option>
+                <option value="black">Pure Black / 纯粹黑</option>
                 <option value="ocean">Ocean Blue / 海洋蓝</option>
                 <option value="purple">Neon Purple / 霓虹紫</option>
                 <option value="orange">Sunset Gold / 落日金</option>
@@ -504,16 +546,16 @@ ${this.getHead("Admin")}
         </div>
 
         <div class="switch-row">
-            <span class="s-label" style="margin:0">Text & Custom CSS / 字体与样式</span>
+            <span class="s-label" style="margin:0">Theme & Custom CSS / 主题与样式</span>
             <label class="switch"><input type="checkbox" id="sw-text" onchange="App.toggleSection('text')"><span class="slider"></span></label>
         </div>
         <div id="sec-text" class="s-section">
             <div class="s-group">
-                <label class="s-label">Text Color / 文字颜色</label>
-                <select id="s-text-theme" onchange="App.previewStyle()">
-                    <option value="auto">Auto (Default)</option>
-                    <option value="dark">Dark / 深色</option>
+                <label class="s-label">Theme Mode / 主题模式</label>
+                <select id="s-theme-mode" onchange="App.previewStyle()">
+                    <option value="auto">Auto</option>
                     <option value="light">Light / 浅色</option>
+                    <option value="dark">Dark / 深色</option>
                 </select>
             </div>
             <div class="s-group" style="margin-bottom:0">
@@ -542,33 +584,37 @@ ${this.getHead("Admin")}
         };
 
         const PRESETS = {
-            default: { color: '#22c55e', bg: '', radius: 8 },
-            ocean: { color: '#06b6d4', bg: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=80', radius: 12 },
-            purple: { color: '#d946ef', bg: 'https://images.unsplash.com/photo-1563089145-599997674d42?auto=format&fit=crop&w=1920&q=80', radius: 4 },
-            orange: { color: '#f59e0b', bg: 'https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=1920&q=80', radius: 20 }
+            white: { color: '#000000', bg: '', radius: 8, mode: 'light' },
+            black: { color: '#ffffff', bg: '', radius: 8, mode: 'dark' },
+            ocean: { color: '#06b6d4', bg: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1920&q=80', radius: 12, mode: 'light' },
+            purple: { color: '#d946ef', bg: 'https://images.unsplash.com/photo-1563089145-599997674d42?auto=format&fit=crop&w=1920&q=80', radius: 4, mode: 'dark' },
+            orange: { color: '#f59e0b', bg: 'https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=1920&q=80', radius: 20, mode: 'dark' }
         };
 
         const TEXTS = {
             'en': {
-                new: "New Node", namePh: "Name (e.g. HK)", targetPh: "Target (http://1.2.3.4:8096)",
-                tagPh: "Tag (e.g. VIP)", secPh: "Secret Path (Optional)", deploy: "Deploy", nodes: "Nodes",
+                new: "New Node", namePh: "e.g. HK", targetPh: "http://1.2.3.4:8096",
+                tagPh: "e.g. VIP", secPh: "Optional", deploy: "Deploy", nodes: "Nodes",
                 export: "Export", import: "Import", noNodes: "No nodes", copy: "Copied!", copied: "Copied!", del: "Del",
                 search: "Search Name or Tag...", batchDel: "Delete Selected", batchTag: "Set Tag", selected: "Selected: ",
-                thName: "Name", thTarget: "Target", thAction: "Action", inputTag: "Enter Tag Name:"
+                thName: "Name", thTarget: "Target", thProxy: "Proxy", thAction: "Action", inputTag: "Enter Tag Name:",
+                lName: "Name", lTag: "Tag", lTarget: "Target Address", lSec: "Secret Path"
             },
             'zh-Hans': {
-                new: "新建节点", namePh: "名称 (例如 HK)", targetPh: "目标地址 (http://1.2.3.4:8096)",
-                tagPh: "标签 (例如 VIP)", secPh: "私密路径 (可选)", deploy: "部署", nodes: "节点列表",
+                new: "新建节点", namePh: "例如 HK", targetPh: "http://1.2.3.4:8096",
+                tagPh: "例如 VIP", secPh: "可选", deploy: "部署", nodes: "节点列表",
                 export: "导出配置", import: "导入配置", noNodes: "暂无节点", copy: "已复制!", copied: "已复制!", del: "删除",
                 search: "搜索名称或标签...", batchDel: "批量删除", batchTag: "批量设置标签", selected: "已选: ",
-                thName: "名称", thTarget: "目标", thAction: "操作", inputTag: "输入标签名称:"
+                thName: "名称", thTarget: "目标", thProxy: "代理地址", thAction: "操作", inputTag: "输入标签名称:",
+                lName: "名称", lTag: "标签", lTarget: "目标地址", lSec: "私密路径"
             },
             'zh-Hant': {
-                new: "新建節點", namePh: "名稱 (例如 HK)", targetPh: "目標地址 (http://1.2.3.4:8096)",
-                tagPh: "標籤 (例如 VIP)", secPh: "私密路徑 (可選)", deploy: "部署", nodes: "節點列表",
+                new: "新建節點", namePh: "例如 HK", targetPh: "http://1.2.3.4:8096",
+                tagPh: "例如 VIP", secPh: "可選", deploy: "部署", nodes: "節點列表",
                 export: "導出配置", import: "導入配置", noNodes: "暫無節點", copy: "已複製!", copied: "已複製!", del: "刪除",
                 search: "搜索名稱或標籤...", batchDel: "批量刪除", batchTag: "批量設置標籤", selected: "已選: ",
-                thName: "名稱", thTarget: "目標", thAction: "操作", inputTag: "輸入標籤名稱:"
+                thName: "名稱", thTarget: "目標", thProxy: "代理地址", thAction: "操作", inputTag: "輸入標籤名稱:",
+                lName: "名稱", lTag: "標籤", lTarget: "目標地址", lSec: "私密路徑"
             }
         };
 
@@ -579,7 +625,7 @@ ${this.getHead("Admin")}
             showAllTargets: false,
             selected: new Set(),
             filterText: '',
-            visibleTargets: new Set(),
+            visibleMap: new Set(), 
 
             async init(){
                 const nav = navigator.language.toLowerCase();
@@ -611,8 +657,7 @@ ${this.getHead("Admin")}
                     const hasBg = !!(c.bgUrl || c.bgImage);
                     const hasGlass = (c.panelOpacity !== undefined && c.panelOpacity < 1) || (c.panelBlur !== undefined && c.panelBlur > 0);
                     const hasMask = (c.bgMask !== undefined && c.bgMask !== 0);
-                    const hasText = !!(c.customCss || (c.textTheme && c.textTheme !== 'auto'));
-                    // Check if UI custom exists
+                    const hasText = !!(c.customCss || (c.themeMode && c.themeMode !== 'auto'));
                     const hasUi = !!(c.accentColor || c.borderRadius !== undefined);
 
                     $('#sw-bg').checked = hasBg;
@@ -633,9 +678,8 @@ ${this.getHead("Admin")}
                     $('#s-mask').value = c.bgMask !== undefined ? c.bgMask : 0;
                     $('#s-mask-val').innerText = $('#s-mask').value;
 
-                    $('#s-text-theme').value = c.textTheme || 'auto';
+                    $('#s-theme-mode').value = c.themeMode || 'auto';
                     
-                    // New UI values
                     $('#s-accent').value = c.accentColor || '#22c55e';
                     $('#s-radius').value = c.borderRadius !== undefined ? c.borderRadius : 8;
                     $('#s-radius-val').innerText = $('#s-radius').value + 'px';
@@ -653,7 +697,6 @@ ${this.getHead("Admin")}
                 const el = $('#sec-' + id);
                 if(checked) {
                     el.classList.add('active');
-                    // Defaults
                     if(id === 'glass' && !noPreview) {
                         if($('#s-opacity').value == 1) $('#s-opacity').value = 0.8; 
                         if($('#s-blur').value == 0) $('#s-blur').value = 10;
@@ -669,21 +712,24 @@ ${this.getHead("Admin")}
                 const p = PRESETS[name];
                 if (!p) return;
 
-                // Update UI Controls
                 $('#sw-ui').checked = true;
                 this.toggleSection('ui', true);
                 $('#s-accent').value = p.color;
                 $('#s-radius').value = p.radius;
                 $('#s-radius-val').innerText = p.radius + 'px';
 
+                if (p.mode) {
+                     $('#sw-text').checked = true;
+                     this.toggleSection('text', true);
+                     $('#s-theme-mode').value = p.mode;
+                }
+
                 if (p.bg) {
                     $('#sw-bg').checked = true;
                     this.toggleSection('bg', true);
                     $('#s-bg-url').value = p.bg;
-                    // Reset file input if switching presets
                     $('#s-bg-file').value = '';
-                } else if (name === 'default') {
-                    // Default clears background
+                } else {
                     $('#sw-bg').checked = false;
                     this.toggleSection('bg', true);
                 }
@@ -700,36 +746,26 @@ ${this.getHead("Admin")}
 
                 const tempConfig = {
                     bgUrl: useBg ? $('#s-bg-url').value : null,
-                    bgImage: useBg ? (this.config.bgImage || null) : null, // Keep existing image if no file change
-                    
+                    bgImage: useBg ? (this.config.bgImage || null) : null, 
                     panelOpacity: useGlass ? $('#s-opacity').value : 1,
                     panelBlur: useGlass ? $('#s-blur').value : 0,
-                    
                     bgMask: useMask ? $('#s-mask').value : 0,
-                    
                     customCss: useText ? $('#s-css').value : null,
-                    textTheme: useText ? $('#s-text-theme').value : 'auto',
-                    
+                    themeMode: useText ? $('#s-theme-mode').value : 'auto',
                     accentColor: useUi ? $('#s-accent').value : '#22c55e',
                     borderRadius: useUi ? $('#s-radius').value : 8
                 };
                 
-                // Update labels
                 $('#s-opacity-val').innerText = tempConfig.panelOpacity;
                 $('#s-blur-val').innerText = tempConfig.panelBlur + 'px';
                 $('#s-mask-val').innerText = tempConfig.bgMask;
                 $('#s-radius-val').innerText = tempConfig.borderRadius + 'px';
                 
-                // If user selected a file now, we can't preview it easily without FileReader logic duplicated.
-                // For simplicity in preview, we rely on URL or already saved image.
-
                 this.applyConfig(tempConfig);
             },
 
             applyConfig(c) {
                 let css = '';
-                
-                // 1. Background
                 if (c.bgUrl || c.bgImage) {
                      let bg = c.bgImage || c.bgUrl;
                      css += \`body { background: url('\${bg}') no-repeat center center fixed; background-size: cover; }\`;
@@ -737,7 +773,6 @@ ${this.getHead("Admin")}
                     css += \`body { background: var(--bg); }\`;
                 }
                 
-                // 2. Variables
                 const op = c.panelOpacity !== undefined ? c.panelOpacity : 1; 
                 const bl = c.panelBlur !== undefined ? c.panelBlur : 0;
                 const rad = c.borderRadius !== undefined ? c.borderRadius : 8;
@@ -754,8 +789,6 @@ ${this.getHead("Admin")}
                 document.documentElement.style.setProperty('--radius', rad + 'px');
                 document.documentElement.style.setProperty('--a', acc);
                 
-                // Calculate RGB for transparency support
-                // Simple hex to rgb
                 const hex = acc.replace('#','');
                 if(hex.length === 6) {
                     const r = parseInt(hex.substring(0,2), 16);
@@ -764,12 +797,17 @@ ${this.getHead("Admin")}
                     document.documentElement.style.setProperty('--a-rgb', \`\${r},\${g},\${b}\`);
                 }
 
-                // 3. Text Theme
-                document.documentElement.classList.remove('text-dark', 'text-light');
-                if (c.textTheme === 'dark') document.documentElement.classList.add('text-dark');
-                if (c.textTheme === 'light') document.documentElement.classList.add('text-light');
+                const mode = c.themeMode || 'auto';
+                if (mode === 'light') {
+                    document.documentElement.classList.add('light');
+                } else if (mode === 'dark') {
+                    document.documentElement.classList.remove('light');
+                } else {
+                    const h = (new Date().getUTCHours() + 8) % 24;
+                    if(h >= 6 && h < 18) document.documentElement.classList.add('light');
+                    else document.documentElement.classList.remove('light');
+                }
 
-                // 4. Custom CSS
                 if (c.customCss) css += c.customCss;
                 
                 let style = $('#custom-style');
@@ -795,7 +833,7 @@ ${this.getHead("Admin")}
                 const newConfig = { 
                     bgUrl: null, bgImage: null, customCss: null,
                     panelOpacity: 1, panelBlur: 0, bgMask: 0,
-                    textTheme: 'auto', accentColor: '#22c55e', borderRadius: 8
+                    themeMode: 'auto', accentColor: '#22c55e', borderRadius: 8
                 };
                 await API.req({ action: 'saveConfig', config: newConfig });
                 location.reload();
@@ -827,15 +865,11 @@ ${this.getHead("Admin")}
                 const newConfig = { 
                     bgUrl: useBg ? bgUrl : null, 
                     bgImage: useBg ? bgImage : null, 
-                    
                     panelOpacity: useGlass ? $('#s-opacity').value : 1, 
                     panelBlur: useGlass ? $('#s-blur').value : 0,
-                    
                     bgMask: useMask ? $('#s-mask').value : 0,
-                    
-                    textTheme: useText ? $('#s-text-theme').value : 'auto',
+                    themeMode: useText ? $('#s-theme-mode').value : 'auto',
                     customCss: useText ? $('#s-css').value : null,
-                    
                     accentColor: useUi ? $('#s-accent').value : '#22c55e',
                     borderRadius: useUi ? $('#s-radius').value : 8
                 };
@@ -857,10 +891,11 @@ ${this.getHead("Admin")}
             updateTexts() {
                 const t = TEXTS[this.lang];
                 $('#t-new').innerText = t.new;
-                $('#inName').placeholder = t.namePh;
-                $('#inTarget').placeholder = t.targetPh;
-                $('#inTag').placeholder = t.tagPh;
-                $('#inSec').placeholder = t.secPh;
+                $('#l-name').innerText = t.lName; $('#inName').placeholder = t.namePh;
+                $('#l-target').innerText = t.lTarget; $('#inTarget').placeholder = t.targetPh;
+                $('#l-tag').innerText = t.lTag; $('#inTag').placeholder = t.tagPh;
+                $('#l-sec').innerText = t.lSec; $('#inSec').placeholder = t.secPh;
+                
                 $('#t-deploy').innerText = t.deploy;
                 $('#t-nodes').innerText = t.nodes;
                 $('#t-export').innerText = t.export;
@@ -870,14 +905,23 @@ ${this.getHead("Admin")}
                 $('#t-batchTag').innerText = t.batchTag;
                 $('#th-name').innerText = t.thName;
                 $('#th-target').innerText = t.thTarget;
+                $('#th-proxy').innerText = t.thProxy;
                 $('#th-action').innerText = t.thAction;
             },
 
             async refresh(){
-                const d=await API.req({action:'list'});
-                this.nodes=d.nodes.map(n => ({...n, tag: n.tag || ""})); 
-                this.selected.clear();
-                this.renderList();
+                try {
+                    const d=await API.req({action:'list'});
+                    if(d.error) {
+                        alert('错误：' + d.error);
+                        return;
+                    }
+                    this.nodes=(d.nodes || []).map(n => ({...n, tag: n.tag || ""})); 
+                    this.selected.clear();
+                    this.renderList();
+                } catch(e) {
+                    alert('前端加载失败：' + e);
+                }
             },
             
             filter(val) {
@@ -893,9 +937,9 @@ ${this.getHead("Admin")}
                 this.renderList();
             },
 
-            toggleTarget(name) {
-                if (this.visibleTargets.has(name)) this.visibleTargets.delete(name);
-                else this.visibleTargets.add(name);
+            toggleVisibility(key) {
+                if (this.visibleMap.has(key)) this.visibleMap.delete(key);
+                else this.visibleMap.add(key);
                 this.renderList();
             },
 
@@ -935,10 +979,11 @@ ${this.getHead("Admin")}
                     bar.style.display = 'none';
                 }
             },
-
-            escapeHtml(str) {
-                if(!str) return '';
-                return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+            
+            // 修复: 在 App 对象内补充 escapeHtml 函数
+            escapeHtml(unsafe) {
+                if (!unsafe) return "";
+                return String(unsafe).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
             },
 
             renderList() {
@@ -951,18 +996,31 @@ ${this.getHead("Admin")}
 
                 $('#list').innerHTML = displayNodes.map(n => {
                     const isSel = this.selected.has(n.name);
-                    const isVis = this.showAllTargets || this.visibleTargets.has(n.name);
-                    
-                    const safeName = this.escapeHtml(n.name);
+                    const safeName = this.escapeHtml(n.name); // 之前这里报错，因为 this.escapeHtml 不存在
                     const safeTag = this.escapeHtml(n.tag);
                     const safeTarget = this.escapeHtml(n.target);
                     const safeSecret = this.escapeHtml(n.secret);
 
+                    // ========================================================
+                    // 核心逻辑：动态计算 Proxy 地址（无 KV 存储）
+                    // ========================================================
+                    const proxyUrl = location.origin + '/' + safeName + (n.secret ? '/' + safeSecret : '');
+
+                    // Keys for individual visibility
+                    const kTarget = safeName + ':target';
+                    const kProxy = safeName + ':proxy';
+                    
+                    const showTarget = this.showAllTargets || this.visibleMap.has(kTarget);
+                    const showProxy = this.showAllTargets || this.visibleMap.has(kProxy);
+
                     const tagHtml = n.tag ? \`<span class="tag-badge tag-blue">\${safeTag}</span>\` : '';
                     const secHtml = n.secret ? \`<span title="Secret" style="margin-left:5px;color:var(--d97706)">\${Icons.lock}</span>\` : '';
                     
-                    const targetDisplay = isVis ? safeTarget : '•••••••••••••••••';
-                    const targetClass = isVis ? '' : 'color:var(--ts);letter-spacing:2px';
+                    const targetDisplay = showTarget ? safeTarget : '••••••••••••';
+                    const targetClass = showTarget ? '' : 'color:var(--ts);letter-spacing:2px';
+                    
+                    const proxyDisplay = showProxy ? proxyUrl : '••••••••••••';
+                    const proxyClass = showProxy ? '' : 'color:var(--ts);letter-spacing:2px';
 
                     return \`<tr id="row-\${safeName}" class="\${isSel?'selected':''}" style="border-bottom:1px solid var(--b)">
                         <td style="padding:10px">
@@ -970,23 +1028,29 @@ ${this.getHead("Admin")}
                         </td>
                         <td style="padding:10px">
                             <div style="display:flex;align-items:center">
-                                <b style="cursor:pointer" onclick="App.copyLink('\${safeName}', '\${safeSecret}', this)">\${safeName}</b>
+                                <b style="cursor:pointer" onclick="App.copyText('\${safeName}', this)">\${safeName}</b>
                                 \${tagHtml}
                                 \${secHtml}
                             </div>
                         </td>
                         <td style="padding:10px;font-family:monospace;font-size:12px;\${targetClass}">
                             <div style="display:flex;align-items:center;gap:5px">
-                                \${targetDisplay}
-                                <button onclick="App.toggleTarget('\${safeName}')" class="btn-icon" style="padding:0;transform:scale(0.8)">\${isVis ? Icons.eyeOff : Icons.eye}</button>
+                                <span style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">\${targetDisplay}</span>
+                                <button onclick="App.toggleVisibility('\${kTarget}')" class="btn-icon" style="padding:0;transform:scale(0.8)">\${showTarget ? Icons.eyeOff : Icons.eye}</button>
+                            </div>
+                        </td>
+                        <td style="padding:10px;font-family:monospace;font-size:12px;\${proxyClass}">
+                            <div style="display:flex;align-items:center;gap:5px">
+                                <span style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle">\${proxyDisplay}</span>
+                                <button onclick="App.toggleVisibility('\${kProxy}')" class="btn-icon" style="padding:0;transform:scale(0.8)">\${showProxy ? Icons.eyeOff : Icons.eye}</button>
                             </div>
                         </td>
                         <td style="padding:10px;text-align:right">
-                             <button onclick="App.copyTarget('\${safeTarget}', this)" class="btn-icon" title="Copy Target">\${Icons.copy}</button>
+                             <button onclick="App.copyText('\${proxyUrl}', this)" class="btn-icon" title="Copy Proxy Address">\${Icons.copy}</button>
                              <button onclick="App.del('\${safeName}')" class="btn-icon" style="color:var(--e)" title="Delete">\${Icons.trash}</button>
                         </td>
                     </tr>\`;
-                }).join('') || \`<tr><td colspan="4" style="padding:20px;text-align:center;color:var(--ts)">\${t.noNodes}</td></tr>\`;
+                }).join('') || \`<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--ts)">\${t.noNodes}</td></tr>\`;
                 
                 this.renderBatchBar();
             },
@@ -1022,7 +1086,7 @@ ${this.getHead("Admin")}
             async export(){
                 const a=document.createElement('a');
                 a.href=URL.createObjectURL(new Blob([JSON.stringify(this.nodes)],{type:'json'}));
-                a.download='nodes_v16.8.json';
+                a.download='nodes_v17.json';
                 a.click();
             },
 
@@ -1032,24 +1096,19 @@ ${this.getHead("Admin")}
                 r.onload=async ev=>{try{await API.req({action:'import',nodes:JSON.parse(ev.target.result)});this.refresh()}catch{alert('Err')}};
                 r.readAsText(f);
             },
-
-            copyLink(name, secret, elem) {
-                const url = location.origin + '/' + name + (secret ? '/' + secret : '');
-                navigator.clipboard.writeText(url);
-                const originalText = elem.innerText;
-                elem.innerText = TEXTS[this.lang].copy;
-                elem.style.color = 'var(--a)';
-                setTimeout(() => {
-                    elem.innerText = originalText;
-                    elem.style.color = '';
-                }, 1000);
-            },
             
-            copyTarget(url, btn) {
-                navigator.clipboard.writeText(url);
+            copyText(text, btn) {
+                navigator.clipboard.writeText(text);
                 const original = btn.innerHTML;
                 btn.style.color = 'var(--a)';
-                setTimeout(()=>{ btn.innerHTML = original; btn.style.color = ''; }, 1000);
+                // If it's the copy icon, don't change text, just color. If it's name text, change text.
+                if(!btn.innerHTML.includes('<svg')) {
+                    btn.innerText = TEXTS[this.lang].copy;
+                }
+                setTimeout(()=>{ 
+                    btn.innerHTML = original; 
+                    btn.style.color = ''; 
+                }, 1000);
             }
         };
         App.init();
