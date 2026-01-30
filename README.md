@@ -1,4 +1,5 @@
-## CF-EMBY-PROXY-UI 最新版本：V17.3
+## CF-EMBY-PROXY-UI 最新版本：V17.6
+
 ## 描述
 
 这是一个基于 Cloudflare Workers 开发的单文件worker.js Emby 代理系统，通过边缘计算实现多服务器节点的统一管理与流量分发。
@@ -18,7 +19,7 @@
 
 **流量转发原理**：客户端通过代理链接发送请求到Worker指定访问EMBY源站，Worker 作为一个中间人，一方面修改请求头并发送请求到EMBY源站，一方面接受源站的数据以流式传输透传给客户端。HTTP(S)协议请求传输，WS协议保持心跳连接等
 
-**IP隐藏原理**：借用Cloudflare 的边缘网络实现隐藏EMBY源站真实IP隐藏，起到隐藏和保护EMBY源站的作用。**该代码会向EMBY服务器暴露你的真实IP**
+**IP隐藏原理**：借用Cloudflare 的边缘网络实现隐藏EMBY源站真实IP隐藏，起到隐藏和保护EMBY源站的作用。
 
 ---
 
@@ -44,7 +45,7 @@
 
 
 
-## **部署前提**
+## **须知前提**
 
 **腐竹让不让反代**， 询问腐竹让不让反代？腐竹禁止国内IP访问，使用该项目可能会让你EMBY账号封禁
 
@@ -52,13 +53,13 @@
 
 **滥用的话cloudflare可能会暂停账号功能或是封号** ，项目已设置 `Cache-Control: no-store` 并禁用了 Cloudflare 对流媒体文件的缓存，符合 Cloudflare 服务条款中关于“非 HTML 内容缓存”的规定。 但请注意：如果您的日均流量过大（如 TB 级别），仍可能因占用过多带宽被 Cloudflare 判定为滥用（Section 2.8）。**建议仅用于个人或家庭分享**。
 
-**EMBY服禁用web问题**，17.3版本默认使用API访问并禁用WEB，备用方案是使用WEB端需要格外跳转，但是cookie只保存一个小时
+**EMBY服禁用web问题**，17.3版本默认使用API访问并禁用WEB，备用方案是使用WEB端需要格外跳转，一天的授权时间仅限网页版
 
-
+**反代的限制** 虽然该代码会向EMBY服务器暴露你的真实IP但是emby日志可能全是CF的IP并非你的真实IP，这样可能会**导致连坐**，**播放限制**，**账号风险**，【无法从此项目代码上修改】
+如果腐竹没有信任cf的ip就无法传达真实IP
+默认情况下Emby不信任任何来源的IP发来的 X-Forwarded-For 头部【nginx反代也是如此】
 
 **端口要求** 支持任意的EMBY服端口反代，当你使用反代链接你必须使用CF支持的端口，CF支持的加密端口有：443, 2053, 2083, 2087, 2096, 8443 
-
-
 
 ---
 
@@ -84,6 +85,7 @@
 - 开启**自动 HTTPS 重写**  
 
 #### 速度
+
 ---设置
 
 - 开启**站点推荐设置** 
@@ -195,9 +197,9 @@
 * **加密节点**：`https://你的Worker域名/HK/123`
 
   只需要把原来的**EMBY源站链接**换成**节点链接**使用
-  
+
   当客户端端口可以选填时，不用填写端口【默认443端口】
-  
+
   **端口要求**：443, 2053, 2083, 2087, 2096, 8443 
 
 #### 4. 数据备份
@@ -229,7 +231,10 @@ Workers Cache API 缓存 KV 读取结果，减少KV读写次数
 
 **三级缓存**：结合内存级 NodeCache、Cloudflare 默认 caches 缓存以及底层的 KV 存储。内存层**拦截了 99% 以上的重复请求**，边缘缓存 (`caches`) 充当了“中间站”，它不随实例销毁而消失，能让新启动的实例快速找回配置。**KV 存储**则作为“最后的防线”，确保即使边缘缓存被清空，数据依然能从持久化磁盘中恢复。
 
+Cloudflare 边缘缓存的强制策略30天
+
 代码会将 KV 中的节点配置缓存到 Cloudflare 的边缘计算缓存中（`caches.default`），有效期 60 秒。
+
 
 ---
 
@@ -258,13 +263,14 @@ Workers Cache API 缓存 KV 读取结果，减少KV读写次数
 ---
 
 # 代码一览概述
+
 ---
 
 ## 核心功能模块
 
 ### 1. 动态代理与请求分发 (`Proxy` 模块)
 
-* **优先使用API访问，使用API访问时禁用WEB端**，存在WEB备用模式，保存一个小时cookie
+* **优先使用API访问，使用API访问时禁用WEB端**，存在WEB备用模式，保存一天cookie
 * **路径重定向移除**，无限重定向修复
 * **WebSocket 支持**：支持 Emby 的实时通信（如播放控制、通知），通过 `WebSocketPair` 实现。
 * **智能缓存策略**：
@@ -359,7 +365,7 @@ flowchart TD
         PathMatch -- "否" --> 403["返回 403 Forbidden"]
         PathMatch -- "是 (如 /hk/secret123)" --> StripPath["移除密钥路径 -> /web/..."]
         
-        SecretCheck -- "否" --> WebBlockCheck{"V17.3 Web 访问限制检查"}
+        SecretCheck -- "否" --> WebBlockCheck{"Web 访问限制检查"}
         StripPath --> WebBlockCheck
 
         %% Web 备用模式 (Anti-Crawler)
@@ -368,7 +374,7 @@ flowchart TD
         
         CookieCheck -- "无 Cookie" --> ParamCheck{"URL参数有 backup=1 ?"}
         ParamCheck -- "无" --> BlockPage["拦截: 显示'启用备用模式'页面"]
-        ParamCheck -- "有" --> SetBypass["写入 Bypass Cookie (1小时)"]
+        ParamCheck -- "有" --> SetBypass["写入 Bypass Cookie (24小时)"]
         SetBypass --> RedirectClean["重定向至纯净 URL"]
         
         CookieCheck -- "有 Cookie" --> ProxyStart["开始代理 (Proxy.handle)"]
@@ -430,4 +436,3 @@ flowchart TD
 2. **KV 绑定**：部署时必须手动绑定一个 KV 命名空间到 Worker，否则管理面板将无法保存任何节点信息。
 
 ---
-
