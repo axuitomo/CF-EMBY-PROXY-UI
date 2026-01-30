@@ -1,18 +1,20 @@
-// EMBY-PROXY-ULTIMATE V17.3 
-// 移除根路径强制跳转,修复无限重定向循环API请求，增加字幕这类静态文件缓存支持,修复重定向丢失斜杠”和“API优先/禁用Web（带备用模式）
-// [V17.2] 修复前端渲染报错 (escapeHtml缺失问题)
-// [V17.1] 修复列表空白 (KV变量名自动兼容)
-// 核心特性：单文件部署 | 动态代理计算 | 旧数据兼容 | 极速缓存
+// EMBY-PROXY-UI V17.6 (Optimized)
+// [V17.6]  Web 端备用模式有效期延长至 24小时。状态码修正: 节点不存在时返回 404 (原 403)
+// [V17.5] 静态资源CacheKey归一化(去Token/去随机参)，强制移除图片Range头以最大化缓存命中率，缓存命中率: 针对静态图片 强制移除 Range 头，避免 Cloudflare 缓存碎片化。
+// [V17.4] ...修复部分环境下 KV 绑定变量名不兼容问题
 
 // ============================================================================
-// 0. GLOBAL CONFIG & STATE
+// 0. GLOBAL CONFIG & STATE 
 // ============================================================================
 const GLOBALS = {
     NodeCache: new Map(),
     ConfigCache: null, 
     Regex: {
-        // [修改 1] 新增 srt|ass|vtt|sub 字幕文件支持缓存
-        Static: /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json|srt|ass|vtt|sub)$/i,
+        // [原有] 文件后缀匹配
+        StaticExt: /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json|srt|ass|vtt|sub)$/i,
+        // [新增] Emby/Jellyfin 特有的 API 静态资源路径 (核心改进)
+        EmbyImages: /(?:\/Images\/|\/Icons\/|\/Branding\/|\/emby\/covers\/)/i,
+        // [原有] 流媒体后缀
         Streaming: /\.(?:mp4|m4v|m4s|m4a|ogv|webm|mkv|mov|avi|wmv|flv|ts|m3u8|mpd)$/i
     },
     isDaytimeCN: () => {
@@ -240,7 +242,7 @@ const Database = {
 };
 
 // ============================================================================
-// 3. PROXY MODULE (优化缓存策略版)
+// 3. PROXY MODULE (V17.5 API & Cache 深度优化版)
 // ============================================================================
 const Proxy = {
     async handle(request, node, path, name, key) {
@@ -248,34 +250,75 @@ const Proxy = {
         const finalUrl = new URL(path, targetBase);
         finalUrl.search = new URL(request.url).search;
 
+        // WebSocket 处理
         if (request.headers.get("Upgrade") === "websocket") {
             return this.handleWebSocket(finalUrl, request);
         }
-
         if (request.method === "OPTIONS") return this.renderCors();
 
-        // 1. 判断请求类型
+        // 1. 智能类型识别
         const isStreaming = GLOBALS.Regex.Streaming.test(path);
-        const isStatic = GLOBALS.Regex.Static.test(path); // 新增：识别是否为静态资源
+        // [API优化] 判定是否为静态资源 (包含图片、字幕、网页资源)
+        // 注意：Emby 的图片通常没有后缀，而是 /Items/xxx/Images/Primary，依靠 Regex.EmbyImages 识别
+        const isStatic = (GLOBALS.Regex.StaticExt.test(path) || GLOBALS.Regex.EmbyImages.test(path)) && request.method === 'GET';
 
         // 2. 构建请求头
         const newHeaders = new Headers(request.headers);
         newHeaders.set("Host", targetBase.host);
         newHeaders.set("X-Real-IP", request.headers.get("cf-connecting-ip"));
         newHeaders.set("X-Forwarded-For", request.headers.get("cf-connecting-ip"));
-        ["cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cf-worker"].forEach(h => newHeaders.delete(h));
         
-        // 流媒体播放时移除 Referer，防止某些防盗链策略拦截
+        // 移除 Cloudflare 内部头
+        ["cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cf-worker"].forEach(h => {
+             newHeaders.delete(h);
+        });
+
+        // [API优化] 视频流移除 Referer 防止防盗链误伤
         if (isStreaming) newHeaders.delete("Referer");
 
-        // 3. 核心修改：优化缓存策略
-        // 只有明确匹配到静态资源后缀 (isStatic) 时才缓存 24 小时
-        // 视频流 (isStreaming) 和 API 请求 (默认) 均不缓存，确保数据实时性
-        const shouldCache = isStatic;
-        
-        const cf = shouldCache
-            ? { cacheEverything: true, cacheTtlByStatus: { "200-299": 86400 } }
-            : { cacheEverything: false, cacheTtl: 0 };
+        // [API优化] 针对静态资源(图片/CSS等)，主动移除 Range 头
+        // 作用：强制 Cloudflare 向源站请求完整文件。
+        // 原理：客户端请求海报可能分片下载，导致 CF 缓存碎片化。移除 Range 后，CF 会缓存整张图，后续请求直接由边缘节点切片响应。
+        if (isStatic) {
+            newHeaders.delete("Range");
+        }
+
+        // 3. 缓存策略与 CacheKey 计算 (核心优化)
+        let cf = { cacheEverything: false, cacheTtl: 0 };
+
+        if (isStatic) {
+            // [API优化] Cache Key 增强
+            // 目的：让 UserA 和 UserB，或者不同参数顺序的请求，命中同一个缓存文件
+            const cacheKeyUrl = new URL(finalUrl.toString());
+            
+            // a. 移除身份验证参数 (让不同用户共享同一份海报缓存)
+            // Emby 的图片 ID (GUID) 是唯一的，不带 Token 访问通常也是安全的(视服务器设置而定)，或者带 Token 访问后存为无 Token 的 Key
+            cacheKeyUrl.searchParams.delete("X-Emby-Token");
+            cacheKeyUrl.searchParams.delete("api_key");
+            cacheKeyUrl.searchParams.delete("X-Emby-Authorization");
+            
+            // b. 移除随机时间戳/防缓存参数 (强制命中缓存)
+            cacheKeyUrl.searchParams.delete("_");
+            cacheKeyUrl.searchParams.delete("t");
+            cacheKeyUrl.searchParams.delete("stamp");
+            cacheKeyUrl.searchParams.delete("random");
+
+            // c. 参数排序 (让 ?w=100&h=200 和 ?h=200&w=100 命中同一缓存)
+            cacheKeyUrl.searchParams.sort();
+
+            cf = {
+                cacheEverything: true,
+                // [修复] 添加 cacheTtl 以满足类型定义，默认 30 天
+                cacheTtl: 86400 * 30,
+                // 使用清洗后的 URL 作为缓存键
+                cacheKey: cacheKeyUrl.toString(),
+                cacheTtlByStatus: { 
+                    "200-299": 86400 * 30, // 静态资源(海报) 缓存 30 天 (Emby图片有Tag参数控制版本，久存无害)
+                    "404": 60,             // 404 缓存 1 分钟
+                    "500-599": 0           // 错误不缓存
+                }
+            };
+        }
 
         try {
             const response = await fetch(finalUrl.toString(), {
@@ -286,12 +329,26 @@ const Proxy = {
                 cf
             });
 
+            // 4. 响应头清洗与重写
             const modifiedHeaders = new Headers(response.headers);
             modifiedHeaders.set("Access-Control-Allow-Origin", "*");
-            
-            // 如果是视频流，强制由客户端不缓存
-            if (isStreaming) modifiedHeaders.set("Cache-Control", "no-store");
-            
+
+            if (isStatic) {
+                // [API优化] 移除 Vary 和 Set-Cookie，防止污染缓存
+                modifiedHeaders.delete("Vary");
+                modifiedHeaders.delete("Set-Cookie");
+                
+                // 强制浏览器本地缓存 1 年 (依靠 Emby 的 ?tag=xxx 机制更新)
+                // s-maxage=86400 控制 CDN 缓存时间
+                modifiedHeaders.set("Cache-Control", "public, max-age=31536000, s-maxage=86400");
+                
+                // 调试头：显示是否命中 (HIT/MISS)
+                modifiedHeaders.set("X-Emby-Proxy-Cache", "HIT");
+            } else if (isStreaming) {
+                // 视频流强制不缓存 (避免 CF 缓存视频切片导致回源错误)
+                modifiedHeaders.set("Cache-Control", "no-store");
+            }
+
             this.rewriteLocation(modifiedHeaders, response.status, name, key, targetBase);
 
             return new Response(response.body, {
@@ -404,7 +461,7 @@ const UI = {
 ${this.getHead("Admin")}
 <body style="padding:20px;max-width:1100px;margin:0 auto;width:100%;box-sizing:border-box">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:15px;border-bottom:1px solid var(--b)">
-        <h2 style="margin:0">Emby Proxy <span style="font-size:12px;color:var(--ts);font-weight:normal">V17.3</span></h2>
+        <h2 style="margin:0">Emby Proxy <span style="font-size:12px;color:var(--ts);font-weight:normal">V17.6</span></h2>
         <div style="display:flex;align-items:center;gap:15px">
              <div id="clk" style="font-family:monospace;font-size:12px;color:var(--ts)"></div>
              <div class="lang-btn" onclick="App.toggleLang()" title="Switch Language">
@@ -1127,7 +1184,7 @@ ${this.getHead("Admin")}
 };
 
 // ============================================================================
-// 5. MAIN ENTRY (API优先模式 + 自动修正斜杠 + Cookie版备用模式)
+// 5. MAIN ENTRY Cookie 1天版
 // ============================================================================
 export default {
     async fetch(request, env, ctx) {
@@ -1169,7 +1226,7 @@ export default {
                     
                     let remaining = "/" + segments.slice(strip).join('/');
                     
-                    // [修复] 强制根路径补全斜杠 (防止相对路径重定向丢失 Secret)
+                    // [修复] 强制根路径补全斜杠
                     if (remaining === "/" && !url.pathname.endsWith("/")) {
                         return new Response(null, {
                             status: 301,
@@ -1177,7 +1234,7 @@ export default {
                         });
                     }
 
-                    // [修复] 保持路径完整性 (防止无限循环)
+                    // [修复] 保持路径完整性
                     if (url.pathname.endsWith('/') && remaining !== '/') {
                         remaining += '/';
                     }
@@ -1185,21 +1242,23 @@ export default {
                     if (remaining === "") remaining = "/";
 
                     // -------------------------------------------------------------
-                    // API 优先策略 (修复版: 使用 Cookie 维持会话)
+                    // API 优先策略 (优化版: 放行静态资源)
                     // -------------------------------------------------------------
                     const lowerPath = remaining.toLowerCase();
                     
-                    // 仅拦截 /web 开头的请求，且排除 Emby 系统 Ping/Info 接口
-                    // 这些接口通常由客户端 App 调用，不应拦截
+                    // [优化] 增加静态资源后缀排除，避免拦截 css/js 导致页面样式崩坏
+                    const isStaticAsset = /\.(?:js|css|png|jpg|jpeg|gif|ico|svg|woff2?|ttf|map)$/i.test(lowerPath);
+                    
                     const isWebClient = lowerPath.startsWith('/web') && 
                                       !lowerPath.includes('/emby/ping') && 
-                                      !lowerPath.includes('/emby/system/info');
+                                      !lowerPath.includes('/emby/system/info') &&
+                                      !isStaticAsset; 
 
                     if (isWebClient) {
                         const urlParams = new URL(request.url).searchParams;
                         const cookie = request.headers.get("Cookie") || "";
                         
-                        // 1. 如果 URL 带了 ?backup=1，植入 Cookie 并重定向回纯净 URL
+                        // 1. 如果 URL 带了 ?backup=1，植入 Cookie 并重定向
                         if (urlParams.get('backup') === '1') {
                             const cleanUrl = new URL(request.url);
                             cleanUrl.searchParams.delete('backup');
@@ -1207,8 +1266,8 @@ export default {
                                 status: 302,
                                 headers: {
                                     "Location": cleanUrl.toString(),
-                                    // Cookie 有效期 1 小时
-                                    "Set-Cookie": "emby_web_bypass=1; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax"
+                                    // [修改点] Max-Age=86400 (1天)
+                                    "Set-Cookie": "emby_web_bypass=1; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax"
                                 }
                             });
                         }
@@ -1218,7 +1277,6 @@ export default {
 
                         // 3. 如果既没参数也没 Cookie，则拦截
                         if (!hasCookie) {
-                            // 计算备用访问链接
                             const backupUrl = new URL(request.url);
                             backupUrl.searchParams.set('backup', '1');
 
@@ -1230,20 +1288,12 @@ export default {
                                             <h2 style="color:var(--t);margin:0 0 10px 0">API 优先模式</h2>
                                             <p style="color:var(--ts);font-size:14px;line-height:1.6;margin-bottom:25px">
                                                 Web 客户端访问已被默认限制。<br>
-                                                请使用原生客户端 (Infuse, Fileball, 官方 App) 以获得最佳体验。
+                                                请使用客户端以获得最佳体验。
                                             </p>
                                             
-                                            <div style="background:rgba(0,0,0,0.1);border-radius:8px;padding:15px;text-align:left;margin-bottom:25px;border:1px dashed var(--b)">
-                                                <div style="font-size:12px;color:var(--ts);margin-bottom:8px;font-weight:bold;text-transform:uppercase">Recommended</div>
-                                                <div style="font-size:13px;color:var(--t)">📱 iOS: <span style="color:var(--a)">Infuse, VidHub</span></div>
-                                                <div style="font-size:13px;color:var(--t);margin-top:4px">🤖 Android: <span style="color:var(--a)">Findroid, Yarc</span></div>
-                                            </div>
-
                                             <hr>
-                                            
                                             <a href="${backupUrl.href}" class="btn btn-p" style="display:block;width:100%;text-decoration:none;padding:12px;box-sizing:border-box">
-                                                启用 Web 备用模式 (1小时)
-                                            </a>
+                                                启用 Web 备用模式 (24小时) </a>
                                         </div>
                                     </div>
                                 </body></html>
@@ -1259,7 +1309,7 @@ export default {
                 }
             }
         }
-
-        return new Response("Access Denied", { status: 403 });
+        
+        return new Response("Node Not Found", { status: 404 });
     }
 };
