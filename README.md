@@ -1,4 +1,4 @@
-## CF-EMBY-PROXY-UI 最新版本：V17.2
+## CF-EMBY-PROXY-UI 最新版本：V17.3
 ## 描述
 
 这是一个基于 Cloudflare Workers 开发的单文件worker.js Emby 代理系统，通过边缘计算实现多服务器节点的统一管理与流量分发。
@@ -52,10 +52,16 @@
 
 **滥用的话cloudflare可能会暂停账号功能或是封号** ，项目已设置 `Cache-Control: no-store` 并禁用了 Cloudflare 对流媒体文件的缓存，符合 Cloudflare 服务条款中关于“非 HTML 内容缓存”的规定。 但请注意：如果您的日均流量过大（如 TB 级别），仍可能因占用过多带宽被 Cloudflare 判定为滥用（Section 2.8）。**建议仅用于个人或家庭分享**。
 
-**EMBY服禁用web可能有问题**，默认将所有根路径访问都指向 `/web/index.html`，可能会识别成web访问
+**EMBY服禁用web问题**，17.3版本默认使用API访问并禁用WEB，备用方案是使用WEB端需要格外跳转，但是cookie只保存一个小时
 
-**端口要求** 完全支持任意的EMBY服端口反代，当你使用反代链接你必须使用CF支持的端口 CF支持的加密端口有：443, 2053, 2083, 2087, 2096, 8443 
+
+
+**端口要求** 支持任意的EMBY服端口反代，当你使用反代链接你必须使用CF支持的端口，CF支持的加密端口有：443, 2053, 2083, 2087, 2096, 8443 
+
+
+
 ---
+
 
 ## 域名设置
 
@@ -177,7 +183,8 @@
 
 * **代理名称**：例如 `HK` (仅限小写英文/数字)。
 * **访问密钥** (可选)：例如 `123`。如果留空，则公开访问。
-* **服务器地址**：Emby 源站地址，例如 `http://1.2.3.4:8096` (不要带结尾的 `/`)。
+* **服务器地址**：Emby 源站地址，例如 `http://1.2.3.4:8096` (不要带结尾的 `/`)
+* **TAG标签**(可选)
 
 点击 **立即部署**。
 
@@ -188,6 +195,10 @@
 * **加密节点**：`https://你的Worker域名/HK/123`
 
   只需要把原来的**EMBY源站链接**换成**节点链接**使用
+  
+  当客户端端口可以选填时，不用填写端口【默认443端口】
+  
+  **端口要求**：443, 2053, 2083, 2087, 2096, 8443 
 
 #### 4. 数据备份
 
@@ -200,7 +211,7 @@
 
 **Cloudflare 线路质量**：用户本地网络连接到 Cloudflare 边缘节点的优劣（国内移动/联通/电信直连 CF 的效果差异很大）。一般情况下联通延迟最高 
 
-**CF 与 EMBY源站的对等连接**：Cloudflare 美国/香港节点连接你 Emby 源站服务器（例如在新加坡或美西）的线路质量。
+**CF 与 EMBY源站的对等连接**：Cloudflare 美国/香港节点与 Emby 源站服务器链接 
 
 **EMBY源站上行带宽** 无解 
 
@@ -216,7 +227,7 @@
 
 Workers Cache API 缓存 KV 读取结果，减少KV读写次数
 
-**三级缓存**：结合内存级 NodeCache、Cloudflare 默认 caches 缓存以及底层的 KV 存储。内存层**拦截了 99% 以上的重复请求，**边缘缓存 (`caches`)** 充当了“中间站”，它不随实例销毁而消失，能让新启动的实例快速找回配置。**KV 存储**则作为“最后的防线”，确保即使边缘缓存被清空，数据依然能从持久化磁盘中恢复。
+**三级缓存**：结合内存级 NodeCache、Cloudflare 默认 caches 缓存以及底层的 KV 存储。内存层**拦截了 99% 以上的重复请求**，边缘缓存 (`caches`) 充当了“中间站”，它不随实例销毁而消失，能让新启动的实例快速找回配置。**KV 存储**则作为“最后的防线”，确保即使边缘缓存被清空，数据依然能从持久化磁盘中恢复。
 
 代码会将 KV 中的节点配置缓存到 Cloudflare 的边缘计算缓存中（`caches.default`），有效期 60 秒。
 
@@ -253,8 +264,8 @@ Workers Cache API 缓存 KV 读取结果，减少KV读写次数
 
 ### 1. 动态代理与请求分发 (`Proxy` 模块)
 
-* **优先使用API访问，使用API访问禁用WEB端**
-* **路径重定向移除**
+* **优先使用API访问，使用API访问时禁用WEB端**，存在WEB备用模式，保存一个小时cookie
+* **路径重定向移除**，无限重定向修复
 * **WebSocket 支持**：支持 Emby 的实时通信（如播放控制、通知），通过 `WebSocketPair` 实现。
 * **智能缓存策略**：
 * **静态资源**：针对图片、JS、CSS 等静态文件，开启 `cacheEverything` 并设置 24 小时缓存。
@@ -299,7 +310,111 @@ Workers Cache API 缓存 KV 读取结果，减少KV读写次数
 ---
 
 ## 代码流程图 (请求处理逻辑)
-<img width="1024" height="1024" alt="图片" src="https://github.com/user-attachments/assets/fd392402-4b49-4e05-b601-fe851be5a094" />
+
+```mermaid
+flowchart TD
+    %% ================= 初始化阶段 =================
+    Start("用户请求 (Fetch Event)") --> Init["初始化: 获取 KV 绑定 (ENI_KV/EMBY_KV)"]
+    Init --> ParseUrl["解析 URL: 分割路径 segments"]
+    ParseUrl --> RouteDecide{"路径分流判定"}
+
+    %% ================= 分支一: 后台管理系统 (/admin) =================
+    subgraph AdminSystem [后台管理系统]
+        direction TB
+        RouteDecide -- "/admin" --> AdminAuthCheck{"鉴权检查"}
+        
+        %% 登录逻辑
+        AdminAuthCheck -- "无 Token / 无效" --> MethodCheck{"请求方法?"}
+        MethodCheck -- "GET" --> RenderLogin["渲染登录页面 (UI.renderLoginPage)"]
+        MethodCheck -- "POST (Form)" --> VerifyPass{"验证密码"}
+        VerifyPass -- "失败" --> LockIP["记录失败次数 / 锁定 IP"]
+        LockIP --> RenderLogin
+        VerifyPass -- "成功" --> SetCookie["生成 JWT Token <br/> 写入 Cookie (auth_token)"]
+        SetCookie --> RedirectAdmin["重定向回 /admin"]
+
+        %% API 与 页面逻辑
+        AdminAuthCheck -- "Token 有效" --> AdminAction{"操作类型?"}
+        AdminAction -- "GET" --> RenderDash["渲染管理面板 (UI.renderAdminUI)"]
+        AdminAction -- "POST (API)" --> HandleAPI["处理数据 (Database.handleApi)"]
+        HandleAPI --> CRUD["增删改查 KV 数据"]
+        CRUD --> ReturnJson["返回 JSON 结果"]
+    end
+
+    %% ================= 分支二: 节点代理流程 =================
+    subgraph ProxySystem [节点代理核心流程]
+        direction TB
+        RouteDecide -- "节点路径 (如 /hk)" --> NodeLookup["获取节点配置 (Database.getNode)"]
+        
+        %% 节点查找与缓存
+        NodeLookup --> CacheCheck{"内存缓存 (Map) <br/> 是否命中?"}
+        CacheCheck -- "是" --> GetNodeData["读取内存数据"]
+        CacheCheck -- "否" --> KVCheck["读取 Cloudflare KV"]
+        KVCheck -- "无数据" --> 404Node["返回 404 Node Not Found"]
+        KVCheck -- "有数据" --> UpdateCache["写入内存缓存 (TTL 60s)"]
+        UpdateCache --> GetNodeData
+
+        %% 安全校验层
+        GetNodeData --> SecretCheck{"配置了密钥 (Secret Path)?"}
+        SecretCheck -- "是" --> PathMatch{"URL 包含正确密钥?"}
+        PathMatch -- "否" --> 403["返回 403 Forbidden"]
+        PathMatch -- "是 (如 /hk/secret123)" --> StripPath["移除密钥路径 -> /web/..."]
+        
+        SecretCheck -- "否" --> WebBlockCheck{"V17.3 Web 访问限制检查"}
+        StripPath --> WebBlockCheck
+
+        %% Web 备用模式 (Anti-Crawler)
+        WebBlockCheck -- "非 Web 请求 / API / 原生 APP" --> ProxyStart
+        WebBlockCheck -- "Web 请求 (浏览器)" --> CookieCheck{"检查 Cookie: <br/> emby_web_bypass?"}
+        
+        CookieCheck -- "无 Cookie" --> ParamCheck{"URL参数有 backup=1 ?"}
+        ParamCheck -- "无" --> BlockPage["拦截: 显示'启用备用模式'页面"]
+        ParamCheck -- "有" --> SetBypass["写入 Bypass Cookie (1小时)"]
+        SetBypass --> RedirectClean["重定向至纯净 URL"]
+        
+        CookieCheck -- "有 Cookie" --> ProxyStart["开始代理 (Proxy.handle)"]
+
+        %% 代理请求构建
+        ProxyStart --> ProtoCheck{"协议类型?"}
+        ProtoCheck -- "WebSocket" --> HandleWS["建立双向 WS 隧道"]
+        ProtoCheck -- "HTTP/HTTPS" --> BuildReq["构建请求对象"]
+        
+        BuildReq --> CleanHeaders["清洗请求头: <br/> 1. 移除 CF-Connecting-IP 等隐私头 <br/> 2. 若是流媒体，移除 Referer"]
+        CleanHeaders --> FetchOrigin["回源: 请求真实 Emby 服务器"]
+        
+        %% 响应处理与缓存优化
+        FetchOrigin --> RespHeaders["处理响应头: <br/> 1. 修正 Location (302跳转) <br/> 2. 添加 CORS 允许跨域"]
+        RespHeaders --> CacheStrategy{"V17.3 智能缓存策略"}
+        
+        CacheStrategy -- "静态资源 (img/css/srt/ass)" --> CacheOn["启用缓存 (Cache-Control: 24h)"]
+        CacheStrategy -- "流媒体/API (mp4/mkv/json)" --> CacheOff["禁用缓存 (No-Store)"]
+        
+        CacheOn --> FinalResp["返回最终响应"]
+        CacheOff --> FinalResp
+    end
+
+    %% 结束节点
+    RenderLogin --> End([结束])
+    RenderDash --> End
+    ReturnJson --> End
+    404Node --> End
+    403 --> End
+    BlockPage --> End
+    RedirectClean --> End
+    RedirectAdmin --> End
+    FinalResp --> End
+    HandleWS --> End
+
+    %% 样式
+    classDef auth fill:#ffe0b2,stroke:#f57c00,stroke-width:2px;
+    classDef secure fill:#ffcdd2,stroke:#c62828,stroke-width:2px;
+    classDef cache fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px;
+    classDef core fill:#e1f5fe,stroke:#0277bd,stroke-width:2px;
+
+    class AdminAuthCheck,VerifyPass,SetCookie,CookieCheck,ParamCheck,SecretCheck,PathMatch auth;
+    class WebBlockCheck,BlockPage,LockIP secure;
+    class CacheCheck,UpdateCache,CacheStrategy,CacheOn cache;
+    class NodeLookup,ProxyStart,FetchOrigin,CleanHeaders core;
+```
 
 ---
 
