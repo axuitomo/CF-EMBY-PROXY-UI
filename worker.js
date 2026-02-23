@@ -129,6 +129,7 @@ const Database = {
     },
 
     async getNode(nodeName, env, ctx) {
+        nodeName = nodeName.toLowerCase();
         const kv = this.getKV(env);
         if (!kv) return null;
 
@@ -193,29 +194,32 @@ const Database = {
                 const nodesToSave = data.action === "save" ? [data] : data.nodes;
                 for (const n of nodesToSave) {
                     if (n.name && n.target) {
+                        const name = n.name.toLowerCase();
                         const val = {
                             secret: n.secret || n.path || "",
                             target: n.target,
-                            tag: n.tag || "" 
+                            tag: n.tag || ""
                         };
-                        await kv.put(`${this.PREFIX}${n.name}`, JSON.stringify(val));
-                        await invalidate(n.name);
+                        await kv.put(`${this.PREFIX}${name}`, JSON.stringify(val));
+                        await invalidate(name);
                     }
                 }
                 return new Response(JSON.stringify({ success: true }));
 
             case "delete":
                 if (data.name) {
-                    await kv.delete(`${this.PREFIX}${data.name}`);
-                    await invalidate(data.name);
+                    const delName = data.name.toLowerCase();
+                    await kv.delete(`${this.PREFIX}${delName}`);
+                    await invalidate(delName);
                 }
                 return new Response(JSON.stringify({ success: true }));
 
             case "batchDelete":
                 if (Array.isArray(data.names)) {
                     for (const name of data.names) {
-                        await kv.delete(`${this.PREFIX}${name}`);
-                        await invalidate(name);
+                        const batchName = name.toLowerCase();
+                        await kv.delete(`${this.PREFIX}${batchName}`);
+                        await invalidate(batchName);
                     }
                 }
                 return new Response(JSON.stringify({ success: true }));
@@ -238,6 +242,26 @@ const Database = {
 
             default: return new Response("Invalid Action", { status: 400 });
         }
+    },
+
+    async findNodeByTargetHost(host, env, ctx) {
+        const kv = this.getKV(env);
+        if (!kv) return null;
+        try {
+            const list = await kv.list({ prefix: this.PREFIX });
+            for (const key of list.keys) {
+                const nodeData = await kv.get(key.name, { type: "json" });
+                if (nodeData && nodeData.target) {
+                    try {
+                        if (new URL(nodeData.target).host === host) {
+                            const name = key.name.replace(this.PREFIX, "").toLowerCase();
+                            return { name, secret: nodeData.secret || "" };
+                        }
+                    } catch (e) { }
+                }
+            }
+        } catch (e) { }
+        return null;
     }
 };
 
@@ -245,7 +269,7 @@ const Database = {
 // 3. PROXY MODULE (V17.5 API & Cache 深度优化版)
 // ============================================================================
 const Proxy = {
-    async handle(request, node, path, name, key) {
+    async handle(request, node, path, name, key, env, ctx) {
         const targetBase = new URL(node.target);
         const finalUrl = new URL(path, targetBase);
         finalUrl.search = new URL(request.url).search;
@@ -350,6 +374,25 @@ const Proxy = {
             }
 
             this.rewriteLocation(modifiedHeaders, response.status, name, key, targetBase);
+
+            // 跨 host 重定向改写：后端 302 到其他服务器时，查找匹配的代理节点
+            if (response.status >= 300 && response.status < 400) {
+                const location = modifiedHeaders.get("Location");
+                if (location && !location.startsWith("/")) {
+                    try {
+                        const locUrl = new URL(location);
+                        if (locUrl.host !== targetBase.host) {
+                            const matchNode = await Database.findNodeByTargetHost(locUrl.host, env, ctx);
+                            if (matchNode) {
+                                const prefix = matchNode.secret
+                                    ? `/${matchNode.name}/${matchNode.secret}`
+                                    : `/${matchNode.name}`;
+                                modifiedHeaders.set("Location", `${prefix}${locUrl.pathname}${locUrl.search}`);
+                            }
+                        }
+                    } catch (e) { }
+                }
+            }
 
             return new Response(response.body, {
                 status: response.status,
@@ -1305,7 +1348,7 @@ export default {
                     }
 
                     // 5. 透传请求给 Emby
-                    return Proxy.handle(request, nodeData, remaining, root, secret);
+                    return Proxy.handle(request, nodeData, remaining, root, secret, env, ctx);
                 }
             }
         }
