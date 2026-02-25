@@ -374,7 +374,7 @@ const Proxy = {
             }
 
             this.rewriteLocation(modifiedHeaders, response.status, name, key, targetBase);
-
+                        
             // 跨 host 重定向改写：后端 302 到其他服务器时，查找匹配的代理节点
             if (response.status >= 300 && response.status < 400) {
                 const location = modifiedHeaders.get("Location");
@@ -384,15 +384,21 @@ const Proxy = {
                         if (locUrl.host !== targetBase.host) {
                             const matchNode = await Database.findNodeByTargetHost(locUrl.host, env, ctx);
                             if (matchNode) {
+                                // 【修复】获取当前 CF Worker 的根域名 (如 https://proxy.yourdomain.com)
+                                const proxyOrigin = new URL(request.url).origin;
+                                
                                 const prefix = matchNode.secret
                                     ? `/${matchNode.name}/${matchNode.secret}`
                                     : `/${matchNode.name}`;
-                                modifiedHeaders.set("Location", `${prefix}${locUrl.pathname}${locUrl.search}`);
+                                    
+                                // 【修复】拼接成绝对路径，让 App 播放器能识别
+                                modifiedHeaders.set("Location", `${proxyOrigin}${prefix}${locUrl.pathname}${locUrl.search}`);
                             }
                         }
                     } catch (e) { }
                 }
             }
+
 
             return new Response(response.body, {
                 status: response.status,
