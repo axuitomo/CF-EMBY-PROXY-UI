@@ -1,4 +1,4 @@
-// EMBY-PROXY-UI V18.1 (SaaS UI Optimized - Ultimate Fix + Emby Auth Patch)
+// EMBY-PROXY-UI V18.2 (SaaS UI Optimized - Ultimate Fix + Emby Auth Patch)
 
 // 单文件导航图（保持单文件部署，不做物理解耦）：
 // 0. 全局状态与通用工具
@@ -95,18 +95,21 @@ const Config = {
     ScheduledLeaseMs: 5 * 60 * 1000,
     DashboardAutoRefreshEnabled: false,
     DashboardAutoRefreshSeconds: 30,
+    CacheTtlImagesDays: 30,
+    PingTimeoutMs: 5000,
     TgAlertDroppedBatchThreshold: 0,
     TgAlertFlushRetryThreshold: 0,
     TgAlertCooldownMinutes: 30,
     TgAlertOnScheduledFailure: false,
     UpstreamTimeoutMs: 0,
     UpstreamRetryAttempts: 0,
+    PrewarmCacheTtl: 180,
     PrewarmPrefetchBytes: 4 * 1024 * 1024,
-    ConfigSnapshotLimit: 12,
+    ConfigSnapshotLimit: 5,
     CleanupBudgetMs: 1,             
     CleanupChunkSize: 64,           
-    AssetHash: "v18.1",           
-    Version: "18.1"                 
+    AssetHash: "v18.2",           
+    Version: "18.2"                 
   }
 };
 
@@ -124,7 +127,8 @@ const GLOBALS = {
   LogLastFlushAt: 0,
   OpsStatusWriteChain: Promise.resolve(),
   Regex: {
-    StaticExt: /\.(?:jpg|jpeg|gif|png|svg|ico|webp|js|css|woff2?|ttf|otf|map|webmanifest|json)$/i,
+    ImageExt: /\.(?:jpg|jpeg|gif|png|svg|ico|webp)$/i,
+    StaticExt: /\.(?:js|css|woff2?|ttf|otf|map|webmanifest)$/i,
     SubtitleExt: /\.(?:srt|ass|vtt|sub)$/i,
     EmbyImages: /(?:\/Images\/|\/Icons\/|\/Branding\/|\/emby\/covers\/)/i,
     ManifestExt: /\.(?:m3u8|mpd)$/i,
@@ -751,23 +755,26 @@ const CONFIG_SANITIZE_RULES = {
   integerFields: {
     logRetentionDays: { fallback: Config.Defaults.LogRetentionDays, min: 1, max: Config.Defaults.LogRetentionDaysMax },
     logFlushCountThreshold: { fallback: Config.Defaults.LogFlushCountThreshold, min: 1, max: 5000 },
-    logBatchChunkSize: { fallback: Config.Defaults.LogBatchChunkSize, min: 1, max: 500 },
+    logBatchChunkSize: { fallback: Config.Defaults.LogBatchChunkSize, min: 1, max: 100 },
     logBatchRetryCount: { fallback: Config.Defaults.LogBatchRetryCount, min: 0, max: 5 },
     logBatchRetryBackoffMs: { fallback: Config.Defaults.LogBatchRetryBackoffMs, min: 0, max: 5000 },
-    scheduledLeaseMs: { fallback: Config.Defaults.ScheduledLeaseMs, min: Config.Defaults.ScheduledLeaseMinMs, max: 30 * 60 * 1000 },
+    scheduledLeaseMs: { fallback: Config.Defaults.ScheduledLeaseMs, min: Config.Defaults.ScheduledLeaseMinMs, max: 15 * 60 * 1000 },
     dashboardAutoRefreshSeconds: { fallback: Config.Defaults.DashboardAutoRefreshSeconds, min: 5, max: 3600 },
     tgAlertDroppedBatchThreshold: { fallback: Config.Defaults.TgAlertDroppedBatchThreshold, min: 0, max: 5000 },
     tgAlertFlushRetryThreshold: { fallback: Config.Defaults.TgAlertFlushRetryThreshold, min: 0, max: 10 },
     tgAlertCooldownMinutes: { fallback: Config.Defaults.TgAlertCooldownMinutes, min: 1, max: 1440 },
+    cacheTtlImages: { fallback: Config.Defaults.CacheTtlImagesDays, min: 0, max: 365 },
+    pingTimeout: { fallback: Config.Defaults.PingTimeoutMs, min: 1000, max: 180000 },
     upstreamTimeoutMs: { fallback: Config.Defaults.UpstreamTimeoutMs, min: 0, max: 180000 },
     upstreamRetryAttempts: { fallback: Config.Defaults.UpstreamRetryAttempts, min: 0, max: 3 },
+    prewarmCacheTtl: { fallback: Config.Defaults.PrewarmCacheTtl, min: 0, max: 3600 },
     prewarmPrefetchBytes: { fallback: Config.Defaults.PrewarmPrefetchBytes, min: 0, max: 64 * 1024 * 1024 }
   },
   numberFields: {
     logWriteDelayMinutes: { fallback: Config.Defaults.LogFlushDelayMinutes, min: 0, max: 1440 }
   },
   booleanTrueFields: [],
-  booleanFalseFields: ["dashboardAutoRefreshEnabled", "tgAlertOnScheduledFailure"]
+  booleanFalseFields: ["dashboardAutoRefreshEnabled", "tgAlertOnScheduledFailure", "directStaticAssets", "directHlsDash", "disablePrewarmPrefetch"]
 };
 
 function sanitizeConfigWithRules(input = {}, rules = CONFIG_SANITIZE_RULES, helpers = {}) {
@@ -1203,6 +1210,10 @@ const Database = {
   async getConfigSnapshotById(kv, snapshotId) {
     const snapshots = await this.getConfigSnapshots(kv, { withConfig: true });
     return snapshots.find(item => item.id === snapshotId) || null;
+  },
+  async clearConfigSnapshots(kv) {
+    if (!kv) return;
+    await kv.delete(this.CONFIG_SNAPSHOTS_KEY);
   },
   async recordConfigSnapshot(kv, prevConfig, nextConfig, meta = {}) {
     if (!kv) return null;
@@ -1729,6 +1740,11 @@ const Database = {
       return jsonResponse({ snapshots: await Database.getConfigSnapshots(kv) });
     },
 
+    async clearConfigSnapshots(data, { kv }) {
+      await Database.clearConfigSnapshots(kv);
+      return jsonResponse({ success: true, snapshots: [] });
+    },
+
     async restoreConfigSnapshot(data, { env, ctx, kv }) {
       const snapshotId = String(data?.id || "").trim();
       if (!snapshotId) return jsonError("SNAPSHOT_ID_REQUIRED", "请提供要恢复的快照 ID");
@@ -1899,10 +1915,11 @@ const Database = {
       let whereClause = [], params = [];
       
       if (filters.keyword) { 
-          whereClause.push("(node_name LIKE ? OR request_path LIKE ? OR client_ip LIKE ? OR category LIKE ? OR CAST(status_code AS TEXT) LIKE ?)"); 
-          params.push(`%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`); 
+          whereClause.push("(node_name LIKE ? OR request_path LIKE ? OR client_ip LIKE ? OR category LIKE ? OR CAST(status_code AS TEXT) LIKE ? OR error_detail LIKE ?)"); 
+          params.push(`%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`); 
       }
       if (filters.category) { whereClause.push("category = ?"); params.push(filters.category); }
+      if (filters.playbackMode) { whereClause.push("error_detail LIKE ?"); params.push(`%Playback=${filters.playbackMode}%`); }
       if (filters.startDate) { whereClause.push("timestamp >= ?"); params.push(new Date(filters.startDate).getTime()); }
       if (filters.endDate) { whereClause.push("timestamp <= ?"); params.push(new Date(filters.endDate + "T23:59:59").getTime()); }
       
@@ -2028,38 +2045,50 @@ const Proxy = {
     applySecurityHeaders(headers);
     return headers;
   },
-  classifyRequest(request, proxyPath, requestUrl, currentConfig) {
+  classifyRequest(request, proxyPath, requestUrl, currentConfig, options = {}) {
     const rangeHeader = request.headers.get("Range");
-    const enablePrewarm = currentConfig.enablePrewarm !== false;
-    const prewarmCacheTtl = parseInt(currentConfig.prewarmCacheTtl) || 180;
-    const prewarmPrefetchBytes = clampIntegerConfig(currentConfig.prewarmPrefetchBytes, Config.Defaults.PrewarmPrefetchBytes, 0, 64 * 1024 * 1024);
-    const isHeadPrewarm =
-      enablePrewarm &&
-      (request.method === "GET" || request.method === "HEAD") &&
-      !!rangeHeader &&
-      /^bytes=0-(\d{0,7})?$/.test(rangeHeader);
-    const isImage = GLOBALS.Regex.EmbyImages.test(proxyPath) || GLOBALS.Regex.StaticExt.test(proxyPath);
+    const isImage = GLOBALS.Regex.EmbyImages.test(proxyPath) || GLOBALS.Regex.ImageExt.test(proxyPath);
+    const isStaticFile = GLOBALS.Regex.StaticExt.test(proxyPath);
     const isSubtitle = GLOBALS.Regex.SubtitleExt.test(proxyPath);
     const isManifest = GLOBALS.Regex.ManifestExt.test(proxyPath);
     const isSegment = GLOBALS.Regex.SegmentExt.test(proxyPath);
     const isWsUpgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
     const looksLikeVideoRoute = GLOBALS.Regex.Streaming.test(proxyPath) || /\/videos\/[^/]+\/(stream|original|download|file)/i.test(proxyPath) || /\/items\/[^/]+\/download/i.test(proxyPath) || requestUrl.searchParams.get("Static") === "true" || requestUrl.searchParams.get("Download") === "true";
+    const isSafeMethod = request.method === "GET" || request.method === "HEAD";
+    const directStaticAssets = options.directStaticAssets === true && isSafeMethod && isStaticFile;
+    // WebVTT 字幕轨继续走 Worker 缓存：307 直连会额外多一次跳转，双语字幕场景通常更容易比代理缓存更慢。
+    const directHlsDash = options.directHlsDash === true && isSafeMethod && (isManifest || isSegment);
+    const direct307Mode = options.nodeDirectSource === true || directStaticAssets || directHlsDash;
+    const enablePrewarm = currentConfig.enablePrewarm !== false && !direct307Mode;
+    const prewarmCacheTtl = clampIntegerConfig(currentConfig.prewarmCacheTtl, Config.Defaults.PrewarmCacheTtl, 0, 3600);
+    const disablePrewarmPrefetch = currentConfig.disablePrewarmPrefetch === true || direct307Mode;
+    const prewarmPrefetchBytes = disablePrewarmPrefetch ? 0 : clampIntegerConfig(currentConfig.prewarmPrefetchBytes, Config.Defaults.PrewarmPrefetchBytes, 0, 64 * 1024 * 1024);
+    const isHeadPrewarm =
+      enablePrewarm &&
+      isSafeMethod &&
+      !!rangeHeader &&
+      /^bytes=0-(\d{0,7})?$/.test(rangeHeader);
     const isBigStream = looksLikeVideoRoute && !isManifest && !isSegment && !isHeadPrewarm;
-    const isCacheableAsset = request.method === "GET" && !isWsUpgrade && (isImage || isSubtitle || isSegment || isHeadPrewarm);
+    const isCacheableAsset = request.method === "GET" && !isWsUpgrade && (isImage || isStaticFile || isSubtitle || isSegment || isHeadPrewarm);
     return {
       rangeHeader,
       enablePrewarm,
       prewarmCacheTtl,
       prewarmPrefetchBytes,
+      disablePrewarmPrefetch,
       isHeadPrewarm,
       isImage,
+      isStaticFile,
       isSubtitle,
       isManifest,
       isSegment,
       isWsUpgrade,
       looksLikeVideoRoute,
       isBigStream,
-      isCacheableAsset
+      isCacheableAsset,
+      directStaticAssets,
+      directHlsDash,
+      direct307Mode
     };
   },
   evaluateFirewall(currentConfig, clientIp, country, finalOrigin) {
@@ -2196,7 +2225,10 @@ const Proxy = {
       modifiedHeaders.delete("Alt-Svc");
     }
 
-    if (requestTraits.isImage || requestTraits.isSubtitle || requestTraits.isManifest) {
+    const imageCacheMaxAge = clampIntegerConfig(options.imageCacheMaxAge, Config.Defaults.CacheTtlImagesDays * 86400, 0, 365 * 86400);
+    if (requestTraits.isImage) {
+      modifiedHeaders.set("Cache-Control", `public, max-age=${imageCacheMaxAge}`);
+    } else if (requestTraits.isStaticFile || requestTraits.isSubtitle || requestTraits.isManifest) {
       modifiedHeaders.set("Cache-Control", "public, max-age=86400");
     } else if (requestTraits.isHeadPrewarm) {
       modifiedHeaders.set("Cache-Control", `public, max-age=${requestTraits.prewarmCacheTtl}`);
@@ -2235,8 +2267,50 @@ const Proxy = {
     if (requestTraits.isBigStream) return "stream";
     if (requestTraits.isImage) return "image";
     if (requestTraits.isSubtitle) return "subtitle";
+    if (requestTraits.isStaticFile) return "asset";
     if (requestTraits.isWsUpgrade) return "websocket";
     return "api";
+  },
+  isPlaybackInfoRequest(proxyPath) {
+    return /\/playbackinfo\b/i.test(String(proxyPath || ""));
+  },
+  async extractPlaybackInfoDiagnostic(proxyPath, requestUrl, response) {
+    if (!this.isPlaybackInfoRequest(proxyPath)) return null;
+    if (!(response.status >= 200 && response.status < 300)) return null;
+    const contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+    if (!contentType.includes("json")) return null;
+    try {
+      const payload = await response.clone().json();
+      const mediaSource = Array.isArray(payload?.MediaSources) ? payload.MediaSources[0] : null;
+      if (!mediaSource || typeof mediaSource !== "object") return null;
+      const transcodeUrl = String(mediaSource.TranscodingUrl || "");
+      const supportsDirectPlay = mediaSource.SupportsDirectPlay === true;
+      const supportsDirectStream = mediaSource.SupportsDirectStream === true;
+      const mode = transcodeUrl
+        ? "transcode"
+        : supportsDirectPlay
+          ? "direct_play"
+          : supportsDirectStream
+            ? "direct_stream"
+            : "unknown";
+      const hints = [`Playback=${mode}`];
+      const subtitleStreamIndex = requestUrl.searchParams.get("SubtitleStreamIndex");
+      if (subtitleStreamIndex !== null && subtitleStreamIndex !== "") hints.push(`ReqSubtitle=${subtitleStreamIndex}`);
+      const subtitleMethod = requestUrl.searchParams.get("SubtitleMethod");
+      if (subtitleMethod) hints.push(`SubtitleMethod=${subtitleMethod}`);
+      const subtitleStreams = Array.isArray(mediaSource.MediaStreams)
+        ? mediaSource.MediaStreams.filter(stream => String(stream?.Type || "").toLowerCase() === "subtitle")
+        : [];
+      if (subtitleStreams.length > 0) hints.push(`SubtitleTracks=${subtitleStreams.length}`);
+      if (subtitleStreams.some(stream => stream?.IsExternal === true)) hints.push("ExternalSubtitle=yes");
+      if (transcodeUrl) {
+        if (/subtitle/i.test(transcodeUrl)) hints.push("SubtitleInTranscode=yes");
+        if (/burn/i.test(transcodeUrl)) hints.push("SubtitleBurn=yes");
+      }
+      return hints.join(" | ");
+    } catch {
+      return null;
+    }
   },
   extractProxyErrorDetail(response) {
     if (response.status < 400) return null;
@@ -2368,8 +2442,13 @@ const Proxy = {
     const blockedResponse = this.evaluateFirewall(currentConfig, clientIp, country, finalOrigin);
     if (blockedResponse) return blockedResponse;
 
-    const requestTraits = this.classifyRequest(request, proxyPath, requestUrl, currentConfig);
-    const { rangeHeader, enablePrewarm, prewarmCacheTtl, prewarmPrefetchBytes, isHeadPrewarm, isImage, isSubtitle, isManifest, isSegment, isWsUpgrade, looksLikeVideoRoute, isBigStream, isCacheableAsset } = requestTraits;
+    const nodeDirectSource = isNodeDirectSourceEnabled(node, currentConfig);
+    const requestTraits = this.classifyRequest(request, proxyPath, requestUrl, currentConfig, {
+      nodeDirectSource,
+      directStaticAssets: currentConfig.directStaticAssets === true,
+      directHlsDash: currentConfig.directHlsDash === true
+    });
+    const { rangeHeader, enablePrewarm, prewarmCacheTtl, prewarmPrefetchBytes, isHeadPrewarm, isImage, isStaticFile, isSubtitle, isManifest, isSegment, isWsUpgrade, looksLikeVideoRoute, isBigStream, isCacheableAsset, directStaticAssets, directHlsDash } = requestTraits;
 
     const rateLimitResponse = this.applyRateLimit(currentConfig, clientIp, requestTraits, startTime, finalOrigin);
     if (rateLimitResponse) return rateLimitResponse;
@@ -2392,8 +2471,7 @@ const Proxy = {
     const sourceSameOriginProxy = currentConfig.sourceSameOriginProxy !== false;
     const forceExternalProxy = currentConfig.forceExternalProxy !== false;
     const wangpanDirectKeywords = getWangpanDirectText(currentConfig.wangpandirect || "");
-    const nodeDirectSource = isNodeDirectSourceEnabled(node, currentConfig);
-
+    const imageCacheMaxAge = clampIntegerConfig(currentConfig.cacheTtlImages, Config.Defaults.CacheTtlImagesDays, 0, 365) * 86400;
     const buildFetchOptions = async (targetUrl, options = {}) => {
       const headers = new Headers(newHeaders);
       const finalTargetUrl = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl));
@@ -2438,13 +2516,20 @@ const Proxy = {
         headers.delete("Content-Length");
       }
 
+      const canEdgeCacheSubtitle = effectiveMethod === "GET" && !rangeHeader && isSubtitle;
       // [预热修复] 3. 当命中预热探测时，真正命令 Cloudflare 边缘节点进行缓存
+      // [字幕优化] 对字幕文件显式开启边缘缓存，避免仅返回 Cache-Control 但回源仍每次穿透。
+      const cfCacheOptions = isHeadPrewarm
+        ? { cacheEverything: true, cacheTtl: prewarmCacheTtl }
+        : canEdgeCacheSubtitle
+          ? { cacheEverything: true, cacheTtl: 86400 }
+          : { cacheEverything: false, cacheTtl: 0 };
       /** @type {WorkerRequestInit} */
       const fetchOptions = { 
         method: effectiveMethod, 
         headers, 
         redirect: "manual", 
-        cf: isHeadPrewarm ? { cacheEverything: true, cacheTtl: prewarmCacheTtl } : { cacheEverything: false, cacheTtl: 0 } 
+        cf: cfCacheOptions
       };
       if (effectiveMethod !== "GET" && effectiveMethod !== "HEAD") {
         if (effectiveBodyMode === "buffered" && effectiveBody !== null && effectiveBody !== undefined) fetchOptions.body = effectiveBody.slice(0);
@@ -2521,7 +2606,7 @@ const Proxy = {
         redirectHop += 1;
       }
 
-      if (!directRedirectUrl && nodeDirectSource && response.status >= 200 && response.status < 300 && (request.method === "GET" || request.method === "HEAD")) {
+      if (!directRedirectUrl && response.status >= 200 && response.status < 300 && (request.method === "GET" || request.method === "HEAD") && (nodeDirectSource || directStaticAssets || directHlsDash)) {
         directRedirectUrl = new URL(proxyPath, activeTargetBase);
         directRedirectUrl.search = requestUrl.search;
         directRedirectStatus = 307;
@@ -2531,12 +2616,14 @@ const Proxy = {
       const modifiedHeaders = this.buildProxyResponseHeaders(response, request, dynamicCors, finalOrigin, requestTraits, {
         enableH3,
         forceH1,
-        proxiedExternalRedirect
+        proxiedExternalRedirect,
+        imageCacheMaxAge
       });
       this.applyProxyRedirectHeaders(modifiedHeaders, response, activeTargetBase, name, key, directRedirectUrl);
 
       const reqCategory = this.classifyProxyLogCategory(requestTraits);
-      const errorDetail = this.extractProxyErrorDetail(response);
+      const playbackDiagnostic = await this.extractPlaybackInfoDiagnostic(proxyPath, requestUrl, response);
+      const errorDetail = this.extractProxyErrorDetail(response) || playbackDiagnostic;
 
       Logger.record(env, ctx, {
         nodeName: name,
@@ -2744,7 +2831,7 @@ const Logger = {
     const configuredChunkSize = Number(GLOBALS.ConfigCache?.data?.logBatchChunkSize);
     const configuredRetryCount = Number(GLOBALS.ConfigCache?.data?.logBatchRetryCount);
     const configuredRetryBackoffMs = Number(GLOBALS.ConfigCache?.data?.logBatchRetryBackoffMs);
-    const chunkSize = clampIntegerConfig(configuredChunkSize, Config.Defaults.LogBatchChunkSize, 1, 500);
+    const chunkSize = clampIntegerConfig(configuredChunkSize, Config.Defaults.LogBatchChunkSize, 1, 100);
     const maxRetryCount = clampIntegerConfig(configuredRetryCount, Config.Defaults.LogBatchRetryCount, 0, 5);
     const retryBackoffMs = clampIntegerConfig(configuredRetryBackoffMs, Config.Defaults.LogBatchRetryBackoffMs, 0, 5000);
     let writtenCount = 0;
@@ -2815,7 +2902,7 @@ const UI_HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Emby Proxy V18.1 - SaaS Dashboard</title>
+  <title>Emby Proxy V18.2 - SaaS Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -2832,6 +2919,57 @@ const UI_HTML = `<!DOCTYPE html>
     .view-section.active { display: block; animation: fadeIn 0.3s ease-out; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
     aside { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    #view-settings .settings-nav-shell,
+    #view-settings .settings-panel,
+    #view-settings .settings-block,
+    #view-settings .settings-list-shell {
+      box-shadow: none !important;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    #view-settings .settings-nav-shell,
+    #view-settings .settings-panel {
+      background: #ffffff !important;
+    }
+    #view-settings .settings-block,
+    #view-settings .settings-list-shell {
+      background: #f8fafc !important;
+    }
+    .dark #view-settings .settings-nav-shell,
+    .dark #view-settings .settings-panel {
+      background: #0f172a !important;
+    }
+    .dark #view-settings .settings-block,
+    .dark #view-settings .settings-list-shell {
+      background: #020617 !important;
+    }
+    @media (min-width: 768px) {
+      body.settings-split-layout #content-area {
+        overflow: hidden;
+      }
+      body.settings-split-layout #view-settings {
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+      }
+      body.settings-split-layout #view-settings .settings-view-layout {
+        height: 100%;
+        min-height: 0;
+      }
+      body.settings-split-layout #view-settings .settings-nav-shell {
+        position: sticky;
+        top: 0;
+        max-height: 100%;
+        overflow-y: auto;
+      }
+      body.settings-split-layout #view-settings #settings-forms {
+        height: 100%;
+        min-height: 0;
+        overflow-y: auto;
+        padding-right: 0.25rem;
+        scrollbar-gutter: stable;
+      }
+    }
   </style>
 </head>
 <body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 antialiased overflow-hidden flex h-[100dvh]">
@@ -2843,7 +2981,7 @@ const UI_HTML = `<!DOCTYPE html>
       <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-indigo-600 flex items-center justify-center text-white font-bold text-lg flex-shrink-0">E</div>
       <h1 class="ml-3 font-semibold tracking-tight text-lg flex items-center gap-2">
         Emby Proxy 
-        <span class="px-1.5 py-0.5 rounded bg-brand-100 text-brand-600 dark:bg-brand-500/20 dark:text-brand-400 text-[10px] font-bold mt-0.5">V18.1</span>
+        <span class="px-1.5 py-0.5 rounded bg-brand-100 text-brand-600 dark:bg-brand-500/20 dark:text-brand-400 text-[10px] font-bold mt-0.5">V18.2</span>
       </h1>
     </div>
     <nav class="flex-1 overflow-y-auto py-4 px-3 space-y-1">
@@ -2926,6 +3064,12 @@ const UI_HTML = `<!DOCTYPE html>
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
               <input type="text" id="log-search-input" placeholder="搜索节点、IP、路径或状态码(如200)..." class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 outline-none text-sm text-slate-900 dark:text-white flex-1 md:w-56" onkeydown="if(event.key==='Enter') App.loadLogs(1)">
               <button onclick="App.loadLogs(1)" class="text-brand-500 text-sm px-2 hover:text-brand-600"><i data-lucide="search" class="w-4 h-4 inline"></i></button>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <button data-log-playback-filter="" onclick="App.setLogsPlaybackModeFilter('')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-brand-50 text-brand-600 dark:bg-brand-500/10 dark:text-brand-400 text-xs font-medium transition">全部模式</button>
+                <button data-log-playback-filter="transcode" onclick="App.setLogsPlaybackModeFilter('transcode')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs font-medium transition hover:bg-slate-50 dark:hover:bg-slate-800">只看转码</button>
+                <button data-log-playback-filter="direct_stream" onclick="App.setLogsPlaybackModeFilter('direct_stream')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs font-medium transition hover:bg-slate-50 dark:hover:bg-slate-800">只看直串</button>
+                <button data-log-playback-filter="direct_play" onclick="App.setLogsPlaybackModeFilter('direct_play')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs font-medium transition hover:bg-slate-50 dark:hover:bg-slate-800">只看直放</button>
+              </div>
               
               <div class="w-px h-5 bg-slate-300 dark:bg-slate-700 mx-1 hidden md:block"></div>
               
@@ -2948,74 +3092,223 @@ const UI_HTML = `<!DOCTYPE html>
         </div>
       </div>
 
-      <div id="view-settings" class="view-section max-w-4xl mx-auto space-y-6">
-        <div class="glass-card rounded-3xl p-6 flex flex-col md:flex-row gap-6">
-           <div class="w-full md:w-48 flex flex-row md:flex-col gap-2 md:gap-0 md:space-y-1 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 pb-4 md:pb-0 pr-0 md:pr-4 overflow-x-auto whitespace-nowrap md:whitespace-normal">
-              <button class="set-tab flex-shrink-0 text-left px-3 py-2 md:py-3 rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-500/10 dark:text-brand-400 text-sm font-medium" onclick="App.switchSetTab(event, 'ui')"><span class="block">系统 UI</span><span class="hidden md:block mt-1 text-[11px] leading-4 font-normal opacity-80">仪表盘刷新与后台体验</span></button>
-              <button class="set-tab flex-shrink-0 text-left px-3 py-2 md:py-3 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium" onclick="App.switchSetTab(event, 'proxy')"><span class="block">代理与网络</span><span class="hidden md:block mt-1 text-[11px] leading-4 font-normal opacity-80">播放稳定性与链路策略</span></button>
-              <button class="set-tab flex-shrink-0 text-left px-3 py-2 md:py-3 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium" onclick="App.switchSetTab(event, 'security')"><span class="block">缓存与安全</span><span class="hidden md:block mt-1 text-[11px] leading-4 font-normal opacity-80">访问控制、限速与跨域</span></button>
-              <button class="set-tab flex-shrink-0 text-left px-3 py-2 md:py-3 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium" onclick="App.switchSetTab(event, 'logs')"><span class="block">日志与监控</span><span class="hidden md:block mt-1 text-[11px] leading-4 font-normal opacity-80">日志写入、告警与日报</span></button>
-              <button class="set-tab flex-shrink-0 text-left px-3 py-2 md:py-3 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium" onclick="App.switchSetTab(event, 'account')"><span class="block">账号与备份</span><span class="hidden md:block mt-1 text-[11px] leading-4 font-normal opacity-80">Cloudflare 联动与恢复保底</span></button>
-           </div>
-           <div class="flex-1" id="settings-forms">
+      <div id="view-settings" class="view-section max-w-6xl mx-auto space-y-6">
+           <div class="settings-view-layout flex flex-col gap-4 md:flex-row md:items-start md:gap-5">
+              <div class="md:w-64 md:flex-shrink-0 md:self-start">
+                <div class="settings-nav-shell w-full rounded-[24px] border border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/70 p-3 md:p-3.5 shadow-sm shadow-slate-200/60 dark:shadow-none">
+                  <div class="px-1 pb-2.5 mb-2.5 border-b border-slate-200/80 dark:border-slate-800">
+                    <div class="text-[11px] font-semibold tracking-[0.16em] text-slate-400 dark:text-slate-500 uppercase">Settings</div>
+                    <div class="text-[13px] font-semibold text-slate-900 dark:text-white mt-1">全局设置导航</div>
+                    <p class="mt-1.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">PC 端左侧分区导航，移动端可横向滑动切换。</p>
+                  </div>
+                  <div class="flex flex-row gap-1.5 overflow-x-auto whitespace-nowrap md:flex-col md:overflow-visible md:whitespace-normal" role="tablist" aria-label="全局设置导航">
+                    <button class="set-tab min-w-[10rem] md:min-w-0 md:w-full flex-shrink-0 text-left px-3 py-2.5 rounded-xl border border-brand-200/80 bg-brand-50 text-brand-600 dark:border-brand-500/20 dark:bg-brand-500/10 dark:text-brand-400 text-[13px] transition" onclick="App.switchSetTab(event, 'ui')" role="tab" aria-controls="set-ui" aria-selected="true">
+                      <span class="block font-semibold">系统 UI</span>
+                      <span class="hidden md:block mt-0.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">仪表盘刷新与后台体验</span>
+                    </button>
+                    <button class="set-tab min-w-[10rem] md:min-w-0 md:w-full flex-shrink-0 text-left px-3 py-2.5 rounded-xl border border-transparent bg-transparent text-slate-500 dark:text-slate-400 text-[13px] transition hover:bg-slate-100 hover:border-slate-200 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:border-slate-700 dark:hover:text-white" onclick="App.switchSetTab(event, 'proxy')" role="tab" aria-controls="set-proxy" aria-selected="false">
+                      <span class="block font-semibold">代理与网络</span>
+                      <span class="hidden md:block mt-0.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">播放稳定性与链路策略</span>
+                    </button>
+                    <button class="set-tab min-w-[10rem] md:min-w-0 md:w-full flex-shrink-0 text-left px-3 py-2.5 rounded-xl border border-transparent bg-transparent text-slate-500 dark:text-slate-400 text-[13px] transition hover:bg-slate-100 hover:border-slate-200 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:border-slate-700 dark:hover:text-white" onclick="App.switchSetTab(event, 'security')" role="tab" aria-controls="set-security" aria-selected="false">
+                      <span class="block font-semibold">缓存与安全</span>
+                      <span class="hidden md:block mt-0.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">访问控制、限速与跨域</span>
+                    </button>
+                    <button class="set-tab min-w-[10rem] md:min-w-0 md:w-full flex-shrink-0 text-left px-3 py-2.5 rounded-xl border border-transparent bg-transparent text-slate-500 dark:text-slate-400 text-[13px] transition hover:bg-slate-100 hover:border-slate-200 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:border-slate-700 dark:hover:text-white" onclick="App.switchSetTab(event, 'logs')" role="tab" aria-controls="set-logs" aria-selected="false">
+                      <span class="block font-semibold">日志与监控</span>
+                      <span class="hidden md:block mt-0.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">日志写入、告警与日报</span>
+                    </button>
+                    <button class="set-tab min-w-[10rem] md:min-w-0 md:w-full flex-shrink-0 text-left px-3 py-2.5 rounded-xl border border-transparent bg-transparent text-slate-500 dark:text-slate-400 text-[13px] transition hover:bg-slate-100 hover:border-slate-200 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:border-slate-700 dark:hover:text-white" onclick="App.switchSetTab(event, 'account')" role="tab" aria-controls="set-account" aria-selected="false">
+                      <span class="block font-semibold">账号与备份</span>
+                      <span class="hidden md:block mt-0.5 text-[11px] leading-4 text-slate-500 dark:text-slate-400">Cloudflare 联动与恢复保底</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="flex-1 min-w-0" id="settings-forms">
               
-              <div id="set-ui" class="block">
-                <h3 class="font-bold mb-4 text-slate-900 dark:text-white">UI 外观偏好</h3>
-                <p class="text-sm text-slate-500 mb-4">深浅模式仍然只保存在当前浏览器；下面这组 Dashboard 刷新策略则会保存到 Worker 全局配置，所有管理员界面共享。</p>
-                <div class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-4 mb-4">
+              <div id="set-ui" class="block space-y-4">
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/70 p-5 shadow-sm settings-panel">
+                  <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div class="max-w-2xl">
+                      <span class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] uppercase text-indigo-600 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">UI</span>
+                      <h3 class="mt-3 text-lg font-semibold text-slate-900 dark:text-white">UI 外观偏好</h3>
+                      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">深浅模式仍然只保存在当前浏览器；下面这组 Dashboard 刷新策略会保存到 Worker 全局配置，所有管理员界面共享。</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 md:max-w-[240px]">
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">本地主题</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">全局刷新</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block">
+                  <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                    <div>
+                      <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Dashboard</div>
+                      <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">控制台刷新策略</div>
+                    </div>
+                    <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">5-3600 秒</span>
+                  </div>
                   <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-dashboard-auto-refresh" class="mr-2 w-4 h-4 rounded"> 开启 Dashboard 自动刷新</label>
                   <p class="text-xs text-slate-500 mb-3 ml-6">启用后，仪表盘会按设定周期自动重拉“统计面板 + 运行状态”。适合值班看板；如果你的 cron 很少跑，建议把周期设得保守一些。</p>
-                  <label class="block text-sm text-slate-500 mb-1 ml-6">自动刷新周期（秒）</label>
-                  <input type="number" min="5" step="5" id="cfg-dashboard-auto-refresh-seconds" class="w-[calc(100%-1.5rem)] md:w-1/2 p-2 ml-6 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="30">
-                  <p class="text-xs text-slate-500 ml-6">推荐 30 到 60 秒；过短会放大控制台请求频率。</p>
+                  <label class="block text-sm text-slate-500 mb-1 ml-6">自动刷新周期</label>
+                  <div class="relative w-[calc(100%-1.5rem)] ml-6">
+                    <input type="number" min="5" max="3600" step="5" id="cfg-dashboard-auto-refresh-seconds" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="30">
+                    <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">秒</span>
+                  </div>
+                  <p class="text-xs text-slate-500 ml-6">推荐 30 到 60 秒；系统会限制在 5 到 3600 秒之间，避免过短刷新放大控制台请求频率。</p>
                 </div>
-                <button onclick="App.saveSettings('ui')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存 UI 策略</button>
+                <div class="flex flex-wrap gap-2">
+                  <button onclick="App.saveSettings('ui')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存 UI 策略</button>
+                </div>
               </div>
               
-              <div id="set-proxy" class="hidden">
-                <h3 class="font-bold mb-4 text-slate-900 dark:text-white">网络协议与优化</h3>
-                <p class="text-sm text-slate-500 mb-4">默认强制所有数据在 H1.1 下流通以保持最佳的单线程连贯性（并自动注入长连接参数）。</p>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-h2" class="mr-2 w-4 h-4 rounded"> 允许开启 HTTP/2 (不建议)</label>
-                <p class="text-xs text-slate-500 mb-3 ml-6">适合少数明确支持多路复用的上游；部分视频源在分片、长连接或头部兼容性上反而更容易出现异常。</p>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-h3" class="mr-2 w-4 h-4 rounded"> 允许开启 HTTP/3 QUIC (推荐良好网络开启)</label>
-                <p class="text-xs text-slate-500 mb-3 ml-6">适合网络质量稳定、丢包率低的环境；弱网或运营商链路复杂时，实际稳定性未必优于 HTTP/1.1。</p>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-peak-downgrade" class="mr-2 w-4 h-4 rounded" checked> 晚高峰 (20:00 - 24:00) 自动降级为 HTTP/1.1 兜底</label>
-                <p class="text-xs text-slate-500 mb-3 ml-6">高峰时段优先稳态传输，减少握手抖动、异常回源和多路复用放大的兼容性问题。</p>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-protocol-fallback" class="mr-2 w-4 h-4 rounded" checked> 开启协议回退与 403 重试 (剥离报错头重连，缓解视频报错)</label>
-                <p class="text-xs text-slate-500 mb-4 ml-6">当上游返回 403 或握手异常时，自动剥离可疑报错头并切换到更稳的协议后重试一次。</p>
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">起播加速优化 (Prewarm)</h3>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-prewarm" class="mr-2 w-4 h-4 rounded" checked> 开启视频起播预热拦截</label>
-                <p class="text-xs text-slate-500 mb-3 ml-6">精准拦截播放器起播时的探测请求，利用 Cloudflare 边缘节点进行微型缓存，极大提升起播速度并保护源站。</p>
-                <label class="block text-sm text-slate-500 mb-1 ml-6">预热微缓存时长 (秒)</label>
-                <input type="number" id="cfg-prewarm-ttl" class="w-[calc(100%-1.5rem)] md:w-1/2 p-2 ml-6 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white" value="180">
-                <label class="block text-sm text-slate-500 mb-1 ml-6">预热旁路预取字节数</label>
-                <input type="number" min="0" step="65536" id="cfg-prewarm-prefetch-bytes" class="w-[calc(100%-1.5rem)] md:w-1/2 p-2 ml-6 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="4194304">
-                <p class="text-xs text-slate-500 mb-4 ml-6">控制命中起播探测后，后台额外预取多少后续 Range 数据。填 0 表示仅做首个探测缓存，不做旁路预取。</p>
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">跳转代理开关</h3>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-source-same-origin-proxy" class="mr-2 w-4 h-4 rounded" checked> 默认开启：源站和同源跳转代理</label>
-                <p class="text-xs text-slate-500 mb-3">开启时既包含源站 2xx 的 Worker 透明拉流，也包含同源 30x 的继续代理跳转；仅当节点被显式标记为直连时，源站 2xx 才会改为直连源站。关闭后，同源 30x 直接下发 Location。</p>
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-force-external-proxy" class="mr-2 w-4 h-4 rounded" checked> 默认开启：强制反代外部链接</label>
-                <p class="text-xs text-slate-500 mb-3">开启后 Worker 会作为中继站拉流并透明转发；除国内网盘/对象存储外默认不缓存，命中 <code>wangpandirect</code> 列表走直连。关闭后外部链接直接下发直连。</p>
-                <p class="text-xs text-slate-500 mb-2">默认已填入内置关键词；请使用英文逗号分隔自定义内容，例如 <code>baidu,alibaba</code>。</p>
-                <label class="block text-sm text-slate-500 mb-1">wangpandirect 直连黑名单（关键词模糊匹配，英文逗号分隔）</label>
-                <textarea id="cfg-wangpandirect" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white resize-y" rows="3" placeholder="例如: baidu,alibaba"></textarea>
+              <div id="set-proxy" class="hidden space-y-4">
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/70 p-5 shadow-sm settings-panel">
+                  <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div class="max-w-2xl">
+                      <span class="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] uppercase text-sky-600 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">Network</span>
+                      <h3 class="mt-3 text-lg font-semibold text-slate-900 dark:text-white">网络协议与优化</h3>
+                      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">默认仍以 HTTP/1.1 稳定链路为基线，再按需打开预热、直连与回退策略。这里更适合小步调参，不建议一次改很多项。</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 md:max-w-[280px]">
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">H1.1 优先</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">预热拦截</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">307 直连</span>
+                    </div>
+                  </div>
+                </div>
 
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">源站直连名单</h3>
-                <p class="text-xs text-slate-500 mb-3">这里列出现有节点。勾选后，这些节点在“源站和同源跳转代理”开启时，源站 2xx 会直接下发到源站，不再由 Worker 中继；未勾选节点继续由 Worker 透明拉流。</p>
-                <input type="text" id="cfg-direct-node-search" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="搜索节点名称、标签或备注..." oninput="App.renderSourceDirectNodesPicker()">
-                <div id="cfg-source-direct-nodes-summary" class="text-xs text-slate-500 mb-2">已选 0 个节点</div>
-                <div id="cfg-source-direct-nodes-list" class="max-h-64 overflow-y-auto rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-950/60 p-2 space-y-2 mb-4"></div>
-                
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">健康检查探测</h3>
-                <label class="block text-sm text-slate-500 mb-1">Ping 超时时间 (毫秒)</label>
-                <input type="number" id="cfg-ping-timeout" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white" value="5000">
+                <div class="grid gap-4">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Protocol</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">基础协议策略</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">稳定优先</span>
+                    </div>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-h2" class="mr-2 w-4 h-4 rounded"> 允许开启 HTTP/2 (不建议)</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">适合少数明确支持多路复用的上游；部分视频源在分片、长连接或头部兼容性上反而更容易出现异常。</p>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-h3" class="mr-2 w-4 h-4 rounded"> 允许开启 HTTP/3 QUIC (仅网络质量稳定时按需开启)</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">适合网络质量稳定、丢包率低的环境；弱网或运营商链路复杂时，实际稳定性未必优于 HTTP/1.1。</p>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-peak-downgrade" class="mr-2 w-4 h-4 rounded" checked> 晚高峰 (20:00 - 24:00) 自动降级为 HTTP/1.1 兜底</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">高峰时段优先稳态传输，减少握手抖动、异常回源和多路复用放大的兼容性问题。</p>
+                    <label class="flex items-center text-sm font-medium cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-protocol-fallback" class="mr-2 w-4 h-4 rounded" checked> 开启协议回退与 403 重试 (剥离报错头重连，缓解视频报错)</label>
+                    <p class="text-xs text-slate-500 mt-2 ml-6">当上游返回 403 或握手异常时，自动剥离可疑报错头并切换到更稳的协议后重试一次。</p>
+                  </div>
 
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">上游请求防挂死保护</h3>
-                <label class="block text-sm text-slate-500 mb-1">上游握手超时（毫秒，0 为关闭）</label>
-                <input type="number" min="0" step="500" id="cfg-upstream-timeout-ms" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="0">
-                <label class="block text-sm text-slate-500 mb-1">额外重试轮次（仅 GET / HEAD 等安全请求）</label>
-                <input type="number" min="0" step="1" id="cfg-upstream-retry-attempts" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="0">
-                <p class="text-xs text-slate-500 mb-4">每一轮都会重新遍历节点目标地址与可重试状态码。带流式请求体的非幂等请求不会启用额外重试，避免副作用放大。</p>
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Prewarm</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">起播加速优化</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">微缓存 + Range</span>
+                    </div>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-enable-prewarm" class="mr-2 w-4 h-4 rounded" checked> 开启视频起播预热拦截</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">精准拦截播放器起播时的探测请求，利用 Cloudflare 边缘节点进行微型缓存，极大提升起播速度并保护源站。</p>
+                    <label class="block text-sm text-slate-500 mb-1 ml-6">预热微缓存时长</label>
+                    <div class="relative w-[calc(100%-1.5rem)] ml-6">
+                      <input type="number" min="0" max="3600" step="1" id="cfg-prewarm-ttl" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="180">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">秒</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-4 ml-6"><code>cf.cacheTtl</code> 只接受非负秒数；这里额外限制到 3600 秒，避免把“起播微缓存”误配成长时间缓存。</p>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white ml-6"><input type="checkbox" id="cfg-disable-prewarm-prefetch" class="mr-2 w-4 h-4 rounded"> 关闭旁路预热</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">勾选后即使“预热旁路预取字节数”大于 0，也不会额外发起旁路 Range 预取。Cloudflare 官方文档提到单次请求同时最多 6 个打开连接，关闭旁路预热更利于控制连接预算。</p>
+                    <p id="cfg-prewarm-runtime-hint" class="text-xs text-cyan-700 dark:text-cyan-300 mb-3 ml-6">当前未启用 307 直连分流，视频起播探测会继续按 Prewarm 规则执行。</p>
+                    <label class="block text-sm text-slate-500 mb-1 ml-6">预热旁路预取</label>
+                    <div class="relative w-[calc(100%-1.5rem)] ml-6">
+                      <input type="number" min="0" max="67108864" step="65536" id="cfg-prewarm-prefetch-bytes" class="w-full p-2 pr-14 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="4194304">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">字节</span>
+                    </div>
+                    <p class="text-xs text-slate-500 ml-6">控制命中起播探测后，后台额外预取多少后续 Range 数据。填 0 表示仅做首个探测缓存，不做旁路预取；系统安全上限为 64 MiB，避免额外预取放大 Worker 出站连接与子请求消耗。</p>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Direct</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">资源直连分流</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">静态 / HLS / DASH</span>
+                    </div>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-direct-static-assets" class="mr-2 w-4 h-4 rounded"> 静态文件直连</label>
+                    <p class="text-xs text-slate-500 mb-3 ml-6">这里现在只对 JS、CSS、字体、source map、webmanifest 这类前端静态文件生效。海报、封面、字幕继续走 Worker 边缘缓存，因为它们走 307 直连通常会多一次跳转并丢掉缓存，反而更慢。</p>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-direct-hls-dash" class="mr-2 w-4 h-4 rounded"> HLS / DASH 直连</label>
+                    <p class="text-xs text-slate-500">命中 <code>.m3u8</code>、<code>.mpd</code>、<code>.ts</code>、<code>.m4s</code> 等播放列表或分片时，返回 307 让播放器直接回源；这能明显减少 Worker 中继流量。<code>.vtt</code> 字幕轨默认仍走 Worker 缓存，避免 307 多一跳导致双语字幕更慢。</p>
+                    <p id="cfg-direct-mode-hint" class="text-xs text-cyan-700 dark:text-cyan-300 mt-3">开启任意 307 直连分流后，命中的资源会自动跳过 Prewarm 拦截与旁路预热，优先为 Worker 保留连接预算。</p>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Relay</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">跳转代理与外链规则</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">同源 / 外链</span>
+                    </div>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-source-same-origin-proxy" class="mr-2 w-4 h-4 rounded" checked> 默认开启：源站和同源跳转代理</label>
+                    <p class="text-xs text-slate-500 mb-3">开启时既包含源站 2xx 的 Worker 透明拉流，也包含同源 30x 的继续代理跳转；仅当节点被显式标记为直连，或启用了“静态文件直连 / HLS-DASH 直连”时，源站 2xx 才会改为 307 直连源站。关闭后，同源 30x 直接下发 Location。</p>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-force-external-proxy" class="mr-2 w-4 h-4 rounded" checked> 默认开启：强制反代外部链接</label>
+                    <p class="text-xs text-slate-500 mb-3">开启后 Worker 会作为中继站拉流并透明转发；除国内网盘/对象存储外默认不缓存，命中 <code>wangpandirect</code> 列表走直连。关闭后外部链接直接下发直连。</p>
+                    <p class="text-xs text-slate-500 mb-2">默认已填入内置关键词；请使用英文逗号分隔自定义内容，例如 <code>baidu,alibaba</code>。</p>
+                    <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">wangpandirect 直连黑名单（关键词模糊匹配，英文逗号分隔）</label>
+                    <textarea id="cfg-wangpandirect" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white resize-y" rows="3" placeholder="例如: baidu,alibaba"></textarea>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Node Direct</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">源站直连名单</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">节点级直连</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-3">这里列出现有节点。勾选后，这些节点在“源站和同源跳转代理”开启时，源站 2xx 会直接下发到源站，不再由 Worker 中继；未勾选节点继续由 Worker 透明拉流。</p>
+                    <input type="text" id="cfg-direct-node-search" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="搜索节点名称、标签或备注..." oninput="App.renderSourceDirectNodesPicker()">
+                    <div id="cfg-source-direct-nodes-summary" class="text-xs text-slate-500 mb-2">已选 0 个节点</div>
+                    <div id="cfg-source-direct-nodes-list" class="max-h-64 overflow-y-auto rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-950/60 p-2 space-y-2 settings-list-shell"></div>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Probe</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">健康检查探测</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">1000-180000 ms</span>
+                    </div>
+                    <label class="block text-sm text-slate-500 mb-1">Ping 超时时间</label>
+                    <div class="relative">
+                      <input type="number" min="1000" max="180000" step="500" id="cfg-ping-timeout" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="5000">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">ms</span>
+                    </div>
+                    <p class="text-xs text-slate-500">系统会限制在 1000 到 180000 毫秒之间，避免探测等待时间过长拖住后台操作。</p>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Upstream</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">上游请求防挂死保护</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">最多 3 次重试</span>
+                    </div>
+                    <label class="block text-sm text-slate-500 mb-1">上游握手超时</label>
+                    <div class="relative">
+                      <input type="number" min="0" max="180000" step="500" id="cfg-upstream-timeout-ms" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="0">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">ms</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-3">系统会限制在 0 到 180000 毫秒之间，避免把超时配置得过大导致失败请求长期占用连接。</p>
+                    <label class="block text-sm text-slate-500 mb-1">额外重试轮次（仅 GET / HEAD 等安全请求）</label>
+                    <div class="relative">
+                      <input type="number" min="0" max="3" step="1" id="cfg-upstream-retry-attempts" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="0">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">次</span>
+                    </div>
+                    <p class="text-xs text-slate-500">每一轮都会重新遍历节点目标地址与可重试状态码。带流式请求体的非幂等请求不会启用额外重试，避免副作用放大；这里上限固定为 3，防止重试过多额外消耗 Worker 子请求预算。</p>
+                  </div>
+                </div>
 
                 <div class="flex flex-wrap gap-2">
                   <button onclick="App.applyRecommendedSettings('proxy')" class="px-4 py-2 border border-emerald-200 text-emerald-600 rounded-xl text-sm transition hover:bg-emerald-50 dark:border-emerald-900/30 dark:text-emerald-400 dark:hover:bg-emerald-900/20">恢复推荐值</button>
@@ -3023,59 +3316,196 @@ const UI_HTML = `<!DOCTYPE html>
                 </div>
               </div>
               
-              <div id="set-security" class="hidden">
-                <h3 class="font-bold mb-4 text-slate-900 dark:text-white">安全防火墙与缓存引擎</h3>
-                <p class="text-sm text-slate-500 mb-4">这一栏主要决定“谁可以访问”和“图片等静态资源缓存多久”。如果你不确定某条限制会不会误伤正常用户，建议先留空或保持默认值。</p>
-                <label class="block text-sm text-slate-500 mb-1">国家/地区白名单 (留空不限制，如: CN,HK)</label>
-                <p class="text-xs text-slate-500 mb-2">仅允许这些国家/地区的访客源 IP 访问；识别依据是 Cloudflare 看到的用户公网 IP 所属地区，不是你的源站位置。</p>
-                <input type="text" id="cfg-geo-allow" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="例如: CN,HK">
-                
-                <label class="block text-sm text-slate-500 mb-1">国家/地区黑名单 (屏蔽指定国家，如: US,SG)</label>
-                <p class="text-xs text-slate-500 mb-2">按访客源 IP 所属国家/地区直接拦截，可用于屏蔽不希望访问的海外地区或异常流量来源。</p>
-                <input type="text" id="cfg-geo-block" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="例如: US">
-                
-                <label class="block text-sm text-slate-500 mb-1">IP 黑名单 (逗号分隔)</label>
-                <p class="text-xs text-slate-500 mb-2">这里屏蔽的是访问者的公网 IP；命中后会直接拒绝该用户/设备的请求，适合封禁恶意爬虫、攻击源或异常账号。</p>
-                <textarea id="cfg-ip-black" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white resize-y" rows="2"></textarea>
-                
-                <label class="block text-sm text-slate-500 mb-1">全局单 IP 限速 (请求/分钟，0为不限制)</label>
-                <p class="text-xs text-slate-500 mb-2">对单个访客源 IP 生效；超过阈值后可快速压制刷接口、扫库和异常爆发流量。</p>
-                <input type="number" id="cfg-rate-limit" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="如: 600">
-                
-                <label class="block text-sm text-slate-500 mb-1">图片海报缓存时长 (天)</label>
-                <p class="text-xs text-slate-500 mb-2">仅影响海报、封面等图片静态资源的边缘缓存时长，不影响视频主流量的回源策略。</p>
-                <input type="number" id="cfg-cache-ttl" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="30">
-                
-                <label class="block text-sm text-slate-500 mb-1">CORS 跨域白名单 (留空为 *，如 https://emby.com)</label>
-                <p class="text-xs text-slate-500 mb-2">用于限制哪些网页前端可以在浏览器里跨域调用本 Worker API；它主要影响浏览器环境，不影响服务器到服务器的直连请求。</p>
-                <input type="text" id="cfg-cors" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white">
-                
-                <button onclick="App.saveSettings('security')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存安全防护</button>
+              <div id="set-security" class="hidden space-y-4">
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/70 p-5 shadow-sm settings-panel">
+                  <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div class="max-w-2xl">
+                      <span class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] uppercase text-amber-600 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">Security</span>
+                      <h3 class="mt-3 text-lg font-semibold text-slate-900 dark:text-white">安全防火墙与缓存引擎</h3>
+                      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">这一栏主要决定“谁可以访问”和“图片等静态资源缓存多久”。如果你不确定某条限制会不会误伤正常用户，建议先留空或保持默认值。</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 md:max-w-[280px]">
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">Geo / IP</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">海报缓存</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">CORS</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="grid gap-4">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block">
+                    <div class="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Firewall</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">访问控制与限速</div>
+                        <p class="text-xs text-slate-500 mt-2">先决定允许谁进来，再决定异常请求多快被压住。</p>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white text-slate-500 border border-slate-200 px-2.5 py-1 text-[10px] font-semibold dark:bg-slate-900 dark:text-slate-300 dark:border-slate-700">Geo + IP + Rate</span>
+                    </div>
+                    <div class="grid gap-4">
+                      <div>
+                        <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">国家/地区白名单 (留空不限制，如: CN,HK)</label>
+                        <p class="text-xs text-slate-500 mb-2">仅允许这些国家/地区的访客源 IP 访问；识别依据是 Cloudflare 看到的用户公网 IP 所属地区，不是你的源站位置。</p>
+                        <input type="text" id="cfg-geo-allow" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" placeholder="例如: CN,HK">
+                      </div>
+                      <div>
+                        <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">国家/地区黑名单 (屏蔽指定国家，如: US,SG)</label>
+                        <p class="text-xs text-slate-500 mb-2">按访客源 IP 所属国家/地区直接拦截，可用于屏蔽不希望访问的海外地区或异常流量来源。</p>
+                        <input type="text" id="cfg-geo-block" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" placeholder="例如: US">
+                      </div>
+                      <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">IP 黑名单 (逗号分隔)</label>
+                        <p class="text-xs text-slate-500 mb-2">这里屏蔽的是访问者的公网 IP；命中后会直接拒绝该用户/设备的请求，适合封禁恶意爬虫、攻击源或异常账号。</p>
+                        <textarea id="cfg-ip-black" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white resize-y" rows="2"></textarea>
+                      </div>
+                      <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">全局单 IP 限速</label>
+                        <p class="text-xs text-slate-500 mb-2">对单个访客源 IP 生效；超过阈值后可快速压制刷接口、扫库和异常爆发流量。</p>
+                        <div class="relative">
+                          <input type="number" id="cfg-rate-limit" class="w-full p-2 pr-16 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" placeholder="如: 600">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">次/分</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-sky-500 dark:text-sky-300">Image Cache</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">图片缓存策略</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">0-365 天</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-2 mb-3">主要影响海报、封面等轻资源，缓存得当能显著降低后台浏览时的重复回源。</p>
+                    <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">图片海报缓存时长</label>
+                    <div class="relative">
+                      <input type="number" min="0" max="365" id="cfg-cache-ttl" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="30">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">天</span>
+                    </div>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-emerald-500 dark:text-emerald-300">CORS</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">浏览器跨域策略</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">留空为 *</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-2 mb-3">用于限制哪些网页前端可以在浏览器里跨域调用本 Worker API；它主要影响浏览器环境，不影响服务器到服务器的直连请求。</p>
+                    <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">CORS 跨域白名单 (留空为 *，如 https://emby.com)</label>
+                    <input type="text" id="cfg-cors" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white">
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/50 p-5 shadow-sm settings-block">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Checklist</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">建议顺序</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">先通后收紧</span>
+                    </div>
+                    <div class="text-xs leading-6 text-slate-500">
+                      1. 先留空白名单与 CORS，确保基础访问正常。<br>
+                      2. 再逐步补充 Geo / IP 黑名单，观察是否误伤。<br>
+                      3. 最后再收紧限速和缓存天数，避免一次改太多难排错。
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap gap-2">
+                  <button onclick="App.saveSettings('security')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存安全防护</button>
+                </div>
               </div>
               
-              <div id="set-logs" class="hidden">
-                <h3 class="font-bold mb-4 text-slate-900 dark:text-white">监控与日志配置</h3>
-                <p class="text-sm text-slate-500 mb-4">这一栏决定日志如何写入、多久保留，以及 Telegram 如何通知你。小白通常只需要关心“日志保存天数”和“测试通知能不能收到”。</p>
-                <label class="block text-sm text-slate-500 mb-1">日志保存天数 (超过将由系统自动清理)</label>
-                <input type="number" id="cfg-log-days" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white" value="7">
-                <label class="block text-sm text-slate-500 mb-1">日志写入延迟（分钟）</label>
-                <input type="number" min="0" step="0.5" id="cfg-log-delay" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="20">
-                <label class="block text-sm text-slate-500 mb-1">日志提前写入条数阈值</label>
-                <input type="number" min="1" step="1" id="cfg-log-flush-count" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="50">
-                <label class="block text-sm text-slate-500 mb-1">D1 单批写入切片大小</label>
-                <input type="number" min="1" step="1" id="cfg-log-batch-size" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="50">
-                <label class="block text-sm text-slate-500 mb-1">D1 失败重试次数</label>
-                <input type="number" min="0" step="1" id="cfg-log-retry-count" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="2">
-                <label class="block text-sm text-slate-500 mb-1">D1 重试退避（毫秒）</label>
-                <input type="number" min="0" step="25" id="cfg-log-retry-backoff" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="75">
-                <label class="block text-sm text-slate-500 mb-1">定时任务租约时长（毫秒）</label>
-                <input type="number" min="30000" step="1000" id="cfg-scheduled-lease-ms" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="300000">
-                <p class="text-xs text-slate-500 mb-4">内存日志队列满足“达到延迟分钟”或“累计达到条数阈值”任一条件即写入 D1。这里还可以调优单批切片、失败重试与定时任务租约，系统会自动钳制到安全边界。</p>
+              <div id="set-logs" class="hidden space-y-4">
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/70 p-5 shadow-sm settings-panel">
+                  <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div class="max-w-2xl">
+                      <span class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] uppercase text-emerald-600 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">Ops</span>
+                      <h3 class="mt-3 text-lg font-semibold text-slate-900 dark:text-white">监控与日志配置</h3>
+                      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">这一栏决定日志如何写入、多久保留，以及 Telegram 如何通知你。小白通常只需要关心“日志保存天数”和“测试通知能不能收到”。</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 md:max-w-[280px]">
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">D1 写入</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">Cron</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">Telegram</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="grid gap-4">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Storage</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">日志队列与落盘</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">Cloudflare 上限已内置</span>
+                    </div>
+                    <div class="grid gap-3">
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">日志保存</label>
+                        <div class="relative">
+                          <input type="number" min="1" max="365" step="1" id="cfg-log-days" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="7">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">天</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">日志写入延迟</label>
+                        <div class="relative">
+                          <input type="number" min="0" max="1440" step="0.5" id="cfg-log-delay" class="w-full p-2 pr-16 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="20">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">分钟</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">提前写入阈值</label>
+                        <div class="relative">
+                          <input type="number" min="1" max="5000" step="1" id="cfg-log-flush-count" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="50">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">条</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">D1 切片大小</label>
+                        <div class="relative">
+                          <input type="number" min="1" max="100" step="1" id="cfg-log-batch-size" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="50">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">条</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">D1 重试次数</label>
+                        <div class="relative">
+                          <input type="number" min="0" max="5" step="1" id="cfg-log-retry-count" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="2">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">次</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">重试退避</label>
+                        <div class="relative">
+                          <input type="number" min="0" max="5000" step="25" id="cfg-log-retry-backoff" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="75">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">ms</span>
+                        </div>
+                      </div>
+                      <div class="md:col-span-2">
+                        <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">定时任务租约时长</label>
+                        <div class="relative">
+                          <input type="number" min="30000" max="900000" step="1000" id="cfg-scheduled-lease-ms" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="300000">
+                          <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">ms</span>
+                        </div>
+                      </div>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-3">内存日志队列满足“达到延迟分钟”或“累计达到条数阈值”任一条件即写入 D1。Cloudflare 官方文档说明 Cron Trigger 单次执行最长 15 分钟，因此租约上限固定为 900000 毫秒；D1 单批切片也限制为最多 100 条，避免单次批量过大。</p>
+                  </div>
 
-                <div class="grid gap-3 md:grid-cols-2 mb-4">
-                  <div class="rounded-2xl border border-emerald-200/80 bg-emerald-50/80 dark:border-emerald-900/40 dark:bg-emerald-950/30 p-4">
-                    <div class="text-sm font-semibold text-emerald-700 dark:text-emerald-300 mb-2">推荐生产值</div>
-                    <div class="text-xs leading-6 text-emerald-800/90 dark:text-emerald-100/80">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-emerald-500 dark:text-emerald-300">Recommended</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">推荐生产值</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">生产环境</span>
+                    </div>
+                    <div class="text-xs leading-6 text-slate-600 dark:text-slate-300">
                       日志保存天数：7 到 14 天<br>
                       写入延迟：5 到 20 分钟<br>
                       提前写入阈值：50 到 200 条<br>
@@ -3084,9 +3514,16 @@ const UI_HTML = `<!DOCTYPE html>
                       定时任务租约：300000 到 600000 毫秒
                     </div>
                   </div>
-                  <div class="rounded-2xl border border-amber-200/80 bg-amber-50/80 dark:border-amber-900/40 dark:bg-amber-950/30 p-4">
-                    <div class="text-sm font-semibold text-amber-700 dark:text-amber-300 mb-2">异常调优指引</div>
-                    <div class="text-xs leading-6 text-amber-900/85 dark:text-amber-100/80">
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-amber-500 dark:text-amber-300">Tuning</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">异常调优指引</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">逐项小步调</span>
+                    </div>
+                    <div class="text-xs leading-6 text-slate-600 dark:text-slate-300">
                       D1 写入失败增多：先提高重试次数或退避，再观察 lastFlushRetryCount。<br>
                       队列长期堆积：降低写入延迟或下调提前写入阈值。<br>
                       单次刷盘过慢：降低单批切片大小。<br>
@@ -3094,26 +3531,49 @@ const UI_HTML = `<!DOCTYPE html>
                       只想快速止血：优先保留默认值，再逐项小步调整。
                     </div>
                   </div>
-                </div>
-                
-                <h3 class="font-bold mb-4 mt-6 text-slate-900 dark:text-white border-t border-slate-200 dark:border-slate-800 pt-4">Telegram 每日报表与告警机器人</h3>
-                
-                <label class="block text-sm text-slate-500 mb-1">Telegram Bot Token</label>
-                <input type="text" id="cfg-tg-token" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="如: 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ">
-                
-                <label class="block text-sm text-slate-500 mb-1">Telegram Chat ID (接收人ID)</label>
-                <input type="text" id="cfg-tg-chatid" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white" placeholder="如: 123456789">
 
-                <h3 class="font-bold mb-2 mt-6 text-slate-900 dark:text-white">Telegram 异常告警阈值</h3>
-                <label class="block text-sm text-slate-500 mb-1">日志丢弃批次阈值（0 为关闭）</label>
-                <input type="number" min="0" step="1" id="cfg-tg-alert-drop-threshold" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="0">
-                <label class="block text-sm text-slate-500 mb-1">D1 写入重试阈值（0 为关闭）</label>
-                <input type="number" min="0" step="1" id="cfg-tg-alert-retry-threshold" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="0">
-                <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-tg-alert-scheduled-failure" class="mr-2 w-4 h-4 rounded"> 定时任务进入 failed / partial_failure 时告警</label>
-                <label class="block text-sm text-slate-500 mb-1">同类告警冷却时间（分钟）</label>
-                <input type="number" min="1" step="1" id="cfg-tg-alert-cooldown-minutes" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="30">
-                <p class="text-xs text-slate-500 mb-4">告警由定时任务在后台判断并发送。建议先完成 Bot Token 与 Chat ID 测试，再启用阈值。</p>
-                
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Telegram</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">每日报表与告警机器人</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">先测连通</span>
+                    </div>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">Telegram Bot Token</label>
+                    <input type="text" id="cfg-tg-token" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" placeholder="如: 123456789:ABCdefGHIjklMNOpqrSTUvwxYZ">
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">Telegram Chat ID (接收人ID)</label>
+                    <input type="text" id="cfg-tg-chatid" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" placeholder="如: 123456789">
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Alert</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">Telegram 异常告警阈值</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">1-1440 分钟</span>
+                    </div>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">日志丢弃批次阈值</label>
+                    <div class="relative">
+                      <input type="number" min="0" max="5000" step="1" id="cfg-tg-alert-drop-threshold" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="0">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">批</span>
+                    </div>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">D1 写入重试阈值</label>
+                    <div class="relative">
+                      <input type="number" min="0" max="10" step="1" id="cfg-tg-alert-retry-threshold" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white" value="0">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">次</span>
+                    </div>
+                    <label class="flex items-center text-sm font-medium mb-2 cursor-pointer text-slate-900 dark:text-white"><input type="checkbox" id="cfg-tg-alert-scheduled-failure" class="mr-2 w-4 h-4 rounded"> 定时任务进入 failed / partial_failure 时告警</label>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">同类告警冷却时间</label>
+                    <div class="relative">
+                      <input type="number" min="1" max="1440" step="1" id="cfg-tg-alert-cooldown-minutes" class="w-full p-2 pr-16 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-2 dark:text-white" value="30">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">分钟</span>
+                    </div>
+                    <p class="text-xs text-slate-500">告警由定时任务在后台判断并发送。建议先完成 Bot Token 与 Chat ID 测试，再启用阈值；系统会把冷却时间限制在 1 到 1440 分钟之间。</p>
+                  </div>
+                </div>
+
                 <div class="flex flex-wrap gap-2">
                     <button onclick="App.applyRecommendedSettings('logs')" class="px-4 py-2 border border-emerald-200 text-emerald-600 rounded-xl text-sm transition hover:bg-emerald-50 dark:border-emerald-900/30 dark:text-emerald-400 dark:hover:bg-emerald-900/20">恢复推荐值</button>
                     <button onclick="App.saveSettings('logs')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存监控设置</button>
@@ -3122,49 +3582,111 @@ const UI_HTML = `<!DOCTYPE html>
                 </div>
               </div>
               
-              <div id="set-account" class="hidden">
-                <h3 class="font-bold mb-4 text-slate-900 dark:text-white">系统账号与安全</h3>
-                <p class="text-sm text-slate-500 mb-4">这一栏主要管理后台登录有效期、Cloudflare 联动参数，以及备份/导入/快照恢复。准备做大改动前，建议先导出一份完整备份。</p>
-                <label class="block text-sm text-slate-500 mb-1">免密登录有效天数 (管理员 JWT)</label>
-                <input type="number" id="cfg-jwt-days" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white" value="30">
-                
-                <h3 class="font-bold mb-4 border-t border-slate-200 dark:border-slate-800 pt-4 text-slate-900 dark:text-white">Cloudflare 联动</h3>
-                <p class="text-sm text-slate-500 mb-4">这些参数主要用于仪表盘增强统计和一键清理缓存。没填时基础代理仍可用，只是部分联动能力会缺失。</p>
-                <label class="block text-sm text-slate-500 mb-1">Cloudflare 账号 ID</label>
-                <input type="text" id="cfg-cf-account" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white">
-                <label class="block text-sm text-slate-500 mb-1">Cloudflare Zone ID (区域ID，用于面板数据与清理缓存)</label>
-                <input type="text" id="cfg-cf-zone" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white">
-                <label class="block text-sm text-slate-500 mb-1">Cloudflare API 令牌</label>
-                <input type="password" id="cfg-cf-token" class="w-full p-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white">
-                <div class="flex gap-2 mb-6">
-                    <button onclick="App.saveSettings('account')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存账号设置</button>
-                    <button onclick="App.purgeCache()" class="px-4 py-2 border border-red-200 text-red-600 rounded-xl text-sm transition hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20">一键清理全站缓存 (Purge)</button>
+              <div id="set-account" class="hidden space-y-4">
+                <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/70 p-5 shadow-sm settings-panel">
+                  <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    <div class="max-w-2xl">
+                      <span class="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.12em] uppercase text-sky-600 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">Account</span>
+                      <h3 class="mt-3 text-lg font-semibold text-slate-900 dark:text-white">系统账号与安全</h3>
+                      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">这一栏主要管理后台登录有效期、Cloudflare 联动参数，以及备份、导入和快照恢复。准备做大改动前，建议先导出一份完整备份。</p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 md:max-w-[280px]">
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">后台登录</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">Cloudflare</span>
+                      <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">快照恢复</span>
+                    </div>
+                  </div>
                 </div>
 
-                <h3 class="font-bold mb-4 border-t border-slate-200 dark:border-slate-800 pt-4 text-slate-900 dark:text-white">备份与恢复 (全量 KV 数据)</h3>
-                <p class="text-sm text-slate-500 mb-4">导出或导入系统内的所有节点以及全局设置数据（单文件）。</p>
-                <div class="flex gap-4 flex-wrap">
-                  <button onclick="document.getElementById('import-full-file').click()" class="px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition font-medium"><i data-lucide="upload" class="w-4 h-4 inline mr-1"></i> 导入完整备份</button>
-                  <button onclick="App.exportFull()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition font-medium"><i data-lucide="download" class="w-4 h-4 inline mr-1"></i> 导出完整备份</button>
+                <div class="grid gap-4">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Login</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">后台登录有效期</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">按天计算</span>
+                    </div>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">免密登录有效期</label>
+                    <div class="relative">
+                      <input type="number" id="cfg-jwt-days" class="w-full p-2 pr-12 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none dark:text-white" value="30">
+                      <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">天</span>
+                    </div>
+                  </div>
+
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Cloudflare</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">Cloudflare 联动</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">可选增强</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-4">这些参数主要用于仪表盘增强统计和一键清理缓存。没填时基础代理仍可用，只是部分联动能力会缺失。</p>
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">Cloudflare 账号 ID</label>
+                    <input type="text" id="cfg-cf-account" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white">
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">Cloudflare Zone ID (区域ID，用于面板数据与清理缓存)</label>
+                    <input type="text" id="cfg-cf-zone" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-3 dark:text-white">
+                    <label class="block text-sm font-semibold tracking-[0.01em] text-slate-800 dark:text-slate-200 mb-1">Cloudflare API 令牌</label>
+                    <input type="password" id="cfg-cf-token" class="w-full p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 outline-none mb-4 dark:text-white">
+                    <div class="flex flex-wrap gap-2">
+                      <button onclick="App.saveSettings('account')" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition">保存账号设置</button>
+                      <button onclick="App.purgeCache()" class="px-4 py-2 border border-red-200 text-red-600 rounded-xl text-sm transition hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20">一键清理全站缓存 (Purge)</button>
+                    </div>
+                  </div>
                 </div>
 
-                <h3 class="font-bold mb-4 border-t border-slate-200 dark:border-slate-800 pt-4 text-slate-900 dark:text-white">全局设置专用迁移</h3>
-                <p class="text-sm text-slate-500 mb-4">只导出 / 导入 settings，不包含节点清单。适合多环境同步代理、监控、账号与 Dashboard 策略。</p>
-                <div class="flex gap-4 flex-wrap mb-6">
-                  <button onclick="document.getElementById('import-settings-file').click()" class="px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition font-medium"><i data-lucide="upload-cloud" class="w-4 h-4 inline mr-1"></i> 导入全局设置</button>
-                  <button onclick="App.exportSettings()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition font-medium"><i data-lucide="download-cloud" class="w-4 h-4 inline mr-1"></i> 导出全局设置</button>
-                </div>
+                <div class="grid gap-4">
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Settings Only</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">全局设置专用迁移</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">不含节点</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-4">只导出 / 导入 settings，不包含节点清单。适合多环境同步代理、监控、账号与 Dashboard 策略。</p>
+                    <div class="flex gap-4 flex-wrap">
+                      <button onclick="document.getElementById('import-settings-file').click()" class="px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition font-medium"><i data-lucide="upload-cloud" class="w-4 h-4 inline mr-1"></i> 导入全局设置</button>
+                      <button onclick="App.exportSettings()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition font-medium"><i data-lucide="download-cloud" class="w-4 h-4 inline mr-1"></i> 导出全局设置</button>
+                    </div>
+                  </div>
 
-                <h3 class="font-bold mb-4 border-t border-slate-200 dark:border-slate-800 pt-4 text-slate-900 dark:text-white">设置变更快照</h3>
-                <p class="text-sm text-slate-500 mb-3">系统会保留最近的全局设置变更快照。恢复快照时，会先把当前配置再记一份快照，确保你始终有回退余地。</p>
-                <div class="flex gap-2 mb-4">
-                  <button onclick="App.loadConfigSnapshots()" class="px-4 py-2 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition hover:bg-slate-50 dark:hover:bg-slate-800"><i data-lucide="refresh-cw" class="w-4 h-4 inline mr-1"></i> 刷新快照</button>
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block h-full">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Full Backup</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">备份与恢复 (全量 KV 数据)</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">节点 + 设置</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-4">导出或导入系统内的所有节点以及全局设置数据（单文件）。</p>
+                    <div class="flex gap-4 flex-wrap">
+                      <button onclick="document.getElementById('import-full-file').click()" class="px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition font-medium"><i data-lucide="upload" class="w-4 h-4 inline mr-1"></i> 导入完整备份</button>
+                      <button onclick="App.exportFull()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition font-medium"><i data-lucide="download" class="w-4 h-4 inline mr-1"></i> 导出完整备份</button>
+                    </div>
+                  </div>
+                  
+                  <div class="rounded-3xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-5 shadow-sm settings-block">
+                    <div class="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+                      <div>
+                        <div class="text-xs font-semibold tracking-[0.12em] uppercase text-slate-400 dark:text-slate-500">Snapshot</div>
+                        <div class="text-base font-semibold text-slate-900 dark:text-white mt-1">设置变更快照</div>
+                      </div>
+                      <span class="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 border border-slate-200 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300">最多保留 5 个</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mb-3">系统会保留最近 5 个全局设置变更快照。恢复快照时，会先把当前配置再记一份快照，确保你始终有回退余地。</p>
+                    <div class="flex gap-2 mb-4">
+                      <button onclick="App.loadConfigSnapshots()" class="px-4 py-2 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-sm transition hover:bg-slate-50 dark:hover:bg-slate-800"><i data-lucide="refresh-cw" class="w-4 h-4 inline mr-1"></i> 刷新快照</button>
+                      <button onclick="App.clearConfigSnapshots()" class="px-4 py-2 border border-red-200 text-red-600 rounded-xl text-sm transition hover:bg-red-50 dark:border-red-900/30 dark:text-red-400 dark:hover:bg-red-900/20"><i data-lucide="trash-2" class="w-4 h-4 inline mr-1"></i> 清理快照</button>
+                    </div>
+                    <div id="cfg-snapshots-list" class="space-y-3"></div>
+                  </div>
                 </div>
-                <div id="cfg-snapshots-list" class="space-y-3"></div>
               </div>
               
+              </div>
            </div>
-        </div>
       </div>
 
     </div>
@@ -3203,6 +3725,9 @@ const UI_HTML = `<!DOCTYPE html>
     const UI_DEFAULTS = {
       dashboardAutoRefreshEnabled: false,
       dashboardAutoRefreshSeconds: 30,
+      directStaticAssets: false,
+      directHlsDash: false,
+      disablePrewarmPrefetch: false,
       prewarmCacheTtl: 180,
       prewarmPrefetchBytes: 4194304,
       pingTimeout: 5000,
@@ -3236,6 +3761,9 @@ const UI_HTML = `<!DOCTYPE html>
         { key: 'enablePrewarm', id: 'cfg-enable-prewarm', kind: 'checkbox', checkboxMode: 'defaultTrue' },
         { key: 'prewarmCacheTtl', id: 'cfg-prewarm-ttl', kind: 'int-or-default', loadMode: 'number-finite', defaultValue: UI_DEFAULTS.prewarmCacheTtl },
         { key: 'prewarmPrefetchBytes', id: 'cfg-prewarm-prefetch-bytes', kind: 'int-finite', defaultValue: UI_DEFAULTS.prewarmPrefetchBytes },
+        { key: 'directStaticAssets', id: 'cfg-direct-static-assets', kind: 'checkbox', checkboxMode: 'strictTrue' },
+        { key: 'directHlsDash', id: 'cfg-direct-hls-dash', kind: 'checkbox', checkboxMode: 'strictTrue' },
+        { key: 'disablePrewarmPrefetch', id: 'cfg-disable-prewarm-prefetch', kind: 'checkbox', checkboxMode: 'strictTrue' },
         { key: 'sourceSameOriginProxy', id: 'cfg-source-same-origin-proxy', kind: 'checkbox', checkboxMode: 'defaultTrue' },
         { key: 'forceExternalProxy', id: 'cfg-force-external-proxy', kind: 'checkbox', checkboxMode: 'defaultTrue' },
         { key: 'wangpandirect', id: 'cfg-wangpandirect', kind: 'trim', loadMode: 'or-default', defaultValue: '${DEFAULT_WANGPAN_DIRECT_TEXT}' },
@@ -3292,6 +3820,9 @@ const UI_HTML = `<!DOCTYPE html>
       enablePrewarm: '起播预热',
       prewarmCacheTtl: '预热微缓存时长',
       prewarmPrefetchBytes: '预热旁路预取字节数',
+      directStaticAssets: '静态文件直连',
+      directHlsDash: 'HLS / DASH 直连',
+      disablePrewarmPrefetch: '关闭旁路预热',
       sourceSameOriginProxy: '源站同源代理',
       forceExternalProxy: '外链强制反代',
       wangpandirect: 'wangpandirect 关键词',
@@ -3336,12 +3867,15 @@ const UI_HTML = `<!DOCTYPE html>
     const RECOMMENDED_SECTION_VALUES = {
       proxy: {
         enableH2: false,
-        enableH3: true,
+        enableH3: false,
         peakDowngrade: true,
         protocolFallback: true,
         enablePrewarm: true,
         prewarmCacheTtl: 180,
         prewarmPrefetchBytes: 4194304,
+        directStaticAssets: true,
+        directHlsDash: true,
+        disablePrewarmPrefetch: false,
         sourceSameOriginProxy: true,
         forceExternalProxy: true,
         pingTimeout: 5000,
@@ -3371,6 +3905,7 @@ const UI_HTML = `<!DOCTYPE html>
       nodeMutationVersion: {},
       logPage: 1,
       logTotalPages: 1,
+      logsPlaybackModeFilter: '',
       dashboardSeries: [],
       dashboardLoadSeq: 0,
       dashboardRefreshTimer: null,
@@ -3380,11 +3915,92 @@ const UI_HTML = `<!DOCTYPE html>
       runtimeStatus: {},
       loginPromise: null,
       chart: null,
+      settingsGuardrailsBound: false,
 
       safeCreateIcons(opts = {}) {
           if (typeof window.lucide !== 'undefined') {
               window.lucide.createIcons(opts);
           }
+      },
+
+      clampSettingsNumberInput(element) {
+        if (!element) return;
+        const raw = String(element.value || '').trim();
+        if (!raw) return;
+        let next = Number(raw);
+        if (!Number.isFinite(next)) {
+          element.value = '';
+          return;
+        }
+        const min = Number(element.min);
+        const max = Number(element.max);
+        if (Number.isFinite(min)) next = Math.max(min, next);
+        if (Number.isFinite(max)) next = Math.min(max, next);
+        const step = String(element.step || '').trim();
+        if (step && step !== 'any') {
+          const stepValue = Number(step);
+          if (Number.isFinite(stepValue) && stepValue > 0) {
+            const base = Number.isFinite(min) ? min : 0;
+            const steps = Math.round((next - base) / stepValue);
+            next = base + (steps * stepValue);
+            if (Number.isFinite(min)) next = Math.max(min, next);
+            if (Number.isFinite(max)) next = Math.min(max, next);
+          }
+        }
+        element.value = step.includes('.') ? String(next) : String(Math.trunc(next));
+      },
+
+      normalizeSettingsNumberInputs() {
+        document.querySelectorAll('#view-settings input[type="number"]').forEach(element => {
+          this.clampSettingsNumberInput(element);
+        });
+      },
+
+      syncProxySettingsGuardrails() {
+        const directStatic = document.getElementById('cfg-direct-static-assets');
+        const directHlsDash = document.getElementById('cfg-direct-hls-dash');
+        const disablePrefetch = document.getElementById('cfg-disable-prewarm-prefetch');
+        const prefetchInput = document.getElementById('cfg-prewarm-prefetch-bytes');
+        const directHint = document.getElementById('cfg-direct-mode-hint');
+        const prewarmHint = document.getElementById('cfg-prewarm-runtime-hint');
+        const direct307Enabled = !!(directStatic?.checked || directHlsDash?.checked);
+        const prefetchDisabled = disablePrefetch?.checked === true;
+
+        if (directHint) {
+          directHint.textContent = direct307Enabled
+            ? '已启用 307 直连分流。命中的静态 / HLS / DASH 资源会自动跳过 Prewarm 拦截与旁路预热，优先为 Worker 保留连接预算。'
+            : '当前未启用 307 直连分流；如后续开启静态文件直连或 HLS / DASH 直连，命中的资源会自动跳过 Prewarm 与旁路预热。';
+        }
+        if (prewarmHint) {
+          if (direct307Enabled && prefetchDisabled) {
+            prewarmHint.textContent = '已同时启用 307 直连分流和“关闭旁路预热”。命中的直连资源将完全跳过 Prewarm / 旁路预热，其它视频请求仍按当前 Prewarm 开关执行。';
+          } else if (direct307Enabled) {
+            prewarmHint.textContent = '已启用 307 直连分流。命中的直连资源会自动跳过 Prewarm 与旁路预热，不需要再额外关闭全局 Prewarm。';
+          } else if (prefetchDisabled) {
+            prewarmHint.textContent = '已手动关闭旁路预热；即使下面填写了预取字节数，实际运行时也会按 0 处理，仅保留 Prewarm 微缓存。';
+          } else {
+            prewarmHint.textContent = '当前未启用 307 直连分流，视频起播探测会继续按 Prewarm 规则执行。';
+          }
+        }
+        if (prefetchInput) {
+          prefetchInput.disabled = prefetchDisabled;
+          prefetchInput.classList.toggle('opacity-60', prefetchDisabled);
+          prefetchInput.classList.toggle('cursor-not-allowed', prefetchDisabled);
+        }
+      },
+
+      bindSettingsGuardrails() {
+        if (this.settingsGuardrailsBound) return;
+        this.settingsGuardrailsBound = true;
+        document.querySelectorAll('#view-settings input[type="number"]').forEach(element => {
+          element.addEventListener('change', () => this.clampSettingsNumberInput(element));
+          element.addEventListener('blur', () => this.clampSettingsNumberInput(element));
+        });
+        ['cfg-direct-static-assets', 'cfg-direct-hls-dash', 'cfg-disable-prewarm-prefetch'].forEach(id => {
+          const element = document.getElementById(id);
+          if (!element) return;
+          element.addEventListener('change', () => this.syncProxySettingsGuardrails());
+        });
       },
 
       applyRuntimeConfig(cfg) {
@@ -3681,6 +4297,13 @@ const UI_HTML = `<!DOCTYPE html>
         this.renderConfigSnapshots(res.snapshots || []);
       },
 
+      async clearConfigSnapshots() {
+        if (!confirm('清理后将删除当前保存的全部设置快照，且不能恢复。是否继续？')) return;
+        const res = await this.apiCall('clearConfigSnapshots');
+        this.renderConfigSnapshots(res.snapshots || []);
+        alert('设置快照已清理。');
+      },
+
       async restoreConfigSnapshot(snapshotId) {
         if (!snapshotId) return;
         if (!confirm('恢复该快照后，当前全局设置会立即被替换。系统会先自动记录当前配置，是否继续？')) return;
@@ -3883,7 +4506,9 @@ const UI_HTML = `<!DOCTYPE html>
         else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) { document.documentElement.classList.add('dark'); }
         
         this.safeCreateIcons();
+        this.bindSettingsGuardrails();
         window.onhashchange = () => this.route();
+        window.addEventListener('resize', () => this.syncSettingsSplitLayout(window.location.hash || '#dashboard'));
         this.route();
         
         // Time Cone Sync: 每 60 秒异步刷新一次相对时间
@@ -4091,6 +4716,7 @@ const UI_HTML = `<!DOCTYPE html>
       
       route() {
         const hash = window.location.hash || '#dashboard';
+        this.syncSettingsSplitLayout(hash);
         document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
         document.querySelectorAll('.nav-item').forEach(el => { el.classList.remove('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400'); });
 
@@ -4116,14 +4742,31 @@ const UI_HTML = `<!DOCTYPE html>
         this.syncDashboardAutoRefresh();
       },
 
+      syncSettingsSplitLayout(hash) {
+        const isDesktopSettings = hash === '#settings' && window.innerWidth >= 768;
+        document.body.classList.toggle('settings-split-layout', isDesktopSettings);
+        if (!isDesktopSettings) return;
+        const contentArea = document.getElementById('content-area');
+        const settingsForms = document.getElementById('settings-forms');
+        if (contentArea) contentArea.scrollTop = 0;
+        if (settingsForms) settingsForms.scrollTop = 0;
+      },
+
       switchSetTab(event, id) {
         document.querySelectorAll('.set-tab').forEach(el => {
-          el.classList.remove('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400');
-          el.classList.add('text-slate-500');
+          el.classList.remove('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400', 'border-brand-200/80', 'dark:border-brand-500/20');
+          el.classList.add('bg-transparent', 'text-slate-500', 'dark:text-slate-400', 'border-transparent');
+          el.setAttribute('aria-selected', 'false');
         });
-        if (event && event.currentTarget) event.currentTarget.classList.add('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400');
+        if (event && event.currentTarget) {
+          event.currentTarget.classList.remove('bg-transparent', 'border-transparent', 'text-slate-500', 'dark:text-slate-400');
+          event.currentTarget.classList.add('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400', 'border-brand-200/80', 'dark:border-brand-500/20');
+          event.currentTarget.setAttribute('aria-selected', 'true');
+        }
         document.querySelectorAll('#settings-forms > div').forEach(el => el.classList.add('hidden'));
         document.getElementById('set-' + id).classList.remove('hidden');
+        const settingsForms = document.getElementById('settings-forms');
+        if (settingsForms) settingsForms.scrollTop = 0;
       },
 
       renderDashboardStats(data) {
@@ -4258,6 +4901,8 @@ const UI_HTML = `<!DOCTYPE html>
 
           this.applyConfigSectionToForm('ui', cfg);
           this.applyConfigSectionToForm('proxy', cfg);
+          this.normalizeSettingsNumberInputs();
+          this.syncProxySettingsGuardrails();
           document.getElementById('cfg-direct-node-search').value = '';
           this.settingsSourceDirectNodes = this.normalizeNodeNameList(cfg.sourceDirectNodes || cfg.directSourceNodes || cfg.nodeDirectList || []);
           this.renderSourceDirectNodesPicker(this.settingsSourceDirectNodes);
@@ -4271,6 +4916,8 @@ const UI_HTML = `<!DOCTYPE html>
           const recommended = RECOMMENDED_SECTION_VALUES[section];
           if (!recommended) return;
           this.applyConfigSectionToForm(section, recommended, { onlyPresent: true });
+          this.normalizeSettingsNumberInputs();
+          if (section === 'proxy') this.syncProxySettingsGuardrails();
           alert('推荐生产值已回填到表单，请确认后再点击保存。');
       },
 
@@ -4811,10 +5458,55 @@ const UI_HTML = `<!DOCTYPE html>
           
           return '<span class="text-slate-500 bg-slate-50 dark:text-slate-400 dark:bg-slate-800/50 px-2 py-1.5 rounded-lg font-medium">常规 API</span>';
       },
+      formatPlaybackModeBadge(errorDetail) {
+          const detail = String(errorDetail || '');
+          const match = /Playback=(direct_play|direct_stream|transcode|unknown)/i.exec(detail);
+          if (!match) return '';
+          const mode = match[1].toLowerCase();
+          const badgeMap = {
+              direct_play: {
+                  label: '直放',
+                  className: 'text-emerald-700 bg-emerald-100 dark:text-emerald-300 dark:bg-emerald-500/15'
+              },
+              direct_stream: {
+                  label: '直串',
+                  className: 'text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-500/15'
+              },
+              transcode: {
+                  label: '转码',
+                  className: 'text-rose-700 bg-rose-100 dark:text-rose-300 dark:bg-rose-500/15'
+              },
+              unknown: {
+                  label: '未知',
+                  className: 'text-slate-600 bg-slate-100 dark:text-slate-300 dark:bg-slate-700/60'
+              }
+          };
+          const meta = badgeMap[mode] || badgeMap.unknown;
+          return '<span class="px-2 py-1 rounded-lg text-[11px] font-semibold ' + meta.className + '">Playback · ' + meta.label + '</span>';
+      },
+      updateLogsPlaybackFilterButtons() {
+          document.querySelectorAll('[data-log-playback-filter]').forEach(button => {
+              const mode = button.getAttribute('data-log-playback-filter') || '';
+              const active = mode === (this.logsPlaybackModeFilter || '');
+              button.classList.remove('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400');
+              button.classList.remove('text-slate-500', 'dark:text-slate-400');
+              if (active) {
+                  button.classList.add('bg-brand-50', 'text-brand-600', 'dark:bg-brand-500/10', 'dark:text-brand-400');
+              } else {
+                  button.classList.add('text-slate-500', 'dark:text-slate-400');
+              }
+          });
+      },
+      setLogsPlaybackModeFilter(mode = '') {
+          this.logsPlaybackModeFilter = String(mode || '').trim();
+          this.updateLogsPlaybackFilterButtons();
+          this.loadLogs(1);
+      },
 
       async loadLogs(page = this.logPage) {
           const keyword = document.getElementById('log-search-input')?.value || '';
-          const res = await this.apiCall('getLogs', {page: page, pageSize: 50, filters: { keyword }});
+          this.updateLogsPlaybackFilterButtons();
+          const res = await this.apiCall('getLogs', {page: page, pageSize: 50, filters: { keyword, playbackMode: this.logsPlaybackModeFilter || '' }});
           if (res.logs) {
               this.logPage = res.page;
               this.logTotalPages = res.totalPages || 1;
@@ -4844,8 +5536,11 @@ const UI_HTML = `<!DOCTYPE html>
 
                   const pathCell = document.createElement('td');
                   pathCell.className = 'py-3 px-4 text-xs cursor-pointer truncate';
-                  pathCell.title = l.request_path;
-                  pathCell.innerHTML = this.formatResourceCategory(l.request_path, l.category);
+                  pathCell.title = l.error_detail ? (l.request_path + '\\n[诊断] ' + l.error_detail) : l.request_path;
+                  pathCell.innerHTML = '<div class="flex flex-wrap items-center gap-1">'
+                    + this.formatResourceCategory(l.request_path, l.category)
+                    + this.formatPlaybackModeBadge(l.error_detail)
+                    + '</div>';
 
                   const statusCell = document.createElement('td');
                   statusCell.className = 'py-3 px-4 font-bold truncate ' + (l.status_code >= 400 ? 'text-red-500' : 'text-emerald-500');
@@ -5040,7 +5735,7 @@ const UI_HTML = `<!DOCTYPE html>
 // - `scheduled` 负责日志清理与日报等定时任务。
 // ============================================================================
 function renderLandingPage() {
-  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Emby Proxy V18.1</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 flex items-center justify-center min-h-screen text-center"><div class="p-8 max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl"><div class="w-16 h-16 mx-auto bg-brand-500/20 rounded-2xl flex items-center justify-center text-blue-500 mb-6"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></div><h1 class="text-3xl font-bold text-white mb-2">Emby Proxy V18.1</h1><p class="text-slate-400 mb-8">高性能媒体代理与分流中心</p><a href="/admin" class="block w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition">进入管理控制台</a></div></body></html>`;
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Emby Proxy V18.2</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 flex items-center justify-center min-h-screen text-center"><div class="p-8 max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl"><div class="w-16 h-16 mx-auto bg-brand-500/20 rounded-2xl flex items-center justify-center text-blue-500 mb-6"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></div><h1 class="text-3xl font-bold text-white mb-2">Emby Proxy V18.2</h1><p class="text-slate-400 mb-8">高性能媒体代理与分流中心</p><a href="/admin" class="block w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition">进入管理控制台</a></div></body></html>`;
   const headers = new Headers({ 'Content-Type': 'text/html;charset=UTF-8', 'Cache-Control': 'no-store' });
   applySecurityHeaders(headers);
   headers.set('X-Frame-Options', 'DENY');
@@ -5131,7 +5826,7 @@ export default {
       const kv = Database.getKV(env);
       if (!kv) return;
       const runtimeConfig = await getRuntimeConfig(env);
-      const scheduledLeaseMs = clampIntegerConfig(runtimeConfig?.scheduledLeaseMs, Config.Defaults.ScheduledLeaseMs, Config.Defaults.ScheduledLeaseMinMs, 30 * 60 * 1000);
+      const scheduledLeaseMs = clampIntegerConfig(runtimeConfig?.scheduledLeaseMs, Config.Defaults.ScheduledLeaseMs, Config.Defaults.ScheduledLeaseMinMs, 15 * 60 * 1000);
       const leaseToken = `${nowMs()}-${Math.random().toString(36).slice(2, 10)}`;
       const lease = await Database.tryAcquireScheduledLease(kv, { token: leaseToken, leaseMs: scheduledLeaseMs });
       if (!lease.acquired) {
