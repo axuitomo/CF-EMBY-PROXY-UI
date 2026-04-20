@@ -48,12 +48,14 @@ function resolveVendorImportMap(env) {
   const chartVersion = normalizeSemver(dependencies['chart.js']);
 
   return {
-    vue: String(env.VITE_CDN_IMPORT_VUE || `https://esm.sh/vue@${vueVersion}?target=es2022`).trim(),
+    vue: String(
+      env.VITE_CDN_IMPORT_VUE || `https://cdn.jsdelivr.net/npm/vue@${vueVersion}/dist/vue.esm-browser.prod.js`
+    ).trim(),
     'lucide-vue-next': String(
-      env.VITE_CDN_IMPORT_LUCIDE || `https://esm.sh/lucide-vue-next@${lucideVersion}?external=vue&target=es2022`
+      env.VITE_CDN_IMPORT_LUCIDE || `https://cdn.jsdelivr.net/npm/lucide-vue-next@${lucideVersion}/dist/esm/lucide-vue-next.js`
     ).trim(),
     'chart.js/auto': String(
-      env.VITE_CDN_IMPORT_CHART || `https://esm.sh/chart.js@${chartVersion}/auto?target=es2022`
+      env.VITE_CDN_IMPORT_CHART || `https://cdn.jsdelivr.net/npm/chart.js@${chartVersion}/auto/auto.js`
     ).trim()
   };
 }

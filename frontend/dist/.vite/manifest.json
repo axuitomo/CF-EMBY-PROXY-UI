@@ -1,25 +1,25 @@
 {
-  "_feature-overview-XWQf-8VP.js": {
-    "file": "assets/feature-overview-XWQf-8VP.js",
+  "_feature-overview-DomjBwZM.js": {
+    "file": "assets/feature-overview-DomjBwZM.js",
     "name": "feature-overview",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js"
     ]
   },
-  "_feature-release-C2gMSBHy.js": {
-    "file": "assets/feature-release-C2gMSBHy.js",
+  "_feature-release-DIhlS0Ew.js": {
+    "file": "assets/feature-release-DIhlS0Ew.js",
     "name": "feature-release",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js",
-      "_feature-overview-XWQf-8VP.js"
+      "_feature-overview-DomjBwZM.js"
     ]
   },
-  "_feature-runtime-itQwd_lZ.js": {
-    "file": "assets/feature-runtime-itQwd_lZ.js",
+  "_feature-runtime-DgBoM6yC.js": {
+    "file": "assets/feature-runtime-DgBoM6yC.js",
     "name": "feature-runtime",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js",
-      "_feature-overview-XWQf-8VP.js"
+      "_feature-overview-DomjBwZM.js"
     ]
   },
   "_rolldown-runtime-lhHHWwHU.js": {
@@ -31,45 +31,45 @@
     "name": "useUiPreferences"
   },
   "index.html": {
-    "file": "assets/index-AxsunYin.js",
+    "file": "assets/index-DsZpVhkG.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
     "imports": [
-      "_feature-overview-XWQf-8VP.js",
+      "_feature-overview-DomjBwZM.js",
       "_useUiPreferences-2wjRBV3U.js",
-      "_feature-release-C2gMSBHy.js"
+      "_feature-release-DIhlS0Ew.js"
     ],
     "dynamicImports": [
-      "_feature-overview-XWQf-8VP.js",
+      "_feature-overview-DomjBwZM.js",
       "src/features/settings/SettingsPanel.vue",
       "src/features/nodes/NodesPanel.vue",
       "src/features/logs/LogsPanel.vue",
       "src/features/dns/DnsPanel.vue",
-      "_feature-runtime-itQwd_lZ.js",
-      "_feature-release-C2gMSBHy.js"
+      "_feature-runtime-DgBoM6yC.js",
+      "_feature-release-DIhlS0Ew.js"
     ],
     "css": [
       "assets/index-KCnRsYqZ.css"
     ]
   },
   "src/features/dns/DnsPanel.vue": {
-    "file": "assets/DnsPanel-B27M-lda.js",
+    "file": "assets/DnsPanel-BeQfvaYk.js",
     "name": "DnsPanel",
     "src": "src/features/dns/DnsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-XWQf-8VP.js",
+      "_feature-overview-DomjBwZM.js",
       "_useUiPreferences-2wjRBV3U.js"
     ]
   },
   "src/features/logs/LogsPanel.vue": {
-    "file": "assets/LogsPanel-rakrBRto.js",
+    "file": "assets/LogsPanel--XLFSZin.js",
     "name": "LogsPanel",
     "src": "src/features/logs/LogsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-XWQf-8VP.js",
+      "_feature-overview-DomjBwZM.js",
       "_useUiPreferences-2wjRBV3U.js"
     ],
     "css": [
@@ -77,21 +77,21 @@
     ]
   },
   "src/features/nodes/NodesPanel.vue": {
-    "file": "assets/NodesPanel-O-yfnB-I.js",
+    "file": "assets/NodesPanel-9nlOLGCF.js",
     "name": "NodesPanel",
     "src": "src/features/nodes/NodesPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-XWQf-8VP.js"
+      "_feature-overview-DomjBwZM.js"
     ]
   },
   "src/features/settings/SettingsPanel.vue": {
-    "file": "assets/SettingsPanel-Cnage2Vi.js",
+    "file": "assets/SettingsPanel-hvgo7uc6.js",
     "name": "SettingsPanel",
     "src": "src/features/settings/SettingsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-XWQf-8VP.js",
+      "_feature-overview-DomjBwZM.js",
       "_useUiPreferences-2wjRBV3U.js"
     ]
   }

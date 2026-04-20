@@ -22149,6 +22149,12 @@ function hasAdminRemoteShellAppRoot(html = "") {
   return /\bid=(['"])app\1/i.test(String(html || ""));
 }
 
+function hasAdminRemoteShellHtmlDocument(html = "") {
+  const normalizedHtml = String(html || "").trim();
+  if (!normalizedHtml) return false;
+  return /<!doctype\s+html\b/i.test(normalizedHtml) || /<html\b/i.test(normalizedHtml);
+}
+
 function buildAdminRemoteShellVariantEtag(options = {}) {
   const bootstrap = isPlainObject(options.bootstrap) ? options.bootstrap : {};
   const initHealth = isPlainObject(options.initHealth)
@@ -22239,9 +22245,6 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
   }
 
   const contentType = String(remoteResponse.headers.get("Content-Type") || "").trim().toLowerCase();
-  if (contentType && !contentType.includes("text/html")) {
-    throw new Error(`remote admin shell content-type invalid: ${contentType}`);
-  }
   const contentLength = Number.parseInt(String(remoteResponse.headers.get("Content-Length") || ""), 10);
   if (Number.isFinite(contentLength) && contentLength > ADMIN_REMOTE_SHELL_MAX_BYTES) {
     throw new Error(`remote admin shell too large: ${contentLength} bytes`);
@@ -22251,6 +22254,16 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
   const remoteHtmlSize = new TextEncoder().encode(remoteHtml).length;
   if (!remoteHtml || remoteHtmlSize > ADMIN_REMOTE_SHELL_MAX_BYTES) {
     throw new Error(`remote admin shell payload invalid: ${remoteHtmlSize} bytes`);
+  }
+  const htmlDocumentDetected = hasAdminRemoteShellHtmlDocument(remoteHtml);
+  if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+    const allowPlainTextHtmlDocument = contentType.startsWith("text/plain") && htmlDocumentDetected;
+    if (!allowPlainTextHtmlDocument) {
+      throw new Error(`remote admin shell content-type invalid: ${contentType}`);
+    }
+  }
+  if (!htmlDocumentDetected) {
+    throw new Error("remote admin shell payload invalid: html document expected");
   }
   if (!hasAdminRemoteShellAppRoot(remoteHtml)) {
     throw new Error("remote admin shell missing #app root");
