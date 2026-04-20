@@ -44,6 +44,10 @@ if (vendorMode === 'cdn') {
       console.error(`[check:cdn] import map 缺少 ${key} 的有效 CDN URL。`);
       process.exit(1);
     }
+    if (/^https?:\/\/(?:[^/]+\.)?esm\.sh\//i.test(targetUrl)) {
+      console.error(`[check:cdn] ${key} 仍然指向 esm.sh，容易重新触发模块加载失败或 CORS Failed。`);
+      process.exit(1);
+    }
   }
 
   const assetsDir = path.resolve(process.cwd(), 'dist/assets');

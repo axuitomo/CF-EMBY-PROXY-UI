@@ -22502,6 +22502,285 @@ function renderLandingPage(env, initHealth = buildInitHealth(env)) {
   return new Response(html, { headers });
 }
 
+function buildRequestPathRedirectResponse(request, targetPath = "/", status = 302) {
+  const redirectUrl = new URL(request.url);
+  redirectUrl.pathname = sanitizeProxyPath(targetPath || "/");
+  redirectUrl.search = "";
+  redirectUrl.hash = "";
+  const headers = new Headers({ Location: redirectUrl.toString(), "Cache-Control": "no-store, max-age=0" });
+  applySecurityHeaders(headers);
+  return new Response(null, { status, headers });
+}
+
+async function renderAdminLoginPage(request, env, initHealth = buildInitHealth(env)) {
+  const adminPath = getAdminPath(env);
+  const loginPath = getAdminLoginPath(env);
+  const initHealthBannerHtml = buildInitHealthBannerHtml(initHealth);
+  const runtimeJson = serializeInlineJson({ adminPath, loginPath, initHealth });
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" sizes="any"><title>Worker 管理台登录</title><style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --bg-a: #091428;
+      --bg-b: #123055;
+      --panel: rgba(8, 20, 38, 0.88);
+      --panel-border: rgba(148, 163, 184, 0.24);
+      --text-main: #e5eefc;
+      --text-muted: rgba(226, 232, 240, 0.8);
+      --accent: #6ee7f9;
+      --accent-strong: #2dd4bf;
+      --danger-bg: rgba(248, 113, 113, 0.14);
+      --danger-border: rgba(248, 113, 113, 0.3);
+      --danger-text: #fecaca;
+      --success-bg: rgba(74, 222, 128, 0.12);
+      --success-border: rgba(74, 222, 128, 0.28);
+      --success-text: #bbf7d0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text-main);
+      background:
+        radial-gradient(circle at top left, rgba(96, 165, 250, 0.32), transparent 38%),
+        radial-gradient(circle at 85% 15%, rgba(45, 212, 191, 0.2), transparent 22%),
+        linear-gradient(135deg, var(--bg-a), var(--bg-b));
+    }
+    a { color: inherit; }
+    .login-shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 32px 20px;
+    }
+    .login-card {
+      width: min(100%, 960px);
+      border-radius: 28px;
+      overflow: hidden;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      box-shadow: 0 28px 120px rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(22px);
+    }
+    .login-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.12fr) minmax(320px, 420px);
+    }
+    .login-hero {
+      padding: 42px 42px 36px;
+      border-right: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .login-form {
+      padding: 42px 32px 36px;
+      background: rgba(2, 6, 23, 0.18);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(229, 238, 252, 0.78);
+      background: rgba(15, 23, 42, 0.36);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .title {
+      margin: 18px 0 12px;
+      font-size: clamp(32px, 5vw, 52px);
+      line-height: 1.05;
+    }
+    .subtitle, .hint, .meta-item, .status {
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+    .meta-grid {
+      margin-top: 26px;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .meta-card {
+      padding: 16px 18px;
+      border-radius: 20px;
+      background: rgba(15, 23, 42, 0.32);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+    .meta-label {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(148, 163, 184, 0.88);
+    }
+    .meta-value {
+      margin-top: 8px;
+      font-size: 15px;
+      color: var(--text-main);
+      word-break: break-all;
+    }
+    .actions {
+      margin-top: 26px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .action-link, .submit-btn {
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      text-decoration: none;
+      padding: 12px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+    }
+    .action-link:hover, .submit-btn:hover { transform: translateY(-1px); }
+    .action-link.primary, .submit-btn {
+      background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+      color: #082032;
+      border-color: transparent;
+    }
+    .action-link.secondary {
+      background: rgba(15, 23, 42, 0.38);
+      color: var(--text-main);
+    }
+    .form-panel {
+      display: grid;
+      gap: 18px;
+    }
+    .form-title {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+    }
+    .field {
+      display: grid;
+      gap: 10px;
+    }
+    .field-label {
+      font-size: 13px;
+      color: rgba(226, 232, 240, 0.82);
+    }
+    .field-input {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.58);
+      color: var(--text-main);
+      font-size: 15px;
+      outline: none;
+    }
+    .field-input:focus {
+      border-color: rgba(110, 231, 249, 0.72);
+      box-shadow: 0 0 0 4px rgba(110, 231, 249, 0.14);
+    }
+    .submit-btn {
+      width: 100%;
+      cursor: pointer;
+    }
+    .submit-btn[disabled] {
+      cursor: wait;
+      opacity: 0.72;
+      transform: none;
+    }
+    .status {
+      min-height: 48px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: rgba(15, 23, 42, 0.36);
+      font-size: 14px;
+    }
+    .status.is-error {
+      color: var(--danger-text);
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+    }
+    .status.is-success {
+      color: var(--success-text);
+      background: var(--success-bg);
+      border-color: var(--success-border);
+    }
+    .hint {
+      font-size: 13px;
+      margin: 0;
+    }
+    .noscript {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger-text);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+    @media (max-width: 860px) {
+      .login-grid { grid-template-columns: 1fr; }
+      .login-hero { border-right: none; border-bottom: 1px solid rgba(148, 163, 184, 0.18); padding: 34px 24px 24px; }
+      .login-form { padding: 28px 24px 30px; }
+      .meta-grid { grid-template-columns: 1fr; }
+    }
+  </style></head><body><main class="login-shell"><section class="login-card"><div>${initHealthBannerHtml}</div><div class="login-grid"><section class="login-hero"><div class="eyebrow">Worker Admin Access</div><h1 class="title">登录管理台壳层</h1><p class="subtitle">这个入口只负责建立 Worker 的同源登录态。登录成功后会直接返回主控制台，后续的节点治理、日志诊断、DNS/IP 池与发布操作继续复用同一份 Cookie。</p><div class="meta-grid"><article class="meta-card"><div class="meta-label">Admin Path</div><div class="meta-value">${escapeHtml(adminPath)}</div></article><article class="meta-card"><div class="meta-label">Login Endpoint</div><div class="meta-value">POST ${escapeHtml(loginPath)}</div></article><article class="meta-card"><div class="meta-label">Init Health</div><div class="meta-value">${initHealth.ok ? "已通过" : `未通过：${escapeHtml((Array.isArray(initHealth.missing) ? initHealth.missing : []).join(" / ") || "请检查环境变量")}`}</div></article><article class="meta-card"><div class="meta-label">Current Mode</div><div class="meta-value">独立登录壳，不再复用 /admin 远端 shell</div></article></div><div class="actions"><a href="${escapeHtml(adminPath)}" class="action-link secondary">返回管理台</a><a href="/" class="action-link primary">回到根路径说明页</a></div></section><section class="login-form"><form id="admin-login-form" class="form-panel" action="${escapeHtml(loginPath)}" method="post" novalidate><div><p class="form-title">输入管理密码</p><p class="hint">页面会继续调用已有的 <code>POST ${escapeHtml(loginPath)}</code> JSON 登录接口，不会新增第二套鉴权协议。</p></div><label class="field" for="admin-login-password"><span class="field-label">管理密码</span><input id="admin-login-password" name="password" type="password" class="field-input" autocomplete="current-password" placeholder="请输入 ADMIN_PASS" required /></label><button id="admin-login-submit" type="submit" class="submit-btn">登录并进入控制台</button><div id="admin-login-status" class="status" role="status" aria-live="polite">等待输入密码。登录成功后会跳转到 ${escapeHtml(adminPath)}。</div></form><noscript><div class="noscript">当前登录壳需要浏览器启用 JavaScript，因为 Worker 现阶段继续复用原有 JSON 登录接口来写入 Cookie。</div></noscript></section></div></section></main><script>
+    const ADMIN_LOGIN_RUNTIME = ${runtimeJson};
+    const form = document.getElementById("admin-login-form");
+    const passwordInput = document.getElementById("admin-login-password");
+    const submitButton = document.getElementById("admin-login-submit");
+    const statusNode = document.getElementById("admin-login-status");
+
+    function updateStatus(message, tone) {
+      if (!statusNode) return;
+      statusNode.textContent = message || "";
+      statusNode.classList.remove("is-error", "is-success");
+      if (tone === "error") statusNode.classList.add("is-error");
+      if (tone === "success") statusNode.classList.add("is-success");
+    }
+
+    form?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const password = String(passwordInput?.value || "").trim();
+      if (!password) {
+        updateStatus("请输入管理密码。", "error");
+        passwordInput?.focus();
+        return;
+      }
+      if (submitButton) submitButton.disabled = true;
+      updateStatus("正在验证密码并建立 Cookie 会话...", "");
+      try {
+        const response = await fetch(ADMIN_LOGIN_RUNTIME.loginPath, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({ password })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.ok && payload && payload.ok === true) {
+          updateStatus("登录成功，正在跳转到管理台...", "success");
+          window.location.assign(ADMIN_LOGIN_RUNTIME.adminPath || "/admin");
+          return;
+        }
+        const errorMessage = payload?.error?.message || payload?.message || (response.status ? ("登录失败（HTTP " + response.status + "）") : "登录失败");
+        updateStatus(errorMessage, "error");
+      } catch (error) {
+        updateStatus(error?.message ? ("登录请求失败：" + error.message) : "登录请求失败，请稍后重试。", "error");
+      } finally {
+        if (submitButton) submitButton.disabled = false;
+      }
+    });
+
+    passwordInput?.focus();
+  </script></body></html>`;
+  return new Response(
+    request?.method === "HEAD" ? null : html,
+    { headers: buildAdminHtmlResponseHeaders("", "no-store, max-age=0") }
+  );
+}
+
 function buildEdgeCorsResponse(dynamicCors, body, status = 200, options = {}) {
   const headers = new Headers(dynamicCors);
   applySecurityHeaders(headers);
@@ -22893,10 +23172,18 @@ const RuntimeEntry = {
       return renderLandingPage(env, routeContext.initHealth);
     }
 
-    if ((request.method === "GET" || request.method === "HEAD") && (
-      pathnameMatchesExactOrTrailingSlash(routeContext.pathnameLower, routeContext.adminPathLower)
-      || pathnameMatchesExactOrTrailingSlash(routeContext.pathnameLower, routeContext.adminLoginPathLower)
-    )) {
+    if ((request.method === "GET" || request.method === "HEAD")
+      && pathnameMatchesExactOrTrailingSlash(routeContext.pathnameLower, routeContext.adminLoginPathLower)
+    ) {
+      if (await Auth.verifyRequest(request, env)) {
+        return buildRequestPathRedirectResponse(request, routeContext.adminPath);
+      }
+      return renderAdminLoginPage(request, env, routeContext.initHealth);
+    }
+
+    if ((request.method === "GET" || request.method === "HEAD")
+      && pathnameMatchesExactOrTrailingSlash(routeContext.pathnameLower, routeContext.adminPathLower)
+    ) {
       return renderAdminPage(request, env, ctx, routeContext.initHealth);
     }
 

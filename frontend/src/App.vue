@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue';
-import { Blocks, Cable, CloudUpload, FileText, ScanSearch, ServerCog, SlidersHorizontal, Waypoints } from 'lucide-vue-next';
+import { Blocks, Cable, CloudUpload, FileText, ScanSearch, SlidersHorizontal, Waypoints } from 'lucide-vue-next';
 
 import { runtimeConfig } from '@/config/runtime';
 import { useAdminConsole } from '@/composables/useAdminConsole';
@@ -37,12 +37,6 @@ const sections = [
     loader: defineAsyncComponent(() => import('@/features/dns/DnsPanel.vue'))
   },
   {
-    key: 'runtime',
-    label: 'WSL 运行时',
-    icon: ServerCog,
-    loader: defineAsyncComponent(() => import('@/features/runtime/RuntimePanel.vue'))
-  },
-  {
     key: 'release',
     label: '发布路径',
     icon: CloudUpload,
@@ -58,8 +52,7 @@ const sectionModes = Object.freeze({
   settings: 'write',
   nodes: 'write',
   logs: 'write',
-  dns: 'observe',
-  runtime: 'observe',
+  dns: 'write',
   release: 'cutover'
 });
 
@@ -135,16 +128,13 @@ const dataSourceText = computed(() => {
       return 'getAdminBootstrap + getDashboardSnapshot + getLogs / initLogsDb / initLogsFts / clearLogs';
     }
     if (activeKey.value === 'dns') {
-      return 'getAdminBootstrap + getDashboardSnapshot + getDnsIpWorkspace / getDnsIpPoolSources';
-    }
-    if (activeKey.value === 'runtime') {
-      return 'getAdminBootstrap + getDashboardSnapshot + getRuntimeStatus';
+      return 'getAdminBootstrap + getDashboardSnapshot + getDnsIpWorkspace / getDnsIpPoolSources / saveDnsIpPoolSources / refreshDnsIpPoolFromSources / saveDnsRecords / updateDnsRecord';
     }
     if (activeKey.value === 'release') {
       return 'getAdminBootstrap(shell / initHealth) + getDashboardSnapshot(runtimeStatus.adminShell) + runtimeConfig(cdnBaseUrl / vendorMode / releaseChannel)';
     }
     return activeKey.value === 'settings'
-      ? 'getAdminBootstrap + getDashboardSnapshot + getSettingsBootstrap'
+      ? 'getAdminBootstrap + getDashboardSnapshot + getSettingsBootstrap / loadConfig / previewConfig / saveConfig / exportConfig'
       : 'getAdminBootstrap + getDashboardSnapshot';
   }
   if (adminConsole.connectionState === 'auth') return '先完成 Worker 登录再继续';
@@ -176,9 +166,9 @@ onBeforeUnmount(() => {
             管理台主导航 {{ migrationCoverage.live }} / {{ migrationCoverage.total }} 一级分区已接入独立前端面板
           </h1>
           <p class="mt-4 max-w-2xl text-sm leading-7 text-slate-300 md:text-base">
-            这套前端现在已经不是早期迁移说明页，而是完整覆盖一级导航的真实管理台。
-            `overview / settings / nodes / logs / dns / runtime / release` 全部接在 Worker bootstrap、dashboard snapshot、runtimeStatus 或 runtimeConfig 上，
-            其中设置、节点、日志已经具备直接操作能力，release/cutover 则专门承担壳切换的实时收口验收。
+            这套前端现在已经不是早期迁移说明页，而是围绕当前主导航工作的真实管理台。
+            `overview / settings / nodes / logs / dns / release` 全部接在 Worker bootstrap、dashboard snapshot、runtimeStatus.adminShell 或 runtimeConfig 上，
+            其中设置、节点、日志、DNS 都已经具备直接操作能力，release/cutover 则专门承担壳切换的实时收口验收。
           </p>
         </div>
         <div class="grid gap-4 md:justify-self-end">

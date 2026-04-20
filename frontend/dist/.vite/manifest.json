@@ -1,98 +1,115 @@
 {
-  "_feature-overview-DomjBwZM.js": {
-    "file": "assets/feature-overview-DomjBwZM.js",
+  "_feature-overview-B2FVlI9G.js": {
+    "file": "assets/feature-overview-B2FVlI9G.js",
     "name": "feature-overview",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js"
+    ],
+    "dynamicImports": [
+      "_vendor-chart-eoa6eN9N.js"
     ]
   },
-  "_feature-release-DIhlS0Ew.js": {
-    "file": "assets/feature-release-DIhlS0Ew.js",
+  "_feature-release-CrVvX40e.js": {
+    "file": "assets/feature-release-CrVvX40e.js",
     "name": "feature-release",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js",
-      "_feature-overview-DomjBwZM.js"
-    ]
-  },
-  "_feature-runtime-DgBoM6yC.js": {
-    "file": "assets/feature-runtime-DgBoM6yC.js",
-    "name": "feature-runtime",
-    "imports": [
-      "_rolldown-runtime-lhHHWwHU.js",
-      "_feature-overview-DomjBwZM.js"
+      "_feature-overview-B2FVlI9G.js"
     ]
   },
   "_rolldown-runtime-lhHHWwHU.js": {
     "file": "assets/rolldown-runtime-lhHHWwHU.js",
     "name": "rolldown-runtime"
   },
-  "_useUiPreferences-2wjRBV3U.js": {
-    "file": "assets/useUiPreferences-2wjRBV3U.js",
+  "_useUiPreferences-B42pIjnx.js": {
+    "file": "assets/useUiPreferences-B42pIjnx.js",
     "name": "useUiPreferences"
   },
+  "_vendor-chart-eoa6eN9N.js": {
+    "file": "assets/vendor-chart-eoa6eN9N.js",
+    "name": "vendor-chart",
+    "imports": [
+      "_rolldown-runtime-lhHHWwHU.js"
+    ]
+  },
+  "_vendor-icons-DoFV2vFy.js": {
+    "file": "assets/vendor-icons-DoFV2vFy.js",
+    "name": "vendor-icons",
+    "imports": [
+      "_feature-overview-B2FVlI9G.js"
+    ]
+  },
   "index.html": {
-    "file": "assets/index-DsZpVhkG.js",
+    "file": "assets/index-BHhhdKbv.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
     "imports": [
-      "_feature-overview-DomjBwZM.js",
-      "_useUiPreferences-2wjRBV3U.js",
-      "_feature-release-DIhlS0Ew.js"
+      "_feature-overview-B2FVlI9G.js",
+      "_feature-release-CrVvX40e.js",
+      "_vendor-icons-DoFV2vFy.js",
+      "_useUiPreferences-B42pIjnx.js"
     ],
     "dynamicImports": [
-      "_feature-overview-DomjBwZM.js",
+      "_feature-overview-B2FVlI9G.js",
       "src/features/settings/SettingsPanel.vue",
       "src/features/nodes/NodesPanel.vue",
       "src/features/logs/LogsPanel.vue",
       "src/features/dns/DnsPanel.vue",
-      "_feature-runtime-DgBoM6yC.js",
-      "_feature-release-DIhlS0Ew.js"
+      "_feature-release-CrVvX40e.js"
     ],
     "css": [
-      "assets/index-KCnRsYqZ.css"
+      "assets/index-BE_Fy1ZA.css"
     ]
   },
   "src/features/dns/DnsPanel.vue": {
-    "file": "assets/DnsPanel-BeQfvaYk.js",
+    "file": "assets/DnsPanel-SH7UHOva.js",
     "name": "DnsPanel",
     "src": "src/features/dns/DnsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-DomjBwZM.js",
-      "_useUiPreferences-2wjRBV3U.js"
+      "_feature-overview-B2FVlI9G.js",
+      "_feature-release-CrVvX40e.js",
+      "_vendor-icons-DoFV2vFy.js",
+      "_useUiPreferences-B42pIjnx.js"
     ]
   },
   "src/features/logs/LogsPanel.vue": {
-    "file": "assets/LogsPanel--XLFSZin.js",
+    "file": "assets/LogsPanel-SgmUZwm_.js",
     "name": "LogsPanel",
     "src": "src/features/logs/LogsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-DomjBwZM.js",
-      "_useUiPreferences-2wjRBV3U.js"
+      "_feature-overview-B2FVlI9G.js",
+      "_feature-release-CrVvX40e.js",
+      "_vendor-icons-DoFV2vFy.js",
+      "_useUiPreferences-B42pIjnx.js"
     ],
     "css": [
       "assets/LogsPanel-B7y2jXm5.css"
     ]
   },
   "src/features/nodes/NodesPanel.vue": {
-    "file": "assets/NodesPanel-9nlOLGCF.js",
+    "file": "assets/NodesPanel-xO3vThZA.js",
     "name": "NodesPanel",
     "src": "src/features/nodes/NodesPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-DomjBwZM.js"
+      "_feature-overview-B2FVlI9G.js",
+      "_feature-release-CrVvX40e.js",
+      "_vendor-icons-DoFV2vFy.js"
     ]
   },
   "src/features/settings/SettingsPanel.vue": {
-    "file": "assets/SettingsPanel-hvgo7uc6.js",
+    "file": "assets/SettingsPanel-Dly5JO8s.js",
     "name": "SettingsPanel",
     "src": "src/features/settings/SettingsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-DomjBwZM.js",
-      "_useUiPreferences-2wjRBV3U.js"
+      "_feature-overview-B2FVlI9G.js",
+      "_feature-release-CrVvX40e.js",
+      "_vendor-icons-DoFV2vFy.js",
+      "_useUiPreferences-B42pIjnx.js"
     ]
   }
 }

@@ -16,7 +16,7 @@ export const runtimeConfig = Object.freeze({
   adminPath: normalizeRoutePath(import.meta.env.VITE_ADMIN_PATH || '/admin'),
   cdnBaseUrl: String(import.meta.env.VITE_CDN_BASE_URL || '').trim(),
   releaseChannel: String(import.meta.env.VITE_FRONTEND_RELEASE_CHANNEL || 'test').trim() || 'test',
-  vendorMode: String(import.meta.env.VITE_VENDOR_MODE || 'cdn').trim() || 'cdn',
+  vendorMode: String(import.meta.env.VITE_VENDOR_MODE || 'bundle').trim() || 'bundle',
   devProxyTarget: String(import.meta.env.VITE_DEV_PROXY_TARGET || '').trim()
 });
 
@@ -56,14 +56,14 @@ export function resolveAdminLoginUrl(loginPath = '', baseUrl = runtimeConfig.api
 }
 
 export function resolveRepoCdnExample() {
-  return 'https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@test/frontend/dist/';
+  return 'https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@<tag-or-commit>/frontend/dist/';
 }
 
 export function resolveReleaseRuntimeSummary(config = runtimeConfig) {
   const runtime = config && typeof config === 'object' ? config : runtimeConfig;
   return {
     releaseChannel: String(runtime.releaseChannel || 'test').trim() || 'test',
-    vendorMode: String(runtime.vendorMode || 'cdn').trim() || 'cdn',
+    vendorMode: String(runtime.vendorMode || 'bundle').trim() || 'bundle',
     adminPath: normalizeRoutePath(runtime.adminPath || runtimeConfig.adminPath),
     apiBaseUrl: resolveApiBaseUrl(runtime.apiBaseUrl || runtimeConfig.apiBaseUrl),
     cdnBaseUrl: String(runtime.cdnBaseUrl || '').trim(),

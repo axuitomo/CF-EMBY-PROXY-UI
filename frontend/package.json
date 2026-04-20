@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node ./scripts/dev-server.mjs",
     "dev:vite": "VITE_VENDOR_MODE=bundle vite --host 0.0.0.0 --port 5173",
-    "build": "VITE_VENDOR_MODE=cdn vite build && VITE_VENDOR_MODE=cdn node ./scripts/check-cdn-paths.mjs",
+    "build": "VITE_VENDOR_MODE=bundle vite build",
     "build:bundle": "VITE_VENDOR_MODE=bundle vite build",
     "build:cdn": "VITE_VENDOR_MODE=cdn vite build && VITE_VENDOR_MODE=cdn node ./scripts/check-cdn-paths.mjs",
     "preview": "vite preview --host 0.0.0.0 --port 4173",

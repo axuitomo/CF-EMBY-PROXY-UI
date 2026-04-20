@@ -69,7 +69,6 @@ function createManualChunks(useCdnExternals) {
     }
 
     if (id.includes('/src/features/overview/')) return 'feature-overview';
-    if (id.includes('/src/features/runtime/')) return 'feature-runtime';
     if (id.includes('/src/features/release/')) return 'feature-release';
     return null;
   };

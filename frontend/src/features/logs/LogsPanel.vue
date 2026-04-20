@@ -693,7 +693,7 @@ async function handleInitLogsDb() {
   if (!result) return;
 
   feedback.tone = 'success';
-  feedback.text = `日志表初始化完成，Schema v${formatTextValue(result.schemaVersion, '4')}，运行时表已就绪。`;
+  feedback.text = `日志表初始化完成，Schema v${formatTextValue(result.schemaVersion, '4')}，查询与持久化链路已就绪。`;
 
   resetSeekCursorHistory();
   const query = buildQueryPayload(1);

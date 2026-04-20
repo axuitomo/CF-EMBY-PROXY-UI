@@ -100,11 +100,22 @@ async function writeClipboardText(value = '') {
   await navigator.clipboard.writeText(String(value || ''));
 }
 
+function extractGithubCdnRef(rawUrl = '') {
+  const match = String(rawUrl || '').trim().match(/^https:\/\/cdn\.jsdelivr\.net\/gh\/[^@]+@([^/]+)\//i);
+  return String(match?.[1] || '').trim();
+}
+
+function isLikelyImmutableGithubRef(rawRef = '') {
+  const value = String(rawRef || '').trim();
+  if (!value) return false;
+  return /^[0-9a-f]{7,40}$/i.test(value) || /^v?\d+\.\d+\.\d+(?:[-+._0-9A-Za-z]+)?$/.test(value);
+}
+
 const releaseSteps = [
   '在 WSL 中本地调试 frontend/',
-  '执行 npm run build，默认产出 CDN externals 版本的 dist/',
-  '配置 VITE_CDN_BASE_URL 指向 GitHub 公共仓库对应的 CDN 根路径',
-  '确认 index.html 已注入 import map，Vue / Lucide / Chart.js 不再打进 dist 业务产物',
+  '执行 npm run build，默认产出 bundle 版本的 dist/',
+  '如需显式使用 CDN externals，再执行 npm run build:cdn，并确认 import map 依赖可用',
+  '配置 VITE_CDN_BASE_URL 指向 GitHub 公共仓库对应的 CDN 根路径，优先使用不可变 tag 或 commit',
   '把 dist/ 发布到 GitHub 公共仓库或发布分支',
   'Worker 配置 ADMIN_SHELL_INDEX_URL 后只拉 index.html，静态资源全部直连 CDN'
 ];
@@ -113,13 +124,13 @@ const envRows = [
   ['VITE_API_BASE_URL', '本地联调 Worker API 地址，例如 http://127.0.0.1:8787'],
   ['VITE_ADMIN_PATH', '未来管理台入口路径，默认 /admin'],
   ['VITE_DEV_PROXY_TARGET', 'Vite 本地开发时代理到 Worker 的地址，默认 http://127.0.0.1:8787'],
-  ['VITE_CDN_BASE_URL', '构建时注入绝对 CDN 前缀'],
+  ['VITE_CDN_BASE_URL', '构建时注入绝对 CDN 前缀，建议使用 jsDelivr 的 tag/commit 不可变地址'],
   ['VITE_FRONTEND_RELEASE_CHANNEL', '区分 dev / staging / prod 通道'],
-  ['VITE_VENDOR_MODE', '控制 build 是否切到 CDN externals'],
+  ['VITE_VENDOR_MODE', '控制 build 是否切到 CDN externals；默认 bundle 更稳'],
   ['VITE_CDN_IMPORT_VUE', 'Vue ESM CDN URL'],
   ['VITE_CDN_IMPORT_LUCIDE', 'Lucide Vue ESM CDN URL'],
   ['VITE_CDN_IMPORT_CHART', 'Chart.js ESM CDN URL'],
-  ['ADMIN_SHELL_INDEX_URL', 'Worker 侧入口 HTML 地址，例如 GitHub Pages 或 jsDelivr 上的 index.html']
+  ['ADMIN_SHELL_INDEX_URL', 'Worker 侧入口 HTML 地址，建议使用不可变 tag/commit 对应的 index.html']
 ];
 
 const placementModeChoices = [
@@ -219,6 +230,14 @@ const cutoverSummary = computed(() => {
 });
 
 const recommendedAdminShellIndexUrl = computed(() => resolveAdminShellIndexUrl(runtimeConfig.cdnBaseUrl));
+const currentShellGithubRef = computed(() => extractGithubCdnRef(shellState.value.remoteShellIndexUrl));
+const recommendedGithubRef = computed(() => extractGithubCdnRef(recommendedAdminShellIndexUrl.value));
+const currentShellUsesMutableGithubRef = computed(() => {
+  return Boolean(currentShellGithubRef.value) && !isLikelyImmutableGithubRef(currentShellGithubRef.value);
+});
+const recommendedUsesMutableGithubRef = computed(() => {
+  return Boolean(recommendedGithubRef.value) && !isLikelyImmutableGithubRef(recommendedGithubRef.value);
+});
 
 const shellUrlMatchesRecommendation = computed(() => {
   const currentUrl = String(shellState.value.remoteShellIndexUrl || '').trim();
@@ -259,9 +278,11 @@ const requiredCutoverChecks = computed(() => [
 
 const advisoryChecks = computed(() => [
   {
-    label: '前端构建使用 CDN externals',
-    detail: `release channel: ${releaseRuntime.value.releaseChannel} / vendor mode: ${releaseRuntime.value.vendorMode}`,
-    ready: releaseRuntime.value.vendorMode === 'cdn'
+    label: '前端构建模式',
+    detail: releaseRuntime.value.vendorMode === 'cdn'
+      ? `release channel: ${releaseRuntime.value.releaseChannel} / vendor mode: cdn（浏览器会继续直连外部 import map）`
+      : `release channel: ${releaseRuntime.value.releaseChannel} / vendor mode: ${releaseRuntime.value.vendorMode}（依赖随业务产物一起发布）`,
+    ready: releaseRuntime.value.vendorMode !== 'cdn'
   },
   {
     label: '当前前端可推导推荐 index.html',
@@ -277,6 +298,21 @@ const advisoryChecks = computed(() => [
       : 'Worker 还没有远端入口地址可供比对',
     ready: shellState.value.remoteShellConfigured === true
       && (!recommendedAdminShellIndexUrl.value || shellUrlMatchesRecommendation.value)
+  },
+  {
+    label: '远端壳入口使用不可变 CDN ref',
+    detail: currentShellGithubRef.value
+      ? (currentShellUsesMutableGithubRef.value
+          ? `当前 Worker 入口使用 @${currentShellGithubRef.value}。如果它是分支名，jsDelivr 可能继续返回旧版 index.html。`
+          : `当前 Worker 入口使用不可变 ref @${currentShellGithubRef.value}。`)
+      : recommendedGithubRef.value
+        ? (recommendedUsesMutableGithubRef.value
+            ? `当前推荐地址使用 @${recommendedGithubRef.value}。如果它是分支名，切流时仍可能命中陈旧 HTML。`
+            : `当前推荐地址使用不可变 ref @${recommendedGithubRef.value}。`)
+        : '当前不是 jsDelivr GitHub URL，需自行确认 CDN 缓存策略。',
+    ready: currentShellGithubRef.value
+      ? !currentShellUsesMutableGithubRef.value
+      : (recommendedGithubRef.value ? !recommendedUsesMutableGithubRef.value : true)
   },
   {
     label: '旧大字符串壳已退役',
@@ -340,14 +376,18 @@ const nextActions = computed(() => {
     actions.push('保留可用的 embedded fallback，避免远端壳异常时没有兜底页面。');
   }
 
-  if (releaseRuntime.value.vendorMode !== 'cdn') {
-    actions.push('发布构建使用 `VITE_VENDOR_MODE=cdn`，让 dist 按 externals 方式产出。');
+  if (releaseRuntime.value.vendorMode === 'cdn') {
+    actions.push('如果页面仍出现 `CORS Failed`，优先切回默认 bundle 构建（`npm run build`），避免浏览器继续直连第三方 import map。');
   }
 
   if (!recommendedAdminShellIndexUrl.value) {
     actions.push('补齐 `VITE_CDN_BASE_URL`，让当前前端能推导出推荐的远端 index.html 地址。');
   } else if (shellState.value.remoteShellConfigured === true && !shellUrlMatchesRecommendation.value) {
     actions.push('把 Worker 的 `ADMIN_SHELL_INDEX_URL` 对齐到当前前端构建推导结果，避免继续指向旧 tag 或旧 commit。');
+  }
+
+  if (currentShellUsesMutableGithubRef.value || recommendedUsesMutableGithubRef.value) {
+    actions.push('把 `ADMIN_SHELL_INDEX_URL` / `VITE_CDN_BASE_URL` 尽量换成 jsDelivr 的 tag/commit 不可变地址，不要继续使用 `@test` 这类分支 ref，否则可能命中陈旧 HTML 并重新触发 CORS Failed。');
   }
 
   if (shellState.value.finalUiHtmlRetired !== true) {
