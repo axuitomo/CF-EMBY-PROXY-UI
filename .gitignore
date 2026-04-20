@@ -6,5 +6,3 @@ frontend/.env.*.local
 .wrangler/
 npm-debug.log*
 .ace-tool/
-prompts/
-worker.md

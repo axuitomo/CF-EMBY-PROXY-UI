@@ -1,5 +1,17 @@
 # 总指导 Prompt
 
+## 牵引目录
+- `prompts`
+- `frontend`
+
+## 牵引文件
+- `worker.md`
+- `worker.js`
+- `wrangler.toml`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 你现在要基于当前仓库做一次分阶段、可回归的重构。当前真实现状是：
 
 - `worker.js` 仍然内嵌完整管理台 `UI_HTML`

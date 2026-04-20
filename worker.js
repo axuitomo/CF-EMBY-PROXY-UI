@@ -22145,6 +22145,72 @@ function injectMarkupIntoHtmlDocument(html = "", markup = "") {
   return `${injectedMarkup}${sourceHtml}`;
 }
 
+function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
+  const sourceHtml = String(html || "");
+  if (!sourceHtml) return [];
+
+  let resolvedBaseUrl = null;
+  try {
+    resolvedBaseUrl = new URL(String(baseUrl || "").trim());
+  } catch {
+    resolvedBaseUrl = null;
+  }
+
+  const assetUrls = [];
+  const assetMatches = sourceHtml.matchAll(/\b(?:src|href)=["']([^"'#][^"']*)["']/gi);
+  for (const match of assetMatches) {
+    const rawAssetUrl = String(match?.[1] || "").trim();
+    if (!rawAssetUrl || /^data:/i.test(rawAssetUrl) || /^javascript:/i.test(rawAssetUrl)) continue;
+    if (!/\.(?:m?js|css)(?:[?#]|$)/i.test(rawAssetUrl)) continue;
+    try {
+      const normalizedAssetUrl = resolvedBaseUrl
+        ? new URL(rawAssetUrl, resolvedBaseUrl).toString()
+        : new URL(rawAssetUrl).toString();
+      assetUrls.push(normalizedAssetUrl);
+    } catch {
+      continue;
+    }
+  }
+
+  return [...new Set(assetUrls)];
+}
+
+function isMutableJsdelivrGithubAssetUrl(assetUrl = "") {
+  let parsedUrl = null;
+  try {
+    parsedUrl = new URL(String(assetUrl || "").trim());
+  } catch {
+    return false;
+  }
+  if (!/(^|\.)jsdelivr\.net$/i.test(parsedUrl.hostname)) return false;
+
+  const matchedRef = parsedUrl.pathname.match(/^\/gh\/[^/]+\/[^@/]+@([^/]+)\//i);
+  if (!matchedRef) return false;
+
+  const ref = decodeURIComponent(String(matchedRef[1] || "").trim());
+  if (!ref) return false;
+  if (/^[0-9a-f]{7,40}$/i.test(ref)) return false;
+  if (/^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i.test(ref)) return false;
+  return true;
+}
+
+function getAdminRemoteShellAssetPolicyViolations(html = "", baseUrl = "") {
+  const assetUrls = extractAdminRemoteShellAssetUrls(html, baseUrl);
+  const violations = [];
+
+  for (const assetUrl of assetUrls) {
+    if (/^https?:\/\/(?:[^/]+\.)?esm\.sh\//i.test(assetUrl)) {
+      violations.push(`esm.sh 资产不再允许：${assetUrl}`);
+      continue;
+    }
+    if (isMutableJsdelivrGithubAssetUrl(assetUrl)) {
+      violations.push(`jsDelivr gh 可变 ref 不再允许：${assetUrl}`);
+    }
+  }
+
+  return violations;
+}
+
 function hasAdminRemoteShellAppRoot(html = "") {
   return /\bid=(['"])app\1/i.test(String(html || ""));
 }
@@ -22267,6 +22333,11 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
   }
   if (!hasAdminRemoteShellAppRoot(remoteHtml)) {
     throw new Error("remote admin shell missing #app root");
+  }
+
+  const assetPolicyViolations = getAdminRemoteShellAssetPolicyViolations(remoteHtml, remoteShellIndexUrl);
+  if (assetPolicyViolations.length > 0) {
+    throw new Error(`remote admin shell asset policy invalid: ${assetPolicyViolations.slice(0, 3).join(" | ")}`);
   }
 
   const bootstrapJson = serializeInlineJson(bootstrap);

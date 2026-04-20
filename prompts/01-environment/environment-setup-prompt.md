@@ -1,5 +1,20 @@
 # 安装环境 Prompt
 
+## 牵引目录
+- `prompts/01-environment`
+- `frontend`
+- `.wrangler`
+
+## 牵引文件
+- `worker.md`
+- `.dev.vars.example`
+- `wrangler.toml`
+- `frontend/package.json`
+- `frontend/vite.config.js`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 请为当前仓库补齐“前端独立调试 + Worker 保持可运行”的本地开发环境。目标是让后续重构可以在本地完成调试、构建、回归，而不是直接上云试错。
 
 ## 背景

@@ -1,115 +1,89 @@
 {
-  "_feature-overview-B2FVlI9G.js": {
-    "file": "assets/feature-overview-B2FVlI9G.js",
+  "_feature-overview-RpNkXmct.js": {
+    "file": "assets/feature-overview-RpNkXmct.js",
     "name": "feature-overview",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js"
-    ],
-    "dynamicImports": [
-      "_vendor-chart-eoa6eN9N.js"
     ]
   },
-  "_feature-release-CrVvX40e.js": {
-    "file": "assets/feature-release-CrVvX40e.js",
+  "_feature-release-DUi5nV4A.js": {
+    "file": "assets/feature-release-DUi5nV4A.js",
     "name": "feature-release",
     "imports": [
       "_rolldown-runtime-lhHHWwHU.js",
-      "_feature-overview-B2FVlI9G.js"
+      "_feature-overview-RpNkXmct.js"
     ]
   },
   "_rolldown-runtime-lhHHWwHU.js": {
     "file": "assets/rolldown-runtime-lhHHWwHU.js",
     "name": "rolldown-runtime"
   },
-  "_useUiPreferences-B42pIjnx.js": {
-    "file": "assets/useUiPreferences-B42pIjnx.js",
+  "_useUiPreferences-2wjRBV3U.js": {
+    "file": "assets/useUiPreferences-2wjRBV3U.js",
     "name": "useUiPreferences"
   },
-  "_vendor-chart-eoa6eN9N.js": {
-    "file": "assets/vendor-chart-eoa6eN9N.js",
-    "name": "vendor-chart",
-    "imports": [
-      "_rolldown-runtime-lhHHWwHU.js"
-    ]
-  },
-  "_vendor-icons-DoFV2vFy.js": {
-    "file": "assets/vendor-icons-DoFV2vFy.js",
-    "name": "vendor-icons",
-    "imports": [
-      "_feature-overview-B2FVlI9G.js"
-    ]
-  },
   "index.html": {
-    "file": "assets/index-BHhhdKbv.js",
+    "file": "assets/index-DfTHITE7.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
     "imports": [
-      "_feature-overview-B2FVlI9G.js",
-      "_feature-release-CrVvX40e.js",
-      "_vendor-icons-DoFV2vFy.js",
-      "_useUiPreferences-B42pIjnx.js"
+      "_feature-overview-RpNkXmct.js",
+      "_useUiPreferences-2wjRBV3U.js",
+      "_feature-release-DUi5nV4A.js"
     ],
     "dynamicImports": [
-      "_feature-overview-B2FVlI9G.js",
+      "_feature-overview-RpNkXmct.js",
       "src/features/settings/SettingsPanel.vue",
       "src/features/nodes/NodesPanel.vue",
       "src/features/logs/LogsPanel.vue",
       "src/features/dns/DnsPanel.vue",
-      "_feature-release-CrVvX40e.js"
+      "_feature-release-DUi5nV4A.js"
     ],
     "css": [
-      "assets/index-BE_Fy1ZA.css"
+      "assets/index-KCnRsYqZ.css"
     ]
   },
   "src/features/dns/DnsPanel.vue": {
-    "file": "assets/DnsPanel-SH7UHOva.js",
+    "file": "assets/DnsPanel-v4JhGnrB.js",
     "name": "DnsPanel",
     "src": "src/features/dns/DnsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-B2FVlI9G.js",
-      "_feature-release-CrVvX40e.js",
-      "_vendor-icons-DoFV2vFy.js",
-      "_useUiPreferences-B42pIjnx.js"
+      "_feature-overview-RpNkXmct.js",
+      "_useUiPreferences-2wjRBV3U.js"
     ]
   },
   "src/features/logs/LogsPanel.vue": {
-    "file": "assets/LogsPanel-SgmUZwm_.js",
+    "file": "assets/LogsPanel-HfSTq3Ft.js",
     "name": "LogsPanel",
     "src": "src/features/logs/LogsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-B2FVlI9G.js",
-      "_feature-release-CrVvX40e.js",
-      "_vendor-icons-DoFV2vFy.js",
-      "_useUiPreferences-B42pIjnx.js"
+      "_feature-overview-RpNkXmct.js",
+      "_useUiPreferences-2wjRBV3U.js"
     ],
     "css": [
       "assets/LogsPanel-B7y2jXm5.css"
     ]
   },
   "src/features/nodes/NodesPanel.vue": {
-    "file": "assets/NodesPanel-xO3vThZA.js",
+    "file": "assets/NodesPanel-BF8XTaoi.js",
     "name": "NodesPanel",
     "src": "src/features/nodes/NodesPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-B2FVlI9G.js",
-      "_feature-release-CrVvX40e.js",
-      "_vendor-icons-DoFV2vFy.js"
+      "_feature-overview-RpNkXmct.js"
     ]
   },
   "src/features/settings/SettingsPanel.vue": {
-    "file": "assets/SettingsPanel-Dly5JO8s.js",
+    "file": "assets/SettingsPanel-D2HrDw1D.js",
     "name": "SettingsPanel",
     "src": "src/features/settings/SettingsPanel.vue",
     "isDynamicEntry": true,
     "imports": [
-      "_feature-overview-B2FVlI9G.js",
-      "_feature-release-CrVvX40e.js",
-      "_vendor-icons-DoFV2vFy.js",
-      "_useUiPreferences-B42pIjnx.js"
+      "_feature-overview-RpNkXmct.js",
+      "_useUiPreferences-2wjRBV3U.js"
     ]
   }
 }

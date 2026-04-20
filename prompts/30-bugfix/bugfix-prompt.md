@@ -1,5 +1,17 @@
 # Bug 修复 Prompt
 
+## 牵引目录
+- `prompts/30-bugfix`
+- `frontend`
+
+## 牵引文件
+- `worker.md`
+- `worker.js`
+- `frontend/scripts/check-cdn-paths.mjs`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 请以“Worker Shell + CDN Frontend”重构目标为前提，修复当前仓库中的缺陷。修复前先判断问题属于哪一层，不要混修。
 
 ## 先做问题分类

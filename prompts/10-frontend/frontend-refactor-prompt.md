@@ -1,5 +1,19 @@
 # 前端重构 Prompt
 
+## 牵引目录
+- `prompts/10-frontend`
+- `frontend`
+
+## 牵引文件
+- `worker.md`
+- `worker.js`
+- `frontend/package.json`
+- `frontend/vite.config.js`
+- `frontend/scripts/check-cdn-paths.mjs`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 请把当前内嵌在 `worker.js` 里的管理台前端，迁移为独立的 Vite 前端工程。迁移时必须以当前仓库真实能力为基础，而不是做一个脱离现有 API 的新后台。
 
 ## 当前上下文

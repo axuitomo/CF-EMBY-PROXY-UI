@@ -1,5 +1,17 @@
 # 后端 Worker 壳改造 Prompt
 
+## 牵引目录
+- `prompts/20-backend`
+- `.wrangler`
+
+## 牵引文件
+- `worker.md`
+- `worker.js`
+- `wrangler.toml`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 请把当前 Worker 中“直接内嵌并输出整份管理台 HTML”的逻辑，改造为“Worker 只拉取远端 `index.html` 并返回，静态资源交给 CDN 直出”的模式。
 
 ## 当前上下文

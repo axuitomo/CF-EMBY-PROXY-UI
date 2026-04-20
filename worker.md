@@ -143,6 +143,73 @@
 - 后端 Worker 壳改造：`prompts/20-backend/backend-worker-shell-prompt.md`
 - Bug 修复：`prompts/30-bugfix/bugfix-prompt.md`
 - 调试与回归：`prompts/40-debug-regression/debug-regression-prompt.md`
+- 推送与发布：`prompts/50-publish/push-publish-prompt.md`
+
+## Prompt 牵引治理
+1. `worker.md` 是本仓库 prompt 的单一事实来源；新增或修改 prompt 前，必须先修改本文件。
+2. 每个 prompt 都必须包含以下小节：
+   - `## 牵引目录`
+   - `## 牵引文件`
+   - `## 校验命令`
+3. 牵引目录不是固定枚举；后续允许新增，但必须同步更新：
+   - 本节下方的 `Prompt 牵引注册表`
+   - 对应 prompt 内的牵引小节
+4. 每次修改 `worker.md` 或任意 prompt 后，必须运行：
+   - `node prompts/scripts/check-guidance-registry.mjs`
+5. 涉及推送 / 发布的 prompt，除通用校验外，还必须运行：
+   - `node prompts/scripts/check-publish-cdn.mjs --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --admin-shell-index-url <ADMIN_SHELL_INDEX_URL>`
+   - `cd frontend && VITE_CDN_BASE_URL=<expected-cdn-base> npm run build:cdn`
+
+## Prompt 牵引注册表
+```json
+[
+  {
+    "path": "prompts/00-total-guidance/total-guidance-prompt.md",
+    "guidanceDirectories": ["prompts", "frontend"],
+    "guidanceFiles": ["worker.md", "worker.js", "wrangler.toml"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/01-environment/environment-setup-prompt.md",
+    "guidanceDirectories": ["prompts/01-environment", "frontend", ".wrangler"],
+    "guidanceFiles": ["worker.md", ".dev.vars.example", "wrangler.toml", "frontend/package.json", "frontend/vite.config.js"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/10-frontend/frontend-refactor-prompt.md",
+    "guidanceDirectories": ["prompts/10-frontend", "frontend"],
+    "guidanceFiles": ["worker.md", "worker.js", "frontend/package.json", "frontend/vite.config.js", "frontend/scripts/check-cdn-paths.mjs"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/20-backend/backend-worker-shell-prompt.md",
+    "guidanceDirectories": ["prompts/20-backend", ".wrangler"],
+    "guidanceFiles": ["worker.md", "worker.js", "wrangler.toml"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/30-bugfix/bugfix-prompt.md",
+    "guidanceDirectories": ["prompts/30-bugfix", "frontend"],
+    "guidanceFiles": ["worker.md", "worker.js", "frontend/scripts/check-cdn-paths.mjs"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/40-debug-regression/debug-regression-prompt.md",
+    "guidanceDirectories": ["prompts/40-debug-regression", "frontend", ".wrangler"],
+    "guidanceFiles": ["worker.md", "worker.js", ".dev.vars.example", "frontend/scripts/check-cdn-paths.mjs"],
+    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
+  },
+  {
+    "path": "prompts/50-publish/push-publish-prompt.md",
+    "guidanceDirectories": ["prompts/50-publish", "frontend", "prompts/scripts"],
+    "guidanceFiles": ["worker.md", "frontend/scripts/check-cdn-paths.mjs", "frontend/src/features/release/ReleasePanel.vue", "prompts/scripts/check-publish-cdn.mjs"],
+    "validationCommands": [
+      "node prompts/scripts/check-guidance-registry.mjs",
+      "node prompts/scripts/check-publish-cdn.mjs --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --admin-shell-index-url <ADMIN_SHELL_INDEX_URL>"
+    ]
+  }
+]
+```
 
 ## Output Expectations
 - 回答默认使用中文。

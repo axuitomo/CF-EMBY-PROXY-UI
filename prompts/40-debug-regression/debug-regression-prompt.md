@@ -1,5 +1,19 @@
 # 调试与回归测试 Prompt
 
+## 牵引目录
+- `prompts/40-debug-regression`
+- `frontend`
+- `.wrangler`
+
+## 牵引文件
+- `worker.md`
+- `worker.js`
+- `.dev.vars.example`
+- `frontend/scripts/check-cdn-paths.mjs`
+
+## 校验命令
+- `node prompts/scripts/check-guidance-registry.mjs`
+
 请针对“Vite 前端 + CDN 直出静态资源 + Worker Shell 拉取 HTML + Cache API SWR”这条新架构，设计并执行本地调试与回归测试。
 
 ## 测试目标
