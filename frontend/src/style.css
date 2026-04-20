@@ -1,0 +1,234 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", "Inter", "Segoe UI", sans-serif;
+  --color-ink-950: #08111f;
+  --color-ink-900: #0f1b31;
+  --color-brand-500: #f97316;
+  --color-brand-400: #fb923c;
+  --color-brand-300: #fdba74;
+  --color-brand-100: #ffedd5;
+  --color-ocean-500: #0ea5e9;
+  --color-ocean-300: #7dd3fc;
+  --color-mint-400: #34d399;
+  --color-mint-300: #6ee7b7;
+}
+
+@layer base {
+  :root {
+    --app-color-scheme: dark;
+    --app-body-base: #08111f;
+    --app-body-bg: radial-gradient(circle at top, rgba(14, 165, 233, 0.18), transparent 38%),
+      linear-gradient(180deg, #08111f 0%, #0f1b31 52%, #111827 100%);
+    --app-text: #e2e8f0;
+    --app-text-strong: #ffffff;
+    --app-text-muted: #cbd5e1;
+    --app-text-faint: #94a3b8;
+    --app-surface-glass: rgba(255, 255, 255, 0.06);
+    --app-surface-overlay: rgba(255, 255, 255, 0.06);
+    --app-surface-card: rgba(2, 6, 23, 0.5);
+    --app-surface-muted: rgba(2, 6, 23, 0.55);
+    --app-border-subtle: rgba(255, 255, 255, 0.1);
+    --app-border: rgba(255, 255, 255, 0.14);
+    --app-border-strong: rgba(255, 255, 255, 0.22);
+    --app-shadow-lg: 0 28px 90px rgba(8, 17, 31, 0.35);
+    --app-input-bg: rgba(2, 6, 23, 0.7);
+    --app-secondary-btn-bg: rgba(255, 255, 255, 0.06);
+    --app-secondary-btn-hover-bg: rgba(255, 255, 255, 0.1);
+    color-scheme: var(--app-color-scheme);
+  }
+
+  :root[data-theme='dark'] {
+    --app-color-scheme: dark;
+  }
+
+  :root[data-theme='light'] {
+    --app-color-scheme: light;
+    --app-body-base: #f8fafc;
+    --app-body-bg: radial-gradient(circle at top, rgba(14, 165, 233, 0.12), transparent 42%),
+      linear-gradient(180deg, #f8fafc 0%, #eef2ff 48%, #e2e8f0 100%);
+    --app-text: #0f172a;
+    --app-text-strong: #08111f;
+    --app-text-muted: #334155;
+    --app-text-faint: #64748b;
+    --app-surface-glass: rgba(255, 255, 255, 0.78);
+    --app-surface-overlay: rgba(255, 255, 255, 0.74);
+    --app-surface-card: rgba(255, 255, 255, 0.88);
+    --app-surface-muted: rgba(255, 255, 255, 0.78);
+    --app-border-subtle: rgba(148, 163, 184, 0.28);
+    --app-border: rgba(148, 163, 184, 0.36);
+    --app-border-strong: rgba(100, 116, 139, 0.45);
+    --app-shadow-lg: 0 24px 72px rgba(15, 23, 42, 0.1);
+    --app-input-bg: rgba(255, 255, 255, 0.94);
+    --app-secondary-btn-bg: rgba(255, 255, 255, 0.72);
+    --app-secondary-btn-hover-bg: rgba(255, 255, 255, 0.94);
+  }
+
+  html {
+    background-color: var(--app-body-base);
+  }
+
+  body {
+    @apply min-h-screen antialiased;
+    background-color: var(--app-body-base);
+    background-image: var(--app-body-bg);
+    color: var(--app-text);
+    transition:
+      background-color 180ms ease,
+      color 180ms ease,
+      border-color 180ms ease;
+  }
+
+  #app {
+    @apply min-h-screen;
+  }
+
+  a {
+    @apply transition-colors;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply rounded-[28px] border backdrop-blur;
+    border-color: var(--app-border-subtle);
+    background: var(--app-surface-glass);
+    box-shadow: var(--app-shadow-lg);
+  }
+
+  .section-shell {
+    @apply rounded-[28px] border p-6 backdrop-blur md:p-8;
+    border-color: var(--app-border-subtle);
+    background: var(--app-surface-glass);
+    box-shadow: var(--app-shadow-lg);
+  }
+
+  .stat-tile {
+    @apply rounded-3xl border p-5;
+    border-color: var(--app-border-subtle);
+    background: var(--app-surface-card);
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em];
+    border-color: var(--app-border);
+    background: var(--app-surface-overlay);
+    color: var(--app-text-muted);
+  }
+
+  .form-card {
+    @apply rounded-3xl border p-5;
+    border-color: var(--app-border-subtle);
+    background: var(--app-surface-card);
+  }
+
+  .field-shell {
+    @apply flex flex-col gap-2;
+  }
+
+  .field-label {
+    @apply text-xs font-semibold uppercase tracking-[0.16em];
+    color: var(--app-text-faint);
+  }
+
+  .field-hint {
+    @apply text-xs leading-5;
+    color: var(--app-text-faint);
+  }
+
+  .field-input {
+    @apply w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-brand-400/70 focus:ring-2 focus:ring-brand-500/20;
+    border-color: var(--app-border-subtle);
+    background: var(--app-input-bg);
+    color: var(--app-text);
+  }
+
+  .field-textarea {
+    @apply min-h-[7rem] resize-y;
+  }
+
+  .field-input::placeholder {
+    color: var(--app-text-faint);
+  }
+
+  .toggle-card {
+    @apply inline-flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm;
+    border-color: var(--app-border-subtle);
+    background: var(--app-surface-muted);
+    color: var(--app-text-muted);
+  }
+
+  .secondary-btn {
+    @apply inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:pointer-events-none disabled:opacity-60;
+    border-color: var(--app-border);
+    background: var(--app-secondary-btn-bg);
+    color: var(--app-text);
+  }
+
+  .secondary-btn:hover {
+    border-color: var(--app-border-strong);
+    background: var(--app-secondary-btn-hover-bg);
+  }
+
+  .primary-btn {
+    @apply inline-flex items-center gap-2 rounded-full border border-brand-400/60 bg-brand-500/18 px-4 py-2 text-sm font-medium text-white shadow-[0_12px_32px_rgba(249,115,22,0.18)] transition hover:border-brand-300/80 hover:bg-brand-500/24 disabled:pointer-events-none disabled:opacity-60;
+  }
+}
+
+@layer utilities {
+  :root[data-theme='light'] .text-white {
+    color: var(--app-text-strong) !important;
+  }
+
+  :root[data-theme='light'] .text-slate-100,
+  :root[data-theme='light'] .text-slate-200 {
+    color: var(--app-text) !important;
+  }
+
+  :root[data-theme='light'] .text-slate-300 {
+    color: var(--app-text-muted) !important;
+  }
+
+  :root[data-theme='light'] .text-slate-400,
+  :root[data-theme='light'] .text-slate-500 {
+    color: var(--app-text-faint) !important;
+  }
+
+  :root[data-theme='light'] .bg-white\/4,
+  :root[data-theme='light'] .bg-white\/5,
+  :root[data-theme='light'] .bg-white\/6,
+  :root[data-theme='light'] .bg-white\/8,
+  :root[data-theme='light'] .bg-white\/10 {
+    background-color: var(--app-surface-overlay) !important;
+  }
+
+  :root[data-theme='light'] .bg-slate-950\/30,
+  :root[data-theme='light'] .bg-slate-950\/35,
+  :root[data-theme='light'] .bg-slate-950\/40,
+  :root[data-theme='light'] .bg-slate-950\/45,
+  :root[data-theme='light'] .bg-slate-950\/50,
+  :root[data-theme='light'] .bg-slate-950\/55,
+  :root[data-theme='light'] .bg-slate-950\/60,
+  :root[data-theme='light'] .bg-slate-950\/70,
+  :root[data-theme='light'] .bg-slate-950\/75,
+  :root[data-theme='light'] .bg-slate-950\/85,
+  :root[data-theme='light'] .bg-slate-950\/90 {
+    background-color: var(--app-surface-card) !important;
+  }
+
+  :root[data-theme='light'] .border-white\/8,
+  :root[data-theme='light'] .border-white\/10,
+  :root[data-theme='light'] .border-white\/12,
+  :root[data-theme='light'] .border-white\/20 {
+    border-color: var(--app-border-subtle) !important;
+  }
+
+  :root[data-theme='light'] .hover\:border-white\/20:hover {
+    border-color: var(--app-border-strong) !important;
+  }
+
+  :root[data-theme='light'] .hover\:bg-white\/8:hover,
+  :root[data-theme='light'] .hover\:bg-white\/10:hover {
+    background-color: var(--app-secondary-btn-hover-bg) !important;
+  }
+}
