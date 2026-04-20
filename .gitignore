@@ -1,5 +1,4 @@
 frontend/node_modules/
-frontend/dist/
 frontend/.env.local
 frontend/.env.*.local
 .dev.vars
@@ -7,3 +6,5 @@ frontend/.env.*.local
 .wrangler/
 npm-debug.log*
 .ace-tool/
+prompts/
+worker.md
