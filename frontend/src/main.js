@@ -1,9 +1,7 @@
-import { createApp } from 'vue';
+import { startBankerAdminRuntime } from './banker-runtime-loader';
 
-import App from './App.vue';
-import { useTheme } from './composables/useTheme';
-import './style.css';
-
-useTheme().initializeTheme();
-
-createApp(App).mount('#app');
+try {
+  await startBankerAdminRuntime();
+} catch (error) {
+  console.error('banker admin runtime bootstrap failed', error);
+}

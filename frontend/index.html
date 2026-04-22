@@ -2,15 +2,31 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CF Emby Proxy UI Frontend</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <title>Emby Proxy V19.2 - SaaS Dashboard</title>
     <meta
       name="description"
-      content="CF Emby Proxy UI 的独立前端开发壳，用于本地调试、构建和后续 CDN 发布。"
+      content="正式管理台前端入口。运行时 UI 严格由 banker/worker.js 与 banker/.admin-ui.html 牵引。"
     />
+    <style>
+      html,
+      body,
+      #app {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      [v-cloak] {
+        display: none;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app" v-cloak></div>
     <script type="module" src="/src/main.js"></script>
   </body>
-  </html>
+</html>

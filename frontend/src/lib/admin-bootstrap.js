@@ -28,9 +28,15 @@ export function readInlineAdminBootstrap() {
     adminPath: String(payload?.adminPath || runtimeConfig.adminPath).trim() || runtimeConfig.adminPath,
     loginPath: String(payload?.loginPath || '').trim(),
     hostDomain: String(payload?.hostDomain || '').trim(),
+    legacyHost: String(payload?.legacyHost || '').trim(),
     generatedAt: String(payload?.generatedAt || '').trim(),
     initHealth: isPlainObject(payload?.initHealth) ? payload.initHealth : null,
+    contract: isPlainObject(payload?.contract) ? payload.contract : {},
     shell: isPlainObject(payload?.shell) ? payload.shell : null,
-    runtimeStatus: isPlainObject(payload?.runtimeStatus) ? payload.runtimeStatus : {}
+    runtimeStatus: isPlainObject(payload?.runtimeStatus) ? payload.runtimeStatus : {},
+    revisions: isPlainObject(payload?.revisions) ? payload.revisions : {},
+    config: isPlainObject(payload?.config) ? payload.config : {},
+    nodes: Array.isArray(payload?.nodes) ? payload.nodes : [],
+    configSnapshots: Array.isArray(payload?.configSnapshots) ? payload.configSnapshots : []
   };
 }

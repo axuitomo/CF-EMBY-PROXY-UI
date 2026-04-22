@@ -25,7 +25,7 @@
 - 每次修改 `worker.md`、`prompts/` 下的 prompt、或新增 prompt 后，必须运行：
   - `node prompts/scripts/check-guidance-registry.mjs`
 - 若涉及推送 / 发布 / 分支切换相关 prompt，还必须额外运行：
-  - `node prompts/scripts/check-publish-cdn.mjs --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --admin-shell-index-url <ADMIN_SHELL_INDEX_URL>`
+  - `node prompts/scripts/check-publish-cdn.mjs --repo <owner/repo> --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --index-url <INDEX_URL>`
 - 若推送前需要验证前端构建产物是否带了正确 CDN 前缀，还必须运行：
   - `cd frontend && VITE_CDN_BASE_URL=<expected-cdn-base> npm run build:cdn`
 
@@ -33,7 +33,7 @@
 1. 推送相关任务必须优先使用 `prompts/50-publish/push-publish-prompt.md`。
 2. 推送到具体分支或标签前，必须先根据目标 `ref` 推导对应 jsDelivr CDN 链接，再校验：
    - `VITE_CDN_BASE_URL`
-   - `ADMIN_SHELL_INDEX_URL`
+   - `INDEX_URL`
    - `frontend/dist/index.html` 与构建产物引用
 3. 若目标分支的 CDN 链接与前端牵引文件 / 构建产物不一致，则禁止继续推送。
 

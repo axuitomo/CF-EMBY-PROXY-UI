@@ -10,7 +10,7 @@ function normalizeBase(rawValue = '') {
   return normalized.endsWith('/') ? normalized : `${normalized}/`;
 }
 
-function resolveRecommendedAdminShellIndexUrl(baseUrl = '') {
+function resolveRecommendedIndexUrl(baseUrl = '') {
   const normalizedBase = normalizeBase(baseUrl);
   if (!normalizedBase || !/^https?:\/\//i.test(normalizedBase)) return '';
   return new URL('index.html', normalizedBase).toString();
@@ -20,7 +20,7 @@ const distHtmlPath = path.resolve(process.cwd(), 'dist/index.html');
 const html = await readFile(distHtmlPath, 'utf8');
 const expectedBase = normalizeBase(process.env.VITE_CDN_BASE_URL || '');
 const vendorMode = String(process.env.VITE_VENDOR_MODE || '').trim().toLowerCase();
-const recommendedAdminShellIndexUrl = resolveRecommendedAdminShellIndexUrl(expectedBase);
+const recommendedIndexUrl = resolveRecommendedIndexUrl(expectedBase);
 
 if (vendorMode === 'cdn') {
   const importMapMatch = html.match(/<script[^>]+type="importmap"[^>]*>([\s\S]*?)<\/script>/i);
@@ -95,6 +95,6 @@ if (invalidAssets.length) {
 }
 
 console.log(`[check:cdn] 已确认 ${assetMatches.length} 个资源使用 CDN 前缀：${expectedBase}`);
-if (recommendedAdminShellIndexUrl) {
-  console.log(`[check:cdn] 推荐将 ADMIN_SHELL_INDEX_URL 设置为：${recommendedAdminShellIndexUrl}`);
+if (recommendedIndexUrl) {
+  console.log(`[check:cdn] 推荐将 INDEX_URL 设置为：${recommendedIndexUrl}`);
 }

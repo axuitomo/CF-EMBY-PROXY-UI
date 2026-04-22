@@ -3,27 +3,27 @@
 ## 牵引目录
 - `prompts/10-frontend`
 - `frontend`
+- `banker`
 
 ## 牵引文件
 - `worker.md`
-- `worker.js`
-- `frontend/package.json`
-- `frontend/vite.config.js`
-- `frontend/scripts/check-cdn-paths.mjs`
+- `banker/worker.js`
+- `banker/.admin-ui.html`
+- `banker/sum.md`
 
 ## 校验命令
 - `node prompts/scripts/check-guidance-registry.mjs`
 
-请把当前内嵌在 `worker.js` 里的管理台前端，迁移为独立的 Vite 前端工程。迁移时必须以当前仓库真实能力为基础，而不是做一个脱离现有 API 的新后台。
+你是一位极度保守、UI 像素级守护者的资深全栈工程师。请把当前管理台前端收口为根 `frontend/` 下的正式工程，并严格围绕 `banker/worker.js`、`banker/.admin-ui.html` 与 `banker/sum.md` 推进。不要做一个视觉上相似、但接口、入口、交互和画风脱节的新后台。
 
 ## 当前上下文
-- `worker.js` 里已有大量管理台逻辑、状态、图表、节点管理、日志、DNS 与设置相关 UI
-- 当前 UI 采用哈希路由思维与单页管理台模式
-- 当前管理台由 Worker 直接输出整份 HTML
-- 当前仓库已经存在 `frontend/`，并已具备 `Vite + Vue + Tailwind + Lucide + Chart.js` 的基础工程
-- 当前前端本地开发模式默认走 `bundle`，生产构建默认走 `cdn externals`
-- 当前 Worker 已保留既有 `POST /admin` API 与 `POST /admin/login` 登录入口，不应新造一套鉴权协议
-- 当前 Worker 的 `GET /admin` 已支持“远端 `index.html` + Cache API SWR + embedded fallback”双路径
+- `banker/worker.js` 是当前管理台 UI/交互像素级唯一主真相源，也是组件、指令、运行时方法和 API 接线来源。
+- `banker/.admin-ui.html` 是当前管理台模板导出副本，只能作为结构与编辑参考模板，不能覆盖 `banker/worker.js`。
+- `banker/sum.md` 已定义正式页面入口、视图链、动作目录与 `Settings` 双层结构。
+- 正式管理台入口文件只能是 `index.html`。
+- 生产环境不是静态站点直接暴露 `/admin`；而是 Worker 在 `/admin` 拉取 CDN 上的 `index.html` 作为壳页返回。
+- 根 `frontend/` 与根 `worker.js` 是正式输出目标，不是本 prompt 的参考基线。
+- 当前 Worker 仍保留 `POST /admin` API 与 `POST /admin/login` 登录入口，不应新造一套鉴权协议。
 
 ## 目标技术栈
 - `Vite`
@@ -31,105 +31,100 @@
 - `Tailwind`
 - `Lucide`
 - `Chart.js`
-- 默认按 CDN externals 思路接入上述依赖
 
-## 新增目标约束
-1. 前端迁移的首要目标是“接管现有管理台入口与真实数据流”，不是重做一个视觉上相似但后端脱节的新面板
-2. 当前阶段优先保证以下链路真实可用：
-   - 本地打开管理台入口
-   - 登录
-   - 读取 `getAdminBootstrap`
-   - 读取 `getDashboardSnapshot`
-3. 默认采用“先接管骨架与已验证 API，再逐块搬迁页面”的阶段式迁移；不要一次性宣称全量完成所有视图
-4. 前端重构必须服务于 Worker 壳架构，而不是反过来要求 Worker 为前端重写整套 API
-5. 所有已迁移页面必须优先消费真实 Worker 返回的数据；除非用户明确要求，否则不要引入 mock 数据替代正式接口
-6. 保留当前单页管理台与哈希路由心智模型，除非用户明确批准，不要擅自改成全新的多页信息架构
-7. 本地联调优先级高于生产包装；如果本地登录、鉴权、读取真实数据还没通，不应把任务判定为“前端迁移完成”
-8. 生产发布目标必须保持不变：
-   - Worker 只负责入口 HTML 壳
-   - 浏览器直连 CDN 拉取 hash 静态资源
-   - 前端刷新不依赖 `scheduled()` / CRON
-9. 已经验证过的链路要反向约束实现：
-   - 本地调试不要求先发布 CDN
-   - 登录继续使用 `POST /admin/login`
-   - 受保护数据继续使用 `POST /admin`
-10. 对于尚未搬迁的旧视图，允许阶段性保留 Worker embedded fallback；但新增前端代码不能再次把完整运行时代码回塞进 `worker.js`
+## 真相源优先级
+1. 先完整阅读 `banker/worker.js`，以其中的 `UI_HTML` / `FINAL_UI_HTML`、`RootApp`、`NodeCard`、`uiBrowserBridge`、各类 directives、Chart.js、Lucide、拖拽与模态框行为作为像素级和交互级主真相源。
+2. 再对照 `banker/.admin-ui.html` 做模板块、静态结构和导出形态核验。
+3. 最后用 `banker/sum.md` 校验页面入口、五视图链、bootstrap、动作目录和 `Settings` 8/5 分区契约。
+4. 若 `banker/worker.js` 与 `banker/.admin-ui.html` 有冲突，以 `banker/worker.js` 为准。
 
-## 重构要求
-1. 基于当前管理台功能边界拆分前端模块，而不是重做信息架构
-2. 保留当前管理台的核心视图分区，例如：
-   - dashboard
-   - nodes
-   - settings
-   - logs
-   - dns / network tools
-3. 使用 `manualChunks`，但不要切太碎；建议按“变更频率 + 业务域”拆包
-4. 输出产物必须带 content hash
-5. 构建时强制注入 CDN 绝对路径前缀
-6. HTML 中的所有静态资源引用都必须直接指向 CDN，而不是 Worker 相对路径
-7. 允许 Worker 仅注入极少量 bootstrap 数据；大部分动态数据仍通过既有 API 获取
-8. 不要要求“本地调试必须先发布 CDN”；本地联调与生产发布是两条独立链路
+## 严格禁止
+- 不参考 `frontend副本/`、`worker副本.js`。
+- 不参考当前根 `frontend/`、当前根 `worker.js`。
+- 不参考 `banker/worker.md` 的旧内嵌部署默认。
+- 不新增第二套管理台首页、替代入口文件、新的登录协议或平行 API。
+- 不允许修改原有画风与交互语义后再声称“功能等价”。
+
+## 必须遵守的入口契约
+1. 管理台唯一入口文件是 `index.html`。
+2. `GET /admin` 必须兼容“Worker 拉取 CDN `index.html` 后再返回”的壳加载模型。
+3. 不要新增第二套管理台首页、替代入口文件或新的登录页路由。
+4. 不要绕开统一 `POST /admin` 动作入口去发明平行 API。
+5. 继续保留哈希路由心智模型，主视图固定为：
+   - `dashboard`
+   - `nodes`
+   - `logs`
+   - `dns`
+   - `settings`
+
+## 业务契约收口要求
+- 首屏默认走 `getAdminBootstrap`。
+- 当当前 hash 是 `#settings` 时，首屏优先走 `getSettingsBootstrap`。
+- `Dashboard` 需要围绕仪表盘统计、运行状态、趋势图、D1 热点组织。
+- `Nodes` 需要覆盖节点列表、搜索筛选、编辑、导入导出、HEAD 测试。
+- `Logs` 需要覆盖日志查询、初始化 DB、初始化 FTS、清空日志。
+- `DNS` 需要覆盖 DNS 草稿、Zone 预览、CNAME 历史、推荐域名、优选 IP 工作台。
+- `Settings` 需要同时保留：
+  - 8 个视觉分区：`系统 UI / 代理与网络 / 静态资源策略 / 安全防护 / 日志设置 / 监控告警 / 账号设置 / 备份与恢复`
+  - 5 个保存分区：`ui / proxy / security / logs / account`
+
+## 接口接入要求
+- 页面入口继续遵守：
+  - `GET /`
+  - `GET /admin`
+  - `POST /admin/login`
+  - `POST /admin`
+- 前端必须复用既有登录协议：
+  - 向 `POST /admin/login` 发送 `application/json`
+  - 请求体格式：`{ "password": "..." }`
+- 受保护的管理台数据继续走 `POST /admin` 动作接口。
+- 前端应保持 `credentials: include`。
+- 动作目录至少要与以下家族对齐：
+  - 启动 / 仪表盘
+  - 配置 / 备份 / 整理
+  - Worker 运维
+  - 节点
+  - DNS / 优选 IP
+  - 日志 / 告警
+
+## 分析步骤
+1. 完整阅读 `banker/worker.js` 中的 `UI_HTML` / `FINAL_UI_HTML`。
+2. 定位并梳理 `RootApp`、`NodeCard`、`uiBrowserBridge`。
+3. 定位并梳理 `dialog-visible`、`scroll-reset`、`auto-focus-select`、`auto-download`、`auto-animate`、`lucide-icons`、`traffic-chart`、`node-lines-drag`。
+4. 再对照 `banker/.admin-ui.html` 做结构核验。
+5. 最后用 `banker/sum.md` 校验五视图链、`getAdminBootstrap`、`getSettingsBootstrap`、`Settings` 的 8 个视觉分区与 5 个保存分区、动作目录。
+
+## 未来实现动作
+- 允许并优先删除当前根 `frontend/` 与根 `worker.js`，然后重建。
+- 以 `banker/worker.js` 为 UI/交互母版重建根 `frontend/`。
+- 以仓库现行壳契约重建根 `worker.js`。
+- `banker/.admin-ui.html` 只作为辅助模板，不是最终裁决源。
+
+## 输出格式
+- `### 1. 当前分析`
+- `### 2. 重构计划（编号）`
+- `### 3. 步骤 X：具体改动`
+- `### 4. 本步骤验证 checklist`
 
 ## 本地联调牵引
 - 本地开发默认不需要 GitHub/CDN；应先在 WSL 中跑通：
   - Worker：`npx wrangler@latest dev --local --ip 127.0.0.1 --port 8787 --env-file .dev.vars`
   - Frontend：`cd frontend && npm run dev`
-- Vite 开发服务默认对外暴露 `http://localhost:5173`
-- Windows 浏览器默认通过 `http://localhost:5173` 访问前端
-- Vite 本地开发应继续通过代理把以下请求转发到本地 Worker，而不是绕过 Worker：
+- Vite 开发服务默认对外暴露 `http://localhost:5173`。
+- Vite 本地开发应继续通过代理转发：
   - `GET /admin`
   - `POST /admin`
   - `POST /admin/login`
-- 本地开发模式允许 vendor 走 bundle；不要为了本地调试强制启用 CDN externals
-- 生产构建模式才要求：
-  - `VITE_CDN_BASE_URL`
-  - CDN 绝对路径
-  - hash 资源直连 CDN
-
-## 登录与鉴权接入要求
-- 前端必须复用既有登录协议：
-  - 向 `POST /admin/login` 发送 `application/json`
-  - 请求体格式：`{ "password": "..." }`
-- 不要新增 OAuth、Basic Auth、独立 session 服务或新的登录路由
-- 受保护的管理台数据继续走既有 `POST /admin` 动作接口
-- 前端应假定 Worker 会返回 `auth_token` Cookie，并保持 `credentials: include`
-- 前端本地联调时应以真实登录流程验证：
-  - 错误密码返回 `401 / INVALID_PASSWORD`
-  - 正确密码返回 `200` 与登录 Cookie
-  - 已登录状态下 `getAdminBootstrap` / `getDashboardSnapshot` 可访问
-
-## `manualChunks` 设计约束
-- 不要按组件逐个拆
-- 不要只有一个超大 vendor 包
-- 推荐方向：
-  - `app-shell`
-  - `dashboard-charts`
-  - `node-management`
-  - `settings-tools`
-  - `logs-diagnostics`
-- 图表相关逻辑可单独成块，但不要影响非图表页面首屏
-
-## 缓存要求
-- 哈希 `js` / `css` / 图片 / 字体：`public, max-age=31536000, immutable`
-- `index.html`：使用 `ETag` / `Last-Modified`，由 Worker 做 SWR
-
-## Worker 壳与前端边界
-- 前端不要假设 `index.html` 永远由静态站点直接提供；生产入口可能由 Worker 拉取远端 HTML 后再返回
-- 前端必须兼容 Worker 注入的 bootstrap：
-  - `window.__ADMIN_BOOTSTRAP__`
-  - `#admin-bootstrap` JSON script
-- 前端路由、API 基地址、登录地址应优先读取 bootstrap 中的：
-  - `adminPath`
-  - `loginPath`
-  - `hostDomain`
-- 不要在前端硬编码 `/admin/login`、`/admin` 之外的替代入口
-- 不要让前端接管 Worker 的缓存策略；前端只负责正确输出 hash 资源与绝对路径
 
 ## 验证标准
-- 前端可本地调试
-- 生产构建成功
-- 构建产物为 CDN 绝对路径
-- 更新某个局部模块时，浏览器只下载变更 chunk
-- 图表与大模块不会阻塞所有页面首屏
-- 本地真实登录流程可用
-- 已登录状态下，前端可以读取真实 `getAdminBootstrap` 与 `getDashboardSnapshot`
+- 每一步都必须提供 `### 4. 本步骤验证 checklist`。
+- 像素级 UI 是否对齐 `banker/worker.js`。
+- `banker/.admin-ui.html` 的结构是否已被正确映射。
+- Chart.js / Lucide / 拖拽 / 模态框 / 复制按钮 / hash 视图切换是否一致。
+- 前端可本地调试。
+- `npm run dev` 与 `npm run build` 可用。
+- 构建产物为 CDN 绝对路径。
+- `/admin` 壳页兼容 Worker 从 CDN 拉取 `index.html` 的模型。
+- 本地真实登录流程可用。
+- 已登录状态下，前端可以读取真实 `getAdminBootstrap` 与 `getSettingsBootstrap`。
+- 五个主视图与 `Settings` 的 8/5 分区未被改造成其他信息架构。

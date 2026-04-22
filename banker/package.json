@@ -1,0 +1,34 @@
+{
+  "name": "emby-proxy-ui",
+  "private": true,
+  "scripts": {
+    "compress:admin-ui": "./.venv/bin/python scripts/tooling.py compress-admin-ui",
+    "verify:admin-ui": "./.venv/bin/python scripts/tooling.py verify-admin-ui",
+    "export:admin-ui": "./.venv/bin/python scripts/tooling.py export-admin-ui",
+    "replace:admin-ui": "./.venv/bin/python scripts/tooling.py replace-admin-ui",
+    "build:worker": "./.venv/bin/python scripts/tooling.py build-worker build",
+    "compress:worker": "./.venv/bin/python scripts/tooling.py build-worker build",
+    "measure:worker:size": "./.venv/bin/python scripts/tooling.py measure-worker-size --compare worker.js _worker.js",
+    "benchmark:worker-startup": "./.venv/bin/python scripts/tooling.py benchmark-worker-startup --compare worker.js _worker.js",
+    "benchmark:worker-segment": "./.venv/bin/python scripts/tooling.py benchmark-worker-segment",
+    "test:worker-smoke": "./.venv/bin/python scripts/tooling.py test-worker-smoke",
+    "typecheck:cf": "./.venv/bin/python scripts/tooling.py typecheck tsconfig.cloudflare.json",
+    "typecheck:worker-src": "./.venv/bin/python scripts/tooling.py typecheck tsconfig.worker-src.json",
+    "typecheck:scripts": "./.venv/bin/python scripts/tooling.py typecheck tsconfig.scripts.json",
+    "typecheck:tests": "./.venv/bin/python scripts/tooling.py typecheck tsconfig.tests.json",
+    "typecheck:all": "./.venv/bin/python scripts/tooling.py typecheck tsconfig.cloudflare.json tsconfig.worker-src.json tsconfig.scripts.json tsconfig.tests.json",
+    "verify:worker": "./.venv/bin/python scripts/tooling.py build-worker verify"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260416.2",
+    "@vue/compiler-dom": "3.5.32",
+    "@types/node": "^24.3.0",
+    "chart.js": "4.4.7",
+    "lucide": "1.8.0",
+    "tailwindcss": "3.4.17",
+    "terser": "5.46.1",
+    "typescript": "5.9.3",
+    "vue": "3.5.32",
+    "wrangler": "4.83.0"
+  }
+}

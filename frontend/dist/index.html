@@ -4,12 +4,28 @@
 
 
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CF Emby Proxy UI Frontend</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <title>Emby Proxy V19.2 - SaaS Dashboard</title>
     <meta
       name="description"
-      content="CF Emby Proxy UI 的独立前端开发壳，用于本地调试、构建和后续 CDN 发布。"
+      content="正式管理台前端入口。运行时 UI 严格由 banker/worker.js 与 banker/.admin-ui.html 牵引。"
     />
+    <style>
+      html,
+      body,
+      #app {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      [v-cloak] {
+        display: none;
+      }
+    </style>
     <script type="importmap" data-vendor-mode="cdn">{
   "imports": {
     "vue": "https://cdn.jsdelivr.net/npm/vue@3.5.32/dist/vue.esm-browser.prod.js",
@@ -17,14 +33,9 @@
     "chart.js/auto": "https://cdn.jsdelivr.net/npm/chart.js@4.5.1/auto/auto.js"
   }
 }</script>
-    <script type="module" crossorigin src="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/index-DfTHITE7.js"></script>
-    <link rel="modulepreload" crossorigin href="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/rolldown-runtime-lhHHWwHU.js">
-    <link rel="modulepreload" crossorigin href="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/feature-overview-RpNkXmct.js">
-    <link rel="modulepreload" crossorigin href="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/useUiPreferences-2wjRBV3U.js">
-    <link rel="modulepreload" crossorigin href="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/feature-release-DUi5nV4A.js">
-    <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@1.0.1/frontend/dist/assets/index-KCnRsYqZ.css">
+    <script type="module" crossorigin src="https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@test/frontend/dist/assets/index-CZB7AckJ.js"></script>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app" v-cloak></div>
   </body>
-  </html>
+</html>

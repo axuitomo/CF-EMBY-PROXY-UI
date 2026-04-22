@@ -157,7 +157,13 @@ function normalizeWorkerScriptUpdatePayload(rawPayload = {}) {
     compatibilityFlags: (Array.isArray(payload.compatibilityFlags) ? payload.compatibilityFlags : [])
       .map((flag) => String(flag || '').trim())
       .filter(Boolean),
-    lastDeployedFrom: String(payload.lastDeployedFrom || '').trim()
+    lastDeployedFrom: String(payload.lastDeployedFrom || '').trim(),
+    sourceUrl: String(payload.sourceUrl || '').trim(),
+    effectiveRef: String(payload.effectiveRef || '').trim(),
+    releaseRepo: String(payload.releaseRepo || '').trim(),
+    releaseBranch: String(payload.releaseBranch || '').trim(),
+    releaseTag: String(payload.releaseTag || '').trim(),
+    compatibilityFallbackUsed: payload.compatibilityFallbackUsed === true
   };
 }
 
@@ -2180,6 +2186,9 @@ export function useAdminConsole() {
 
       const fileName = String(payload?.fileName || 'worker.js').trim() || 'worker.js';
       const scriptContent = typeof payload?.scriptContent === 'string' ? payload.scriptContent : '';
+      const releaseRepo = String(payload?.releaseRepo || '').trim();
+      const releaseBranch = String(payload?.releaseBranch || '').trim();
+      const releaseTag = String(payload?.releaseTag || '').trim();
 
       state.loading.updateWorkerScriptContent = true;
       state.errors.updateWorkerScriptContent = '';
@@ -2187,7 +2196,10 @@ export function useAdminConsole() {
       try {
         const response = normalizeWorkerScriptUpdatePayload(await callAdminAction('updateWorkerScriptContent', {
           fileName,
-          scriptContent
+          scriptContent,
+          releaseRepo,
+          releaseBranch,
+          releaseTag
         }, {
           seedBootstrap: state.seedBootstrap
         }));
