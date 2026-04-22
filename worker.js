@@ -5121,6 +5121,231 @@ function normalizeCloudflareWorkerScriptUpdateErrorMessage(error) {
 }
 
 const GITHUB_RELEASE_WORKER_MAX_BYTES = 3 * 1024 * 1024;
+const FIXED_GITHUB_RELEASE_REPO = "axuitomo/CF-EMBY-PROXY-UI";
+const GITHUB_API_BASE_URL = "https://api.github.com";
+const GITHUB_API_VERSION = "2022-11-28";
+const GITHUB_API_PAGE_SIZE = 100;
+const GITHUB_API_MAX_PAGES = 10;
+const GITHUB_TAG_REACHABILITY_CONCURRENCY = 6;
+
+function buildGithubApiUrl(pathname = "", query = {}) {
+  const url = new URL(String(pathname || "").trim(), GITHUB_API_BASE_URL);
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    url.searchParams.set(key, String(value));
+  }
+  return url;
+}
+
+function buildGithubApiErrorMessage(response, fallbackMessage = "GitHub API 请求失败") {
+  const status = Number(response?.status) || 0;
+  if (status === 403 || status === 429) {
+    return "GitHub API 请求受限，请稍后重试";
+  }
+  if (status === 404) {
+    return "固定发布仓库不存在或当前请求无法访问";
+  }
+  return fallbackMessage;
+}
+
+async function fetchGithubApiJson(pathname = "", options = {}) {
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const url = buildGithubApiUrl(pathname, options.query);
+  let response = null;
+  try {
+    response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION
+      }
+    });
+  } catch (error) {
+    throw createStructuredConfigError(
+      "GITHUB_RELEASE_SOURCE_FETCH_FAILED",
+      `访问 GitHub API 失败：${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
+      502,
+      {
+        repo: FIXED_GITHUB_RELEASE_REPO,
+        owner,
+        repository: repo,
+        url: url.toString()
+      }
+    );
+  }
+
+  if (!response.ok) {
+    let apiMessage = "";
+    try {
+      const errorPayload = await response.clone().json();
+      apiMessage = String(errorPayload?.message || "").trim();
+    } catch {}
+    throw createStructuredConfigError(
+      response.status === 404 ? "GITHUB_RELEASE_SOURCE_NOT_FOUND" : "GITHUB_RELEASE_SOURCE_FETCH_FAILED",
+      apiMessage || buildGithubApiErrorMessage(response),
+      response.status === 404 ? 404 : 502,
+      {
+        repo: FIXED_GITHUB_RELEASE_REPO,
+        owner,
+        repository: repo,
+        url: url.toString(),
+        httpStatus: response.status
+      }
+    );
+  }
+
+  return response.json();
+}
+
+async function fetchGithubApiCollection(pathname = "", options = {}) {
+  const items = [];
+  for (let page = 1; page <= GITHUB_API_MAX_PAGES; page += 1) {
+    const chunk = await fetchGithubApiJson(pathname, {
+      ...options,
+      query: {
+        per_page: GITHUB_API_PAGE_SIZE,
+        page,
+        ...(isPlainObject(options?.query) ? options.query : {})
+      }
+    });
+    if (!Array.isArray(chunk)) {
+      throw createStructuredConfigError(
+        "GITHUB_RELEASE_SOURCE_RESPONSE_INVALID",
+        "GitHub API 返回了无效的数据结构",
+        502,
+        {
+          repo: FIXED_GITHUB_RELEASE_REPO,
+          pathname,
+          page
+        }
+      );
+    }
+    items.push(...chunk);
+    if (chunk.length < GITHUB_API_PAGE_SIZE) break;
+  }
+  return items;
+}
+
+async function getFixedGithubReleaseRepositoryInfo() {
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const payload = await fetchGithubApiJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+  const defaultBranch = normalizeGithubReleaseRefValue(payload?.default_branch);
+  return {
+    defaultBranch,
+    visibility: String(payload?.visibility || "").trim()
+  };
+}
+
+async function listFixedGithubReleaseBranches() {
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const [{ defaultBranch }, branchPayload] = await Promise.all([
+    getFixedGithubReleaseRepositoryInfo(),
+    fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`)
+  ]);
+  const branches = [...new Set(branchPayload
+    .map(item => normalizeGithubReleaseRefValue(item?.name))
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "en"));
+  return {
+    defaultBranch: defaultBranch && branches.includes(defaultBranch)
+      ? defaultBranch
+      : (branches[0] || ""),
+    branches
+  };
+}
+
+async function listFixedGithubReleaseTags() {
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const tagPayload = await fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags`);
+  const tags = [];
+  const seen = new Set();
+  for (const item of tagPayload) {
+    const name = normalizeGithubReleaseRefValue(item?.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    tags.push({
+      name,
+      commitSha: String(item?.commit?.sha || "").trim()
+    });
+  }
+  return tags;
+}
+
+async function isGithubTagReachableFromBranch(tagName = "", branchName = "") {
+  const normalizedTag = normalizeGithubReleaseRefValue(tagName);
+  const normalizedBranch = normalizeGithubReleaseRefValue(branchName);
+  if (!normalizedTag || !normalizedBranch) return false;
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const comparison = await fetchGithubApiJson(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(normalizedTag)}...${encodeURIComponent(normalizedBranch)}`
+  );
+  const status = String(comparison?.status || "").trim().toLowerCase();
+  return status === "ahead" || status === "identical";
+}
+
+async function filterGithubTagsReachableFromBranch(tags = [], branchName = "") {
+  const queue = (Array.isArray(tags) ? tags : []).slice();
+  const results = [];
+  const workerCount = Math.max(1, Math.min(GITHUB_TAG_REACHABILITY_CONCURRENCY, queue.length || 1));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (queue.length > 0) {
+      const currentTag = queue.shift();
+      const tagName = normalizeGithubReleaseRefValue(currentTag?.name);
+      if (!tagName) continue;
+      if (await isGithubTagReachableFromBranch(tagName, branchName)) {
+        results.push({
+          name: tagName,
+          commitSha: String(currentTag?.commitSha || "").trim()
+        });
+      }
+    }
+  }));
+  return results;
+}
+
+async function buildGithubReleaseSourceOptionsPayload(config = {}, options = {}) {
+  const runtimeConfig = isPlainObject(config) ? config : {};
+  const requestedBranch = normalizeGithubReleaseRefValue(options?.branch ?? runtimeConfig.releaseBranch);
+  const requestedTag = normalizeGithubReleaseRefValue(options?.tag ?? runtimeConfig.releaseTag);
+  const { defaultBranch, branches } = await listFixedGithubReleaseBranches();
+  if (!branches.length) {
+    throw createStructuredConfigError(
+      "GITHUB_RELEASE_BRANCH_LIST_EMPTY",
+      "固定发布仓库没有可用分支",
+      502,
+      { repo: FIXED_GITHUB_RELEASE_REPO }
+    );
+  }
+
+  const selectedBranch = branches.includes(requestedBranch)
+    ? requestedBranch
+    : (defaultBranch || branches[0] || "");
+  const reachableTags = await filterGithubTagsReachableFromBranch(await listFixedGithubReleaseTags(), selectedBranch);
+  const selectedTag = requestedTag && reachableTags.some(item => item.name === requestedTag)
+    ? requestedTag
+    : "";
+  const effectiveRef = selectedTag || selectedBranch;
+
+  return {
+    repo: FIXED_GITHUB_RELEASE_REPO,
+    defaultBranch,
+    branches: branches.map(name => ({
+      name,
+      selected: name === selectedBranch,
+      isDefault: name === defaultBranch
+    })),
+    selectedBranch,
+    tags: reachableTags.map(item => ({
+      name: item.name,
+      commitSha: String(item.commitSha || "").trim(),
+      selected: item.name === selectedTag
+    })),
+    selectedTag,
+    effectiveRef,
+    indexUrl: buildGithubFrontendIndexUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef),
+    workerSourceUrl: buildGithubWorkerSourceUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef)
+  };
+}
 
 function isAcceptedGithubWorkerContentType(contentType = "") {
   const normalizedContentType = String(contentType || "").trim().toLowerCase();
@@ -5133,17 +5358,49 @@ function isAcceptedGithubWorkerContentType(contentType = "") {
 
 async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {}) {
   const releaseConfig = {
-    releaseRepo: overrides?.releaseRepo ?? config?.releaseRepo,
+    releaseRepo: FIXED_GITHUB_RELEASE_REPO,
     releaseBranch: overrides?.releaseBranch ?? config?.releaseBranch,
     releaseTag: overrides?.releaseTag ?? config?.releaseTag,
     indexUrl: overrides?.indexUrl ?? config?.indexUrl
   };
   assertReleaseSourceConfigValid(releaseConfig);
-  const indexState = buildResolvedAdminIndexState(null, releaseConfig);
+  const requestedTag = normalizeGithubReleaseRefValue(releaseConfig.releaseTag);
+  const releaseOptions = await buildGithubReleaseSourceOptionsPayload(releaseConfig, {
+    branch: releaseConfig.releaseBranch,
+    tag: releaseConfig.releaseTag
+  });
+  if (requestedTag && requestedTag !== releaseOptions.selectedTag) {
+    throw createStructuredConfigError(
+      "RELEASE_TAG_NOT_REACHABLE",
+      `当前分支 ${releaseOptions.selectedBranch} 下找不到可达的 tag：${requestedTag}`,
+      400,
+      {
+        repo: FIXED_GITHUB_RELEASE_REPO,
+        releaseBranch: releaseOptions.selectedBranch,
+        releaseTag: requestedTag
+      }
+    );
+  }
+  const indexState = {
+    ...buildResolvedAdminIndexState(null, {
+      ...releaseConfig,
+      releaseRepo: releaseOptions.repo,
+      releaseBranch: releaseOptions.selectedBranch,
+      releaseTag: releaseOptions.selectedTag,
+      indexUrl: releaseOptions.indexUrl
+    }),
+    releaseRepo: releaseOptions.repo,
+    releaseBranch: releaseOptions.selectedBranch,
+    releaseTag: releaseOptions.selectedTag,
+    effectiveRef: releaseOptions.effectiveRef,
+    indexUrl: releaseOptions.indexUrl,
+    derivedIndexUrl: releaseOptions.indexUrl,
+    workerSourceUrl: releaseOptions.workerSourceUrl
+  };
   if (!indexState.releaseRepo || !indexState.releaseBranch || !indexState.workerSourceUrl) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_SOURCE_REQUIRED",
-      "Worker 更新前请先配置 GitHub 仓库和分支",
+      "Worker 更新前请先配置固定发布仓库的分支",
       400,
       {
         releaseRepo: indexState.releaseRepo,
@@ -6070,7 +6327,7 @@ function sanitizeRuntimeConfig(input = {}) {
   sanitized.defaultMediaAuthMode = normalizeDefaultMediaAuthMode(sanitized.defaultMediaAuthMode);
   sanitized.scheduleUtcOffsetMinutes = normalizeScheduleUtcOffsetMinutes(sanitized.scheduleUtcOffsetMinutes);
   sanitized.tgDailyReportClockTimes = normalizeScheduleClockTimeList(sanitized.tgDailyReportClockTimes, Config.Defaults.TgDailyReportClockTimes);
-  sanitized.releaseRepo = normalizeGithubReleaseRepoSlug(sanitized.releaseRepo);
+  sanitized.releaseRepo = FIXED_GITHUB_RELEASE_REPO;
   sanitized.releaseBranch = normalizeGithubReleaseRefValue(sanitized.releaseBranch);
   sanitized.releaseTag = normalizeGithubReleaseRefValue(sanitized.releaseTag);
   sanitized.indexUrl = buildResolvedAdminIndexState(null, sanitized).persistedIndexUrl;
@@ -7365,7 +7622,7 @@ function buildGithubFrontendIndexUrl(repoSlug = "", ref = "") {
 
 function buildResolvedAdminIndexState(env = null, config = {}) {
   const runtimeConfig = isPlainObject(config) ? config : {};
-  const releaseRepo = normalizeGithubReleaseRepoSlug(runtimeConfig.releaseRepo);
+  const releaseRepo = FIXED_GITHUB_RELEASE_REPO;
   const releaseBranch = normalizeGithubReleaseRefValue(runtimeConfig.releaseBranch);
   const releaseTag = normalizeGithubReleaseRefValue(runtimeConfig.releaseTag);
   const effectiveRef = releaseTag || releaseBranch;
@@ -7400,7 +7657,7 @@ function assertReleaseSourceConfigValid(rawConfig = {}) {
   const rawReleaseBranch = String(inputConfig.releaseBranch || "").trim();
   const rawReleaseTag = String(inputConfig.releaseTag || "").trim();
   const rawIndexUrl = String(inputConfig.indexUrl || "").trim();
-  const hasGithubInput = Boolean(rawReleaseRepo || rawReleaseBranch || rawReleaseTag);
+  const hasReleaseSelection = Boolean(rawReleaseBranch || rawReleaseTag);
 
   if (rawReleaseRepo && !normalizeGithubReleaseRepoSlug(rawReleaseRepo)) {
     throw createStructuredConfigError(
@@ -7408,6 +7665,19 @@ function assertReleaseSourceConfigValid(rawConfig = {}) {
       "GitHub 仓库格式无效，请使用 owner/repo",
       400,
       { field: "releaseRepo", value: rawReleaseRepo }
+    );
+  }
+
+  if (rawReleaseRepo && rawReleaseRepo !== FIXED_GITHUB_RELEASE_REPO) {
+    throw createStructuredConfigError(
+      "RELEASE_REPO_FIXED",
+      `正式发布源已固定为 ${FIXED_GITHUB_RELEASE_REPO}，不再接受自定义仓库`,
+      400,
+      {
+        field: "releaseRepo",
+        expected: FIXED_GITHUB_RELEASE_REPO,
+        value: rawReleaseRepo
+      }
     );
   }
 
@@ -7429,15 +7699,7 @@ function assertReleaseSourceConfigValid(rawConfig = {}) {
     );
   }
 
-  if (hasGithubInput) {
-    if (!rawReleaseRepo) {
-      throw createStructuredConfigError(
-        "RELEASE_REPO_REQUIRED",
-        "配置 GitHub 发布源时必须填写 releaseRepo",
-        400,
-        { field: "releaseRepo" }
-      );
-    }
+  if (hasReleaseSelection) {
     if (!rawReleaseBranch) {
       throw createStructuredConfigError(
         "RELEASE_BRANCH_REQUIRED",
@@ -15419,6 +15681,17 @@ const Database = {
       });
     },
 
+    async getGithubReleaseSourceOptions(data, { env }) {
+      let config = {};
+      try {
+        config = await getRuntimeConfig(env);
+      } catch {}
+      return jsonResponse(await buildGithubReleaseSourceOptionsPayload(config, {
+        branch: data?.branch,
+        tag: data?.tag
+      }));
+    },
+
     async getWorkerPlacementStatus(data, { env, request, kv }) {
       try {
         const config = await getRuntimeConfigStrict(env);
@@ -22012,7 +22285,7 @@ const Logger = {
 // ============================================================================
 // 5. 管理台壳层（remote shell + embedded fallback）
 // ============================================================================
-const ADMIN_FALLBACK_HTML_TEMPLATE = "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, viewport-fit=cover\"><link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\"><title>Emby Proxy Admin Fallback</title><script id=\"admin-bootstrap\" type=\"application/json\">__ADMIN_BOOTSTRAP_JSON__</script><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#0f172a 0,#020617 44%,#020617 100%);color:#e2e8f0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}a{color:inherit;text-decoration:none}.admin-fallback-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 18px}.admin-fallback-card{width:min(100%,980px);border:1px solid rgba(51,65,85,.92);border-radius:30px;background:rgba(15,23,42,.94);box-shadow:0 32px 96px rgba(2,6,23,.52);padding:28px;backdrop-filter:blur(20px)}.admin-fallback-pill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 14px;background:rgba(59,130,246,.12);border:1px solid rgba(96,165,250,.32);color:#bfdbfe;font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}.admin-fallback-title{margin:20px 0 0;font-size:clamp(1.9rem,4vw,3rem);line-height:1.08;color:#fff}.admin-fallback-copy{margin:14px 0 0;max-width:54rem;color:#cbd5e1;font-size:15px;line-height:1.8}.admin-fallback-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:24px}.admin-fallback-stat{border:1px solid rgba(51,65,85,.9);border-radius:22px;background:rgba(2,6,23,.48);padding:16px}.admin-fallback-k{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#64748b}.admin-fallback-v{margin-top:10px;font-size:15px;line-height:1.7;color:#f8fafc;word-break:break-word}.admin-fallback-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.admin-fallback-btn{display:inline-flex;align-items:center;justify-content:center;border-radius:16px;padding:12px 18px;font-size:14px;font-weight:700;transition:transform .18s ease,background-color .18s ease,border-color .18s ease}.admin-fallback-btn:hover{transform:translateY(-1px)}.admin-fallback-btn-primary{background:#2563eb;color:#fff;border:1px solid rgba(147,197,253,.7);box-shadow:0 12px 28px rgba(37,99,235,.24)}.admin-fallback-btn-primary:hover{background:#1d4ed8;border-color:#93c5fd}.admin-fallback-btn-secondary{background:rgba(15,23,42,.5);color:#e2e8f0;border:1px solid rgba(51,65,85,.95)}.admin-fallback-btn-secondary:hover{background:rgba(30,41,59,.85)}.admin-fallback-panel{margin-top:24px;border:1px solid rgba(51,65,85,.9);border-radius:24px;background:rgba(2,6,23,.4);padding:20px}.admin-fallback-panel h2{margin:0;font-size:15px;color:#fff}.admin-fallback-panel p{margin:10px 0 0;font-size:14px;line-height:1.7;color:#cbd5e1}.admin-fallback-panel details{margin-top:16px}.admin-fallback-panel summary{cursor:pointer;color:#93c5fd;font-weight:700}.admin-fallback-panel pre{overflow:auto;margin:12px 0 0;padding:14px;border-radius:18px;background:#020617;color:#cbd5e1;font-size:12px;line-height:1.6}.admin-fallback-note{margin-top:16px;color:#94a3b8;font-size:13px;line-height:1.7}@media (max-width:640px){.admin-fallback-shell{padding:18px 12px}.admin-fallback-card,.admin-fallback-stat,.admin-fallback-panel{border-radius:22px}.admin-fallback-card{padding:22px}.admin-fallback-actions{flex-direction:column}.admin-fallback-btn{width:100%}}</style></head><body><main class=\"admin-fallback-shell\"><section class=\"admin-fallback-card\"><div class=\"admin-fallback-pill\">Embedded Fallback</div><h1 class=\"admin-fallback-title\">远端管理壳暂未接管当前请求</h1><p class=\"admin-fallback-copy\">Worker 内嵌的旧版 SaaS UI 已经退役。本页只保留一个极小的 embedded fallback，用来展示切流状态、确认初始化健康度，并帮助你回到 /admin 或远端入口。</p>__INIT_HEALTH_BANNER____ADMIN_APP_ROOT__</section></main></body></html>";
+const ADMIN_FALLBACK_HTML_TEMPLATE = "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, viewport-fit=cover\"><link rel=\"icon\" href=\"/favicon.ico\" sizes=\"any\"><title>Emby Proxy Admin Shell</title><script id=\"admin-bootstrap\" type=\"application/json\">__ADMIN_BOOTSTRAP_JSON__</script><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#0f172a 0,#020617 44%,#020617 100%);color:#e2e8f0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}a{color:inherit;text-decoration:none}.admin-fallback-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 18px}.admin-fallback-card{width:min(100%,980px);border:1px solid rgba(51,65,85,.92);border-radius:30px;background:rgba(15,23,42,.94);box-shadow:0 32px 96px rgba(2,6,23,.52);padding:28px;backdrop-filter:blur(20px)}.admin-fallback-pill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 14px;background:rgba(59,130,246,.12);border:1px solid rgba(96,165,250,.32);color:#bfdbfe;font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}.admin-fallback-title{margin:20px 0 0;font-size:clamp(1.9rem,4vw,3rem);line-height:1.08;color:#fff}.admin-fallback-copy{margin:14px 0 0;max-width:54rem;color:#cbd5e1;font-size:15px;line-height:1.8}.admin-fallback-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:24px}.admin-fallback-stat{border:1px solid rgba(51,65,85,.9);border-radius:22px;background:rgba(2,6,23,.48);padding:16px}.admin-fallback-k{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#64748b}.admin-fallback-v{margin-top:10px;font-size:15px;line-height:1.7;color:#f8fafc;word-break:break-word}.admin-fallback-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.admin-fallback-btn{display:inline-flex;align-items:center;justify-content:center;border-radius:16px;padding:12px 18px;font-size:14px;font-weight:700;transition:transform .18s ease,background-color .18s ease,border-color .18s ease}.admin-fallback-btn:hover{transform:translateY(-1px)}.admin-fallback-btn-primary{background:#2563eb;color:#fff;border:1px solid rgba(147,197,253,.7);box-shadow:0 12px 28px rgba(37,99,235,.24)}.admin-fallback-btn-primary:hover{background:#1d4ed8;border-color:#93c5fd}.admin-fallback-btn-secondary{background:rgba(15,23,42,.5);color:#e2e8f0;border:1px solid rgba(51,65,85,.95)}.admin-fallback-btn-secondary:hover{background:rgba(30,41,59,.85)}.admin-fallback-panel{margin-top:24px;border:1px solid rgba(51,65,85,.9);border-radius:24px;background:rgba(2,6,23,.4);padding:20px}.admin-fallback-panel h2{margin:0;font-size:15px;color:#fff}.admin-fallback-panel p{margin:10px 0 0;font-size:14px;line-height:1.7;color:#cbd5e1}.admin-fallback-panel details{margin-top:16px}.admin-fallback-panel summary{cursor:pointer;color:#93c5fd;font-weight:700}.admin-fallback-panel pre{overflow:auto;margin:12px 0 0;padding:14px;border-radius:18px;background:#020617;color:#cbd5e1;font-size:12px;line-height:1.6}.admin-fallback-note{margin-top:16px;color:#94a3b8;font-size:13px;line-height:1.7}@media (max-width:640px){.admin-fallback-shell{padding:18px 12px}.admin-fallback-card,.admin-fallback-stat,.admin-fallback-panel{border-radius:22px}.admin-fallback-card{padding:22px}.admin-fallback-actions{flex-direction:column}.admin-fallback-btn{width:100%}}</style></head><body><main class=\"admin-fallback-shell\"><section class=\"admin-fallback-card\"><div class=\"admin-fallback-pill\">Admin Shell</div><h1 class=\"admin-fallback-title\">管理台壳层正在处理中</h1><p class=\"admin-fallback-copy\">Worker 继续负责管理台壳、登录与统一后台 API；页面主体会根据当前状态注入设置页、远端壳或错误态内容。</p>__INIT_HEALTH_BANNER____ADMIN_APP_ROOT__</section></main></body></html>";
 let cachedAdminTemplateBytes = -1;
 const SITE_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
@@ -22118,9 +22391,9 @@ const ADMIN_SETTINGS_SAVE_GROUPS = Object.freeze([
 function buildAdminUiContract() {
   return {
     truthSources: {
-      primaryUi: "banker/worker.js",
-      templateHtml: "banker/.admin-ui.html",
-      contractDoc: "banker/sum.md"
+      primaryUi: "frontend/",
+      templateHtml: "frontend/index.html",
+      contractDoc: "worker.md"
     },
     bootstrapActions: {
       default: "getAdminBootstrap",
@@ -22341,104 +22614,79 @@ function withAdminShellRuntimeStatus(runtimeStatus = {}, env, config = {}, initH
   };
 }
 
-function describeAdminEmbeddedFallbackReason(reason = "", initHealthOk = false) {
+function describeAdminRemoteShellFailureReason(reason = "") {
   const normalizedReason = String(reason || "").trim();
   if (!normalizedReason) {
-    return "当前请求仍由授权态 fallback 返回，用于承接 remote shell 拉取失败后的兜底。";
-  }
-  if (normalizedReason === "remote_shell_not_configured") {
-    return "INDEX_URL 尚未配置，Worker 还不能把 /admin 切到远端 index.html。";
-  }
-  if (normalizedReason === "init_health_blocked_remote_shell") {
-    return "初始化健康检查未通过；虽然不会阻塞登录页，但建议尽快补齐必要环境变量。";
-  }
-  if (normalizedReason === "index_url_not_configured") {
-    return "当前还没有可用的 GitHub 发布源，先完成 INDEX_URL 派生配置后才能进入 remote shell。";
+    return "远端管理台壳暂时不可用，请稍后重试。";
   }
   if (normalizedReason.startsWith("remote_shell_render_failed")) {
     const detail = normalizedReason.replace(/^remote_shell_render_failed:\s*/i, "").trim();
     return detail
-      ? `Worker 拉取远端 index.html 失败，当前请求已回退到 embedded fallback：${detail}`
-      : "Worker 拉取远端 index.html 失败，当前请求已回退到 embedded fallback。";
+      ? `Worker 拉取远端 index.html 失败：${detail}`
+      : "Worker 拉取远端 index.html 失败。";
   }
   return normalizedReason;
 }
 
-function buildAdminFallbackActionLink(href = "", label = "", tone = "secondary", newTab = false) {
-  const normalizedHref = String(href || "").trim();
-  const normalizedLabel = String(label || "").trim();
-  if (!normalizedHref || !normalizedLabel) return "";
-  const buttonToneClass = tone === "primary" ? "admin-fallback-btn-primary" : "admin-fallback-btn-secondary";
-  const targetAttributes = newTab ? ' target="_blank" rel="noopener noreferrer"' : "";
-  return `<a href="${escapeHtml(normalizedHref)}" class="admin-fallback-btn ${buttonToneClass}"${targetAttributes}>${escapeHtml(normalizedLabel)}</a>`;
-}
-
-function buildAdminFallbackStatCard(label = "", value = "") {
-  return `<article class="admin-fallback-stat"><div class="admin-fallback-k">${escapeHtml(label)}</div><div class="admin-fallback-v">${escapeHtml(value)}</div></article>`;
-}
-
-function buildEmbeddedAdminFallbackContent(bootstrap = {}, shellState = {}, initHealth = {}, statusOptions = {}) {
+function buildAdminRemoteShellErrorContent(bootstrap = {}, shellState = {}, initHealth = {}, statusOptions = {}) {
   const adminPath = String(bootstrap.adminPath || "/admin").trim() || "/admin";
   const loginPath = String(bootstrap.loginPath || "").trim();
-  const contract = isPlainObject(bootstrap.contract) ? bootstrap.contract : buildAdminUiContract();
   const remoteShellIndexUrl = String(statusOptions.remoteShellIndexUrl || shellState.remoteShellIndexUrl || "").trim();
-  const lifecycleState = String(shellState.lifecycleState || "").trim() || "embedded_only";
-  const initHealthMissing = [...new Set((Array.isArray(initHealth.missing) ? initHealth.missing : [])
-    .map(item => String(item || "").trim())
-    .filter(Boolean))];
-  const initHealthSummary = initHealth.ok === true
-    ? "已通过，remote shell 可以成为默认返回路径"
-    : (initHealthMissing.length ? `缺失项：${initHealthMissing.join(" / ")}` : "未通过");
-  const runtimeSummary = String(statusOptions.routeState || "").trim() === "embedded_fallback"
-    ? "当前请求已落回 embedded fallback"
-    : "当前仍由 embedded fallback 直接返回";
-  const reasonSummary = describeAdminEmbeddedFallbackReason(statusOptions.reason || "", initHealth.ok === true);
-  const fallbackSummary = `${Number(shellState.embeddedTemplateBytes) || 0} bytes / ${String(shellState.embeddedTemplateSource || ADMIN_EMBEDDED_TEMPLATE_MODE || "unknown")}`;
-  const primaryViewSummary = (Array.isArray(contract.primaryViews) ? contract.primaryViews : ADMIN_PRIMARY_VIEWS)
-    .map((view) => `#${String(view || "").trim()}`)
-    .filter(Boolean)
-    .join(" -> ");
-  const settingsContractSummary = `${Array.isArray(contract.settings?.visualSections) ? contract.settings.visualSections.length : ADMIN_SETTINGS_VISUAL_SECTIONS.length} 视觉分区 / ${Array.isArray(contract.settings?.saveGroups) ? contract.settings.saveGroups.length : ADMIN_SETTINGS_SAVE_GROUPS.length} 保存分区`;
-  const actionLinks = [
-    buildAdminFallbackActionLink(adminPath, "刷新 /admin", "primary"),
-    loginPath ? buildAdminFallbackActionLink(loginPath, "打开登录页") : "",
-    remoteShellIndexUrl ? buildAdminFallbackActionLink(remoteShellIndexUrl, "打开远端 index.html", "secondary", true) : ""
-  ].filter(Boolean).join("");
-  const debugPayload = {
-    adminPath,
-    loginPath,
-    hostDomain: String(bootstrap.hostDomain || "").trim(),
-    initHealth: {
-      ok: initHealth.ok === true,
-      missing: initHealthMissing
-    },
-    shell: {
-      mode: String(shellState.mode || "").trim(),
-      lifecycleState,
-      retirementState: String(shellState.retirementState || "").trim(),
-      remoteShellIndexUrl,
-      embeddedTemplateSource: String(shellState.embeddedTemplateSource || "").trim(),
-      embeddedTemplateBytes: Number(shellState.embeddedTemplateBytes) || 0,
-      finalUiHtmlRetired: shellState.finalUiHtmlRetired === true
-    },
-    runtime: {
-      routeState: String(statusOptions.routeState || "").trim(),
-      sourceType: String(statusOptions.sourceType || "embedded_local").trim(),
-      reason: String(statusOptions.reason || "").trim()
-    },
-    contract
-  };
+  const reasonSummary = describeAdminRemoteShellFailureReason(statusOptions.reason || "");
 
-  return `<div class="admin-fallback-grid">${[
-    buildAdminFallbackStatCard("当前状态", runtimeSummary),
-    buildAdminFallbackStatCard("Fallback 原因", reasonSummary),
-    buildAdminFallbackStatCard("Remote Shell", remoteShellIndexUrl || "INDEX_URL 尚未配置"),
-    buildAdminFallbackStatCard("Init Health", initHealthSummary),
-    buildAdminFallbackStatCard("Lifecycle", lifecycleState),
-    buildAdminFallbackStatCard("Embedded Fallback", fallbackSummary),
-    buildAdminFallbackStatCard("主视图链", primaryViewSummary || "#dashboard -> #nodes -> #logs -> #dns -> #settings"),
-    buildAdminFallbackStatCard("Settings 契约", settingsContractSummary)
-  ].join("")}</div><div class="admin-fallback-actions">${actionLinks}</div><section class="admin-fallback-panel"><h2>当前说明</h2><p>POST /admin API、日志、KV / D1、代理与鉴权语义保持不变；这次只保留 Worker 壳与极小 fallback，不再把完整管理台 UI 回嵌进 Worker。</p><p>UI 保真基线严格遵守前端 prompt：<code>banker/worker.js</code> 是像素级主真相源，<code>banker/.admin-ui.html</code> 只作为结构模板参考，<code>banker/sum.md</code> 负责五视图链和 Settings 8/5 契约。</p><p class="admin-fallback-note">如果 remote shell 已配置但仍频繁回退，请优先检查远端 index.html 可访问性、内容合法性、资源是否直连 CDN，以及缓存刷新状态。</p><details><summary>查看当前 fallback 快照</summary><pre>${escapeHtml(JSON.stringify(debugPayload, null, 2))}</pre></details></section>`;
+  return `<style>
+    .admin-remote-error-shell{max-width:920px;margin:0 auto;padding:44px 20px 56px;color:#0f172a}
+    .admin-remote-error-card{background:rgba(255,255,255,.96);border:1px solid rgba(248,113,113,.22);border-radius:28px;box-shadow:0 24px 80px rgba(15,23,42,.12);overflow:hidden}
+    .dark .admin-remote-error-card{background:rgba(15,23,42,.94);border-color:rgba(248,113,113,.32);color:#e2e8f0}
+    .admin-remote-error-head{padding:30px 30px 22px;border-bottom:1px solid rgba(248,113,113,.14)}
+    .admin-remote-error-kicker{display:inline-flex;align-items:center;padding:7px 12px;border-radius:999px;background:rgba(239,68,68,.1);color:#b91c1c;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+    .dark .admin-remote-error-kicker{background:rgba(248,113,113,.16);color:#fecaca}
+    .admin-remote-error-title{margin:16px 0 10px;font-size:clamp(28px,4.8vw,40px);line-height:1.05}
+    .admin-remote-error-desc{margin:0;color:#475569;line-height:1.8}
+    .dark .admin-remote-error-desc{color:#cbd5e1}
+    .admin-remote-error-body{padding:26px 30px 30px}
+    .admin-remote-error-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:22px}
+    .admin-remote-error-stat{padding:15px 16px;border-radius:18px;background:#f8fafc;border:1px solid rgba(148,163,184,.16)}
+    .dark .admin-remote-error-stat{background:#111827;border-color:rgba(71,85,105,.5)}
+    .admin-remote-error-k{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#64748b}
+    .admin-remote-error-v{margin-top:8px;font-size:14px;line-height:1.7;color:#0f172a;word-break:break-word}
+    .dark .admin-remote-error-v{color:#f8fafc}
+    .admin-remote-error-actions{display:flex;flex-wrap:wrap;gap:12px;margin:22px 0 20px}
+    .admin-remote-error-btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 18px;border-radius:14px;font-weight:700;text-decoration:none}
+    .admin-remote-error-btn-primary{background:#0f172a;color:#fff}
+    .dark .admin-remote-error-btn-primary{background:#e2e8f0;color:#0f172a}
+    .admin-remote-error-btn-secondary{background:#fff;border:1px solid rgba(148,163,184,.22);color:#334155}
+    .dark .admin-remote-error-btn-secondary{background:#0f172a;border-color:rgba(71,85,105,.6);color:#e2e8f0}
+    .admin-remote-error-note{margin:0;color:#64748b;line-height:1.8}
+    .dark .admin-remote-error-note{color:#94a3b8}
+    .admin-remote-error-debug{margin-top:18px}
+    .admin-remote-error-debug pre{margin:12px 0 0;padding:16px;border-radius:18px;background:#0f172a;color:#e2e8f0;overflow:auto;font-size:12px;line-height:1.6}
+    @media (max-width: 820px){
+      .admin-remote-error-grid{grid-template-columns:1fr}
+      .admin-remote-error-head,.admin-remote-error-body{padding:22px}
+    }
+  </style>
+  <div class="admin-remote-error-shell">
+    <section class="admin-remote-error-card">
+      <div class="admin-remote-error-head">
+        <div class="admin-remote-error-kicker">Remote Shell Error</div>
+        <h1 class="admin-remote-error-title">/admin 远端壳暂时不可用</h1>
+        <p class="admin-remote-error-desc">${escapeHtml(reasonSummary)}</p>
+      </div>
+      <div class="admin-remote-error-body">
+        <div class="admin-remote-error-grid">
+          <article class="admin-remote-error-stat"><div class="admin-remote-error-k">错误原因</div><div class="admin-remote-error-v">${escapeHtml(reasonSummary)}</div></article>
+          <article class="admin-remote-error-stat"><div class="admin-remote-error-k">当前 INDEX_URL</div><div class="admin-remote-error-v">${escapeHtml(remoteShellIndexUrl || "INDEX_URL 尚未配置")}</div></article>
+        </div>
+        <div class="admin-remote-error-actions">
+          <a href="${escapeHtml(adminPath)}" class="admin-remote-error-btn admin-remote-error-btn-primary">刷新 /admin</a>
+          ${loginPath ? `<a href="${escapeHtml(loginPath)}" class="admin-remote-error-btn admin-remote-error-btn-secondary">打开登录页</a>` : ""}
+          ${remoteShellIndexUrl ? `<a href="${escapeHtml(remoteShellIndexUrl)}" class="admin-remote-error-btn admin-remote-error-btn-secondary" target="_blank" rel="noopener noreferrer">打开远端 index.html</a>` : ""}
+        </div>
+        <p class="admin-remote-error-note">如果这里继续报错，请优先检查远端 index.html、CDN 静态资源路径和当前发布源配置。</p>
+      </div>
+    </section>
+  </div>`;
 }
 
 function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth = {}, config = {}, indexState = {}) {
@@ -22447,11 +22695,10 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
   const runtimePayload = serializeInlineJson({
     adminPath,
     loginPath,
-    releaseRepo: String(indexState.releaseRepo || "").trim(),
+    releaseRepo: FIXED_GITHUB_RELEASE_REPO,
     releaseBranch: String(indexState.releaseBranch || "").trim(),
     releaseTag: String(indexState.releaseTag || "").trim(),
     indexUrl: String(indexState.indexUrl || "").trim(),
-    workerSourceUrl: String(indexState.workerSourceUrl || "").trim(),
     currentConfig: sanitizeRuntimeConfig(config)
   });
   return `<style>
@@ -22464,11 +22711,8 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     .admin-gate-title{margin:16px 0 10px;font-size:clamp(30px,5vw,42px);line-height:1.05}
     .admin-gate-desc{margin:0;color:#475569;line-height:1.8}
     .dark .admin-gate-desc{color:#cbd5e1}
-    .admin-gate-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:22px}
-    .admin-gate-stat{padding:15px 16px;border-radius:18px;background:#f8fafc;border:1px solid rgba(148,163,184,.16)}
-    .dark .admin-gate-stat{background:#111827;border-color:rgba(71,85,105,.5)}
-    .admin-gate-stat-k{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#64748b}
-    .admin-gate-stat-v{margin-top:8px;font-size:14px;line-height:1.6;word-break:break-word}
+    .admin-gate-note{margin-top:18px;padding:14px 16px;border-radius:18px;background:#f8fafc;border:1px solid rgba(148,163,184,.16);color:#475569;line-height:1.8}
+    .dark .admin-gate-note{background:#111827;border-color:rgba(71,85,105,.5);color:#cbd5e1}
     .admin-gate-body{padding:30px;display:grid;gap:22px}
     .admin-gate-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
     .admin-gate-field{display:grid;gap:8px}
@@ -22479,6 +22723,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     .admin-gate-input:focus{border-color:#0ea5e9;box-shadow:0 0 0 4px rgba(14,165,233,.12)}
     .admin-gate-readonly{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f8fafc}
     .dark .admin-gate-readonly{background:#0f172a}
+    .admin-gate-link{display:block;text-decoration:none}
     .admin-gate-actions{display:flex;flex-wrap:wrap;gap:12px}
     .admin-gate-btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 18px;border-radius:999px;border:1px solid rgba(148,163,184,.24);font-weight:700;font-size:14px;text-decoration:none;cursor:pointer;transition:transform .12s ease,background .12s ease,border-color .12s ease}
     .admin-gate-btn:hover{transform:translateY(-1px)}
@@ -22492,7 +22737,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     .admin-gate-status.is-success{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.24);color:#166534}
     .dark .admin-gate-status.is-success{color:#bbf7d0}
     @media (max-width: 820px){
-      .admin-gate-grid,.admin-gate-form-grid{grid-template-columns:1fr}
+      .admin-gate-form-grid{grid-template-columns:1fr}
       .admin-gate-body,.admin-gate-hero{padding:22px}
     }
   </style>
@@ -22501,42 +22746,44 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       <div class="admin-gate-hero">
         <div class="admin-gate-kicker">Index Source Required</div>
         <h1 class="admin-gate-title">先配置 GitHub 发布源，再进入 /admin 壳层</h1>
-        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会把 GitHub 仓库、分支、标签保存进系统配置，并自动派生正式前端入口。</p>
-        <div class="admin-gate-grid">
-          <article class="admin-gate-stat"><div class="admin-gate-stat-k">Gate State</div><div class="admin-gate-stat-v">${escapeHtml(String(shellState.gateState || "setup_required").trim() || "setup_required")}</div></article>
-          <article class="admin-gate-stat"><div class="admin-gate-stat-k">Index Source</div><div class="admin-gate-stat-v">${escapeHtml(String(shellState.indexUrlSource || "unset").trim() || "unset")}</div></article>
-          <article class="admin-gate-stat"><div class="admin-gate-stat-k">Admin Path</div><div class="admin-gate-stat-v">${escapeHtml(adminPath)}</div></article>
-          <article class="admin-gate-stat"><div class="admin-gate-stat-k">Login Path</div><div class="admin-gate-stat-v">${escapeHtml(loginPath)}</div></article>
-        </div>
+        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会固定使用 <code>${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</code>，只让你选择分支与可达 Tag，并自动派生正式前端入口。</p>
+        <p class="admin-gate-note">Tag 留空时表示直接使用所选分支的最新提交；这里不会执行 Worker 更新，只会把正式发布源配置写回当前系统设置。</p>
       </div>
       <div class="admin-gate-body">
         <form id="admin-index-gate-form" class="admin-gate-form-grid" novalidate>
           <label class="admin-gate-field">
-            <span class="admin-gate-label">GitHub Repo</span>
-            <input id="admin-gate-release-repo" class="admin-gate-input" type="text" placeholder="owner/repo" value="${escapeHtml(String(indexState.releaseRepo || "").trim())}" />
+            <span class="admin-gate-label">固定 GitHub Repo</span>
+            <a
+              id="admin-gate-release-repo"
+              class="admin-gate-readonly admin-gate-link"
+              href="https://github.com/${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}"
+              target="_blank"
+              rel="noopener noreferrer"
+            >${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</a>
           </label>
           <label class="admin-gate-field">
             <span class="admin-gate-label">Release Branch</span>
-            <input id="admin-gate-release-branch" class="admin-gate-input" type="text" placeholder="main / test / release" value="${escapeHtml(String(indexState.releaseBranch || "").trim())}" />
+            <select id="admin-gate-release-branch" class="admin-gate-input">
+              <option value="">正在加载分支...</option>
+            </select>
           </label>
           <label class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">Release Tag</span>
-            <input id="admin-gate-release-tag" class="admin-gate-input" type="text" placeholder="可选；填写后会优先使用 tag" value="${escapeHtml(String(indexState.releaseTag || "").trim())}" />
+            <select id="admin-gate-release-tag" class="admin-gate-input">
+              <option value="">使用分支最新提交</option>
+            </select>
           </label>
           <label class="admin-gate-field admin-gate-field-full">
-            <span class="admin-gate-label">Derived INDEX_URL</span>
+            <span class="admin-gate-label">INDEX_URL</span>
             <input id="admin-gate-index-url" class="admin-gate-readonly" type="text" value="${escapeHtml(String(indexState.derivedIndexUrl || "").trim())}" readonly />
-          </label>
-          <label class="admin-gate-field admin-gate-field-full">
-            <span class="admin-gate-label">Derived Worker Source</span>
-            <input id="admin-gate-worker-source-url" class="admin-gate-readonly" type="text" value="${escapeHtml(String(indexState.workerSourceUrl || "").trim())}" readonly />
           </label>
           <div class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">当前状态</span>
-            <div id="admin-gate-status" class="admin-gate-status" role="status" aria-live="polite">保存后会把 GitHub 发布源写回 KV，并自动预热一次 /admin 壳层。</div>
+            <div id="admin-gate-status" class="admin-gate-status" role="status" aria-live="polite">正在加载固定发布仓库的分支与 Tag 选项...</div>
           </div>
           <div class="admin-gate-actions admin-gate-field-full">
             <button id="admin-gate-submit" type="submit" class="admin-gate-btn admin-gate-btn-primary">保存并进入 /admin</button>
+            <button id="admin-gate-refresh" type="button" class="admin-gate-btn admin-gate-btn-secondary">刷新分支 / Tag</button>
             <a href="${escapeHtml(loginPath)}" class="admin-gate-btn admin-gate-btn-secondary">回到登录页</a>
           </div>
         </form>
@@ -22546,13 +22793,17 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
   <script>
     const ADMIN_INDEX_GATE_RUNTIME = ${runtimePayload};
     const gateForm = document.getElementById("admin-index-gate-form");
-    const releaseRepoInput = document.getElementById("admin-gate-release-repo");
     const releaseBranchInput = document.getElementById("admin-gate-release-branch");
     const releaseTagInput = document.getElementById("admin-gate-release-tag");
     const indexUrlInput = document.getElementById("admin-gate-index-url");
-    const workerSourceUrlInput = document.getElementById("admin-gate-worker-source-url");
     const submitButton = document.getElementById("admin-gate-submit");
+    const refreshButton = document.getElementById("admin-gate-refresh");
     const gateStatus = document.getElementById("admin-gate-status");
+    const gateState = {
+      repo: String(ADMIN_INDEX_GATE_RUNTIME.releaseRepo || "").trim() || "${FIXED_GITHUB_RELEASE_REPO}",
+      branches: [],
+      tags: []
+    };
 
     function setGateStatus(message, tone) {
       if (!gateStatus) return;
@@ -22560,11 +22811,6 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       gateStatus.classList.remove("is-error", "is-success");
       if (tone === "error") gateStatus.classList.add("is-error");
       if (tone === "success") gateStatus.classList.add("is-success");
-    }
-
-    function normalizeRepoSlug(value) {
-      const raw = String(value || "").trim().replace(/^\\/+|\\/+$/g, "");
-      return /^[A-Za-z0-9._-]+\\/[A-Za-z0-9._-]+$/.test(raw) ? raw : "";
     }
 
     function normalizeReleaseRef(value) {
@@ -22577,7 +22823,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     }
 
     function buildDerivedState() {
-      const releaseRepo = normalizeRepoSlug(releaseRepoInput?.value || "");
+      const releaseRepo = String(gateState.repo || "${FIXED_GITHUB_RELEASE_REPO}").trim() || "${FIXED_GITHUB_RELEASE_REPO}";
       const releaseBranch = normalizeReleaseRef(releaseBranchInput?.value || "");
       const releaseTag = normalizeReleaseRef(releaseTagInput?.value || "");
       const effectiveRef = releaseTag || releaseBranch;
@@ -22593,36 +22839,131 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     function syncDerivedPreview() {
       const nextState = buildDerivedState();
       if (indexUrlInput) indexUrlInput.value = nextState.indexUrl;
-      if (workerSourceUrlInput) workerSourceUrlInput.value = nextState.workerSourceUrl;
       return nextState;
     }
 
-    [releaseRepoInput, releaseBranchInput, releaseTagInput].forEach((element) => {
-      element?.addEventListener("input", () => {
-        syncDerivedPreview();
+    function setButtonPending(pending) {
+      const disabled = pending === true;
+      if (submitButton) submitButton.disabled = disabled;
+      if (refreshButton) refreshButton.disabled = disabled;
+      if (releaseBranchInput) releaseBranchInput.disabled = disabled;
+      if (releaseTagInput) releaseTagInput.disabled = disabled;
+    }
+
+    function fillBranchOptions(branches, selectedBranch) {
+      if (!releaseBranchInput) return;
+      const branchList = Array.isArray(branches) ? branches : [];
+      releaseBranchInput.innerHTML = branchList.length
+        ? branchList.map((branch) => {
+          const branchName = normalizeReleaseRef(branch && typeof branch === "object" ? branch.name : branch);
+          if (!branchName) return "";
+          const isDefault = branch && typeof branch === "object" && branch.isDefault === true;
+          const label = isDefault ? branchName + " (default)" : branchName;
+          return '<option value="' + branchName + '">' + label + '</option>';
+        }).join("")
+        : '<option value="">没有可用分支</option>';
+      releaseBranchInput.value = selectedBranch || "";
+    }
+
+    function fillTagOptions(tags, selectedTag) {
+      if (!releaseTagInput) return;
+      const tagList = Array.isArray(tags) ? tags : [];
+      releaseTagInput.innerHTML = '<option value="">使用分支最新提交</option>' + tagList.map((tag) => {
+        const tagName = normalizeReleaseRef(tag && typeof tag === "object" ? tag.name : tag);
+        if (!tagName) return "";
+        return '<option value="' + tagName + '">' + tagName + '</option>';
+      }).join("");
+      releaseTagInput.value = selectedTag || "";
+    }
+
+    function applyReleaseOptions(payload) {
+      const branchOptions = Array.isArray(payload?.branches) ? payload.branches : [];
+      const tagOptions = Array.isArray(payload?.tags) ? payload.tags : [];
+      gateState.repo = String(payload?.repo || gateState.repo || "${FIXED_GITHUB_RELEASE_REPO}").trim() || "${FIXED_GITHUB_RELEASE_REPO}";
+      gateState.branches = branchOptions;
+      gateState.tags = tagOptions;
+      fillBranchOptions(branchOptions, normalizeReleaseRef(payload?.selectedBranch || ""));
+      fillTagOptions(tagOptions, normalizeReleaseRef(payload?.selectedTag || ""));
+      syncDerivedPreview();
+    }
+
+    async function fetchReleaseOptions(options = {}) {
+      const branch = normalizeReleaseRef(options.branch);
+      const hasTag = Object.prototype.hasOwnProperty.call(options, "tag");
+      const tag = hasTag ? normalizeReleaseRef(options.tag) : normalizeReleaseRef(releaseTagInput?.value || "");
+      const response = await fetch(ADMIN_INDEX_GATE_RUNTIME.adminPath || "/admin", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({
+          action: "getGithubReleaseSourceOptions",
+          branch,
+          ...(hasTag ? { tag } : {})
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = payload?.message || payload?.error?.message || payload?.error || ("分支 / Tag 读取失败（HTTP " + response.status + "）");
+        throw new Error(String(message || "分支 / Tag 读取失败"));
+      }
+      return payload;
+    }
+
+    async function refreshReleaseOptions(options = {}) {
+      setButtonPending(true);
+      setGateStatus("正在加载固定发布仓库的分支与 Tag 选项...", "");
+      try {
+        const payload = await fetchReleaseOptions(options);
+        applyReleaseOptions(payload);
+        setGateStatus("分支与 Tag 选项已刷新，可以直接保存进入 /admin。", "success");
+        return payload;
+      } catch (error) {
+        setGateStatus(error?.message ? "分支 / Tag 读取失败：" + error.message : "分支 / Tag 读取失败，请稍后重试。", "error");
+        return null;
+      } finally {
+        setButtonPending(false);
+      }
+    }
+
+    releaseBranchInput?.addEventListener("change", async () => {
+      const selectedBranch = normalizeReleaseRef(releaseBranchInput.value || "");
+      fillTagOptions([], "");
+      syncDerivedPreview();
+      await refreshReleaseOptions({
+        branch: selectedBranch,
+        tag: ""
+      });
+    });
+
+    releaseTagInput?.addEventListener("change", () => {
+      syncDerivedPreview();
+    });
+
+    refreshButton?.addEventListener("click", async () => {
+      await refreshReleaseOptions({
+        branch: releaseBranchInput?.value || ADMIN_INDEX_GATE_RUNTIME.releaseBranch || "",
+        tag: releaseTagInput?.value || ""
       });
     });
 
     gateForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const nextState = syncDerivedPreview();
-      if (!nextState.releaseRepo) {
-        setGateStatus("请先填写合法的 GitHub 仓库，格式必须是 <code>owner/repo</code>。", "error");
-        releaseRepoInput?.focus();
-        return;
-      }
       if (!nextState.releaseBranch) {
-        setGateStatus("请先填写分支名；标签可以留空，但分支必须存在。", "error");
+        setGateStatus("请先选择一个分支；Tag 可以留空，但分支必须存在。", "error");
         releaseBranchInput?.focus();
         return;
       }
       if (!nextState.indexUrl) {
-        setGateStatus("当前输入还不能派生出有效 INDEX_URL，请检查仓库、分支和标签。", "error");
+        setGateStatus("当前选择还不能派生出有效 INDEX_URL，请检查分支和标签。", "error");
         return;
       }
 
-      if (submitButton) submitButton.disabled = true;
-      setGateStatus("正在保存 GitHub 发布源并预热 /admin 壳层...", "");
+      setButtonPending(true);
+      setGateStatus("正在保存正式发布源配置...", "");
 
       try {
         const currentConfig = ADMIN_INDEX_GATE_RUNTIME.currentConfig && typeof ADMIN_INDEX_GATE_RUNTIME.currentConfig === "object"
@@ -22656,23 +22997,21 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
           throw new Error(String(message || "保存失败"));
         }
         setGateStatus("发布源已保存，正在进入 /admin...", "success");
-        try {
-          await fetch(ADMIN_INDEX_GATE_RUNTIME.adminPath || "/admin", {
-            method: "HEAD",
-            credentials: "same-origin",
-            cache: "no-store"
-          });
-        } catch {}
         window.location.assign(ADMIN_INDEX_GATE_RUNTIME.adminPath || "/admin");
       } catch (error) {
         setGateStatus(error?.message ? "保存失败：" + error.message : "保存失败，请稍后重试。", "error");
       } finally {
-        if (submitButton) submitButton.disabled = false;
+        setButtonPending(false);
       }
     });
 
+    fillBranchOptions([], "");
+    fillTagOptions([], "");
     syncDerivedPreview();
-    releaseRepoInput?.focus();
+    refreshReleaseOptions({
+      branch: ADMIN_INDEX_GATE_RUNTIME.releaseBranch || "",
+      tag: ADMIN_INDEX_GATE_RUNTIME.releaseTag || ""
+    });
   </script>`;
 }
 
@@ -23080,29 +23419,29 @@ async function renderAdminIndexSetupPage(request, env, ctx, initHealth = buildIn
   );
 }
 
-async function renderEmbeddedAdminPage(request, env, ctx, initHealth = buildInitHealth(env), statusOptions = {}, config = {}) {
+async function renderAdminRemoteShellErrorPage(request, env, ctx, initHealth = buildInitHealth(env), statusOptions = {}, config = {}) {
   const shellState = buildAdminShellState(env, initHealth, config);
   const bootstrap = buildAdminBootstrapPayload(env, initHealth, config);
   const indexState = buildResolvedAdminIndexState(env, config);
   const bootstrapJson = serializeInlineJson(bootstrap);
   const initHealthBannerHtml = buildInitHealthBannerHtml(initHealth);
   const requestPath = new URL(request.url).pathname;
-  const embeddedStatusOptions = {
+  const errorStatusOptions = {
     ...statusOptions,
     shellState,
     initHealth,
     indexState,
     remoteShellIndexUrl: statusOptions.remoteShellIndexUrl || shellState.remoteShellIndexUrl || indexState.indexUrl || "",
-    mode: "embedded",
-    sourceType: statusOptions.sourceType || "embedded_local",
-    routeState: statusOptions.routeState || "embedded_fallback",
+    mode: "remote_error",
+    sourceType: statusOptions.sourceType || "remote_error",
+    routeState: statusOptions.routeState || "remote_error",
     remoteCacheState: statusOptions.remoteCacheState || "bypassed",
     lastFetchStatus: statusOptions.lastFetchStatus || "failed",
     reason: statusOptions.reason || "remote_shell_render_failed",
     requestPath
   };
-  const appRootHtml = buildEmbeddedAdminFallbackContent(bootstrap, shellState, initHealth, embeddedStatusOptions);
-  await patchAdminShellRuntimeStatus(env, embeddedStatusOptions, ctx);
+  const appRootHtml = buildAdminRemoteShellErrorContent(bootstrap, shellState, initHealth, errorStatusOptions);
+  await patchAdminShellRuntimeStatus(env, errorStatusOptions, ctx);
 
   const variantEtag = buildAdminHtmlVariantEtag(bootstrap, initHealth, appRootHtml);
   if (requestHasMatchingEtag(request, variantEtag)) {
@@ -23237,11 +23576,11 @@ async function renderAdminPage(request, env, ctx, initHealth = buildInitHealth(e
         path: new URL(request.url).pathname,
         remoteShellIndexUrl
       });
-      return renderEmbeddedAdminPage(request, env, ctx, initHealth, {
+      return renderAdminRemoteShellErrorPage(request, env, ctx, initHealth, {
         indexState: adminIndexState,
         remoteShellIndexUrl,
-        sourceType: "embedded_local",
-        routeState: "embedded_fallback",
+        sourceType: "remote_error",
+        routeState: "remote_error",
         remoteCacheState: "bypassed",
         lastFetchStatus: "failed",
         reason: `remote_shell_render_failed: ${String(error?.message || error || "unknown_error").trim()}`
@@ -23256,7 +23595,7 @@ function renderLandingPage(env, initHealth = buildInitHealth(env)) {
   const initBanner = initHealth.ok
     ? ''
     : `<div class="landing-banner"><div class="landing-banner-title">系统未初始化</div><div class="landing-banner-text">缺少关键环境变量：${initHealth.missing.map(item => escapeHtml(item)).join('、')}</div></div>`;
-  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" sizes="any"><title>Emby Proxy V19.2</title>${LANDING_PAGE_STYLE_HTML}</head><body><main class="landing-shell"><section class="landing-card"><div class="landing-grid"><div class="landing-primary">${initBanner}<div class="landing-pill">Headless Edge Relay</div><h1 class="landing-title">Emby Proxy V19.2</h1><p class="landing-text">为了极致优化视频代理性能，根路径默认只保留无头中继与说明壳；真正的管理台入口固定收口到 <span class="landing-highlight">${escapeHtml(adminPath)}</span>，并由 Worker 拉取远端 \`index.html\` 返回。</p><p class="landing-text landing-text-muted">该入口默认服务于 \`#dashboard -> #nodes -> #logs -> #dns -> #settings\` 五视图链，Settings 继续遵守 8 个视觉分区与 5 个保存分区契约。</p><div class="landing-actions"><a href="${escapeHtml(adminPath)}" class="landing-btn landing-btn-primary">访问 ${escapeHtml(adminPath)}</a><a href="https://github.com/axuitomo/CF-EMBY-PROXY-UI" target="_blank" rel="noopener noreferrer" class="landing-btn landing-btn-secondary">查看项目说明</a></div></div><div class="landing-side"><div class="landing-notes"><div class="landing-notes-title">Routing Notes</div><ul class="landing-note-list"><li>根路径仅提供静态说明页，不承载实时配置数据。</li><li><code>${escapeHtml(adminPath)}</code> 只负责返回管理台壳与 bootstrap，动态数据继续走 <code>POST ${escapeHtml(adminPath)}</code> API。</li><li>UI 保真基线以 <code>banker/worker.js</code> 为准，<code>banker/.admin-ui.html</code> 仅作结构模板参考。</li><li>媒体代理、日志与 KV / D1 逻辑保持原 Worker 主链路不变。</li></ul></div></div></div></section></main></body></html>`;
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" sizes="any"><title>Emby Proxy V19.2</title>${LANDING_PAGE_STYLE_HTML}</head><body><main class="landing-shell"><section class="landing-card"><div class="landing-grid"><div class="landing-primary">${initBanner}<div class="landing-pill">Headless Edge Relay</div><h1 class="landing-title">Emby Proxy V19.2</h1><p class="landing-text">为了极致优化视频代理性能，根路径默认只保留无头中继与说明壳；真正的管理台入口固定收口到 <span class="landing-highlight">${escapeHtml(adminPath)}</span>，并由 Worker 拉取远端 \`index.html\` 返回。</p><p class="landing-text landing-text-muted">该入口默认服务于 \`#dashboard -> #nodes -> #logs -> #dns -> #settings\` 五视图链，Settings 继续遵守 8 个视觉分区与 5 个保存分区契约。</p><div class="landing-actions"><a href="${escapeHtml(adminPath)}" class="landing-btn landing-btn-primary">访问 ${escapeHtml(adminPath)}</a><a href="https://github.com/axuitomo/CF-EMBY-PROXY-UI" target="_blank" rel="noopener noreferrer" class="landing-btn landing-btn-secondary">查看项目说明</a></div></div><div class="landing-side"><div class="landing-notes"><div class="landing-notes-title">Routing Notes</div><ul class="landing-note-list"><li>根路径仅提供静态说明页，不承载实时配置数据。</li><li><code>${escapeHtml(adminPath)}</code> 只负责返回管理台壳与 bootstrap，动态数据继续走 <code>POST ${escapeHtml(adminPath)}</code> API。</li><li>正式真相源固定为 <code>frontend/</code>、<code>worker.js</code> 与 <code>worker.md</code>。</li><li>媒体代理、日志与 KV / D1 逻辑保持原 Worker 主链路不变。</li></ul></div></div></div></section></main></body></html>`;
   const headers = new Headers({ 'Content-Type': 'text/html;charset=UTF-8', 'Cache-Control': 'public, max-age=3600, s-maxage=86400' });
   applySecurityHeaders(headers);
   headers.set('X-Frame-Options', 'DENY');

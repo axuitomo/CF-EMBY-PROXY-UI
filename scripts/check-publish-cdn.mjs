@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
+const FIXED_GITHUB_RELEASE_REPO = 'axuitomo/CF-EMBY-PROXY-UI';
+
 function parseArgs(argv = []) {
   const args = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -53,7 +55,12 @@ const indexUrl = String(
   || process.env.ADMIN_SHELL_INDEX
   || ''
 ).trim();
-const rawExplicitRepo = String(args.repo || process.env.GITHUB_RELEASE_REPO || process.env.RELEASE_REPO || '').trim();
+const rawExplicitRepo = String(
+  args.repo
+  || process.env.GITHUB_RELEASE_REPO
+  || process.env.RELEASE_REPO
+  || FIXED_GITHUB_RELEASE_REPO
+).trim();
 const explicitRepo = normalizeGithubRepoSlug(rawExplicitRepo);
 
 if (!targetRef) {
@@ -71,8 +78,13 @@ if (!indexUrl) {
   process.exit(1);
 }
 
-if (rawExplicitRepo && !explicitRepo) {
+if (!explicitRepo) {
   console.error(`[check-publish-cdn] 非法 repo slug：${rawExplicitRepo}，请使用 owner/repo。`);
+  process.exit(1);
+}
+
+if (explicitRepo !== FIXED_GITHUB_RELEASE_REPO) {
+  console.error(`[check-publish-cdn] 正式发布仓库已固定为 ${FIXED_GITHUB_RELEASE_REPO}，实际：${explicitRepo}`);
   process.exit(1);
 }
 
@@ -87,6 +99,7 @@ const repoSlug = (() => {
   }).trim();
   return parseGithubSlug(originRemote);
 })();
+
 const { owner, repo } = repoSlug;
 const expectedBase = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${targetRef}/frontend/dist/`;
 const expectedIndexUrl = new URL('index.html', expectedBase).toString();
@@ -107,8 +120,8 @@ if (failures.length > 0) {
   for (const failure of failures) {
     console.error(`- ${failure}`);
   }
-  console.error(`- 牵引文件存在性参考：${releasePanelPath}`);
-  console.error(`- 牵引文件存在性参考：${frontendCheckPath}`);
+  console.error(`- 正式发布链参考：${releasePanelPath}`);
+  console.error(`- 正式发布链参考：${frontendCheckPath}`);
   process.exit(1);
 }
 

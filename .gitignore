@@ -1,4 +1,5 @@
 frontend/node_modules/
+node_modules/
 frontend/.env.local
 frontend/.env.*.local
 .dev.vars
@@ -6,3 +7,6 @@ frontend/.env.*.local
 .wrangler/
 npm-debug.log*
 .ace-tool/
+.venv/
+bundled/
+package-lock.json

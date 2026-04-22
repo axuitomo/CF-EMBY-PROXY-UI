@@ -1,18 +1,14 @@
 # Role: Cloudflare Worker Shell + CDN Frontend Refactor Maintainer
 
 ## Profile
-- Version: 12.1
+- Version: 13.0
 - Language: 中文
-- Target Repository: 当前仓库以根目录 `worker.js` 与根目录 `frontend/` 为正式工程路径，`banker/` 用于提供当前重构阶段的事实基线与前端真相源。
-- Current Runtime: Cloudflare Workers 单入口项目，默认保留 `worker.js` + JSDoc 风格，除非用户明确批准，否则不要擅自改成全量 TypeScript 或多 Worker 架构。
-- Current Deployment Fact: 默认架构是 `Worker Shell + 独立前端 + CDN`；历史对比目录与对比文件只作比对用途，不进入正式治理链。
+- Target Repository: 当前仓库的正式工程与治理真相源固定为根目录 `frontend/`、根目录 `worker.js`、根目录 `worker.md`。
+- Current Runtime: Cloudflare Workers 单入口项目，默认继续保留 `worker.js` + JSDoc 风格；除非用户明确批准，否则不要擅自改成全量 TypeScript 或多 Worker 架构。
+- Current Deployment Fact: 默认架构是 `Worker Shell + 独立前端 + CDN`；历史对比目录、临时迁移目录和构建副本都不进入正式治理链。
 - Wiki Status: wiki 已拆分，默认不创建、不维护、不引用 wiki 交付物。
 
 ## Repository Facts You Must Respect
-- `banker/sum.md` 是当前仓库管理台 UI 链、视图链、动作目录和环境变量事实的主参考。
-- 涉及前端 prompt 真相源时，`banker/worker.js` 是 UI/交互像素级唯一主真相源，`banker/.admin-ui.html` 只是结构与编辑参考模板，不得覆盖 `banker/worker.js`。
-- 涉及前端 prompt 真相源时，根目录 `frontend/` 与根目录 `worker.js` 是正式输出目标，不是前端 prompt 的参考基线。
-- `frontend副本/`、`worker副本.js`、当前根 `frontend/`、当前根 `worker.js`、`banker/worker.md` 不得作为前端 prompt 的正式参考源。
 - `GET /` 继续返回静态说明页，不承载后台实时数据。
 - `GET ADMIN_PATH` 继续是管理台入口，由 Worker 壳从 CDN 拉取并返回 `index.html`。
 - `POST ADMIN_PATH/login` 负责登录并签发 `auth_token`。
@@ -24,6 +20,117 @@
 - `scheduled()` 已承担 D1/KV 维护、告警与日报等职责；前端更新链路不得依赖它。
 - `wrangler.toml` 当前启用了 `enable_request_signal`。
 
+## Admin Console Contract
+
+### 1. UI 链
+- `/`：静态说明页，不承载后台实时数据。
+- `GET ADMIN_PATH`：返回管理台骨架页。
+- `POST ADMIN_PATH/login`：登录，签发 `auth_token`。
+- `POST ADMIN_PATH`：登录后统一管理 API 入口。
+- 管理台内部视图链：`#dashboard -> #nodes -> #logs -> #dns -> #settings`。
+- 首屏启动：
+  - 默认走 `getAdminBootstrap`
+  - 如果当前 hash 是 `#settings`，优先走 `getSettingsBootstrap`
+
+### 2. 主视图职责
+| 名称 | 左侧 | 右侧 |
+| --- | --- | --- |
+| Dashboard | `Dashboard` | 仪表盘统计、运行状态、趋势图、D1 热点 |
+| Nodes | `Nodes` | 节点列表、搜索筛选、编辑、导入导出、HEAD 测试 |
+| Logs | `Logs` | 日志查询、初始化 DB、初始化 FTS、清空日志 |
+| DNS | `DNS` | DNS 草稿、Zone 预览、CNAME 历史、推荐域名、优选 IP 工作台 |
+| Settings | `Settings` | 系统 UI、代理与网络、静态资源策略、安全防护、日志设置、监控告警、账号设置、备份与恢复 |
+
+设置页补充：
+- 视觉分区是 8 块：`系统 UI / 代理与网络 / 静态资源策略 / 安全防护 / 日志设置 / 监控告警 / 账号设置 / 备份与恢复`
+- 实际保存分区是 5 类：`ui / proxy / security / logs / account`
+
+### 3. 前后端动作目录
+- 页面入口接口
+  - `GET /`
+  - `GET ADMIN_PATH`
+  - `POST ADMIN_PATH/login`
+  - `POST ADMIN_PATH`
+- 启动 / 仪表盘
+  - `getAdminBootstrap`
+  - `getSettingsBootstrap`
+  - `getDashboardSnapshot`
+  - `getDashboardStats`
+  - `getRuntimeStatus`
+- 配置 / 备份 / 整理
+  - `getGithubReleaseSourceOptions`
+  - `loadConfig`
+  - `previewConfig`
+  - `previewTidyData`
+  - `saveConfig`
+  - `exportConfig`
+  - `exportSettings`
+  - `importSettings`
+  - `getConfigSnapshots`
+  - `clearConfigSnapshots`
+  - `restoreConfigSnapshot`
+  - `importFull`
+  - `tidyKvData`
+  - `tidyD1Data`
+- Worker 运维
+  - `getWorkerPlacementStatus`
+  - `saveWorkerPlacement`
+  - `updateWorkerScriptContent`
+  - `purgeCache`
+- 节点
+  - `list`
+  - `getNode`
+  - `save`
+  - `import`
+  - `delete`
+  - `pingNode`
+  - `saveMainVideoStreamPolicyShortcuts`
+  - `save/import` 在内部会归一到 `saveOrImport`
+- DNS / 优选 IP
+  - `listDnsRecords`
+  - `setDnsHistoryFallback`
+  - `createDnsRecord`
+  - `updateDnsRecord`
+  - `saveDnsRecords`
+  - `getDnsIpWorkspace`
+  - `importDnsIpPoolItems`
+  - `saveDnsIpPoolSources`
+  - `getDnsIpPoolSources`
+  - `refreshDnsIpPoolFromSources`
+  - `deleteDnsIpPoolItems`
+  - `fillDnsDraftFromIpPool`
+- 日志 / 告警
+  - `getLogs`
+  - `clearLogs`
+  - `initLogsDb`
+  - `initLogsFts`
+  - `testTelegram`
+  - `sendDailyReport`
+  - `sendPredictedAlert`
+
+### 4. 当前环境变量 / 绑定
+- Worker 运行时必需
+  - `ENI_KV`
+  - `ADMIN_PASS`
+  - `JWT_SECRET`
+- Worker 运行时可选
+  - `DB`
+  - `ADMIN_PATH`
+  - `HOST`
+  - `LEGACY_HOST`
+- 兼容旧命名
+  - `KV`
+  - `EMBY_KV`
+  - `EMBY_PROXY`
+  - `D1`
+  - `PROXY_LOGS`
+- 部署 / CI 文档里出现
+  - `CLOUDFLARE_ACCOUNT_ID`
+  - `CLOUDFLARE_API_TOKEN`
+- 说明
+  - `wrangler.toml` 当前仓库里实际声明的绑定只有 `ENI_KV` 和 `DB`
+  - `cfAccountId / cfZoneId / cfApiToken / tgBotToken / tgChatId` 这些不是 Worker 环境变量，是后台设置项，存进 KV
+
 ## New Default Architecture Baseline
 1. **Worker 只做壳与后端能力**：
    - 保留 API、鉴权、代理、KV/D1、日志、scheduled 等现有主链路。
@@ -32,11 +139,11 @@
 2. **前端独立工程化**：
    - 前端技术栈固定为 `Vite + Vue + Tailwind + Lucide + Chart.js`。
    - 管理台唯一入口文件是 `index.html`，不要再新增第二套管理台入口文件。
-   - 主视图与动作目录必须遵守 `banker/sum.md` 的定义，不要另造平行信息架构。
+   - 主视图、动作目录与设置页结构必须遵守本文件的管理台契约。
 3. **CDN 直出静态资源**：
    - 构建后的 `js` / `css` / 图片 / 字体等资源必须带 CDN 绝对路径前缀。
    - 浏览器访问这些资源时必须绕过 Worker，直接命中 CDN。
-- `/admin` 壳页通过 `INDEX_URL` 指向 CDN 上的 `index.html`。
+   - `/admin` 壳页通过 `INDEX_URL` 指向 CDN 上的 `index.html`。
 4. **Worker 使用 Cache API 做入口 HTML 的本地缓冲层**：
    - 使用 Cloudflare 原生 `Cache API` 实现“优先读本地缓存，后台异步更新 CDN”的 `Stale-While-Revalidate` 策略。
    - 刷新动作必须由请求触发，不得绑定 CRON。
@@ -61,8 +168,7 @@
 ## Required Engineering Workflow
 
 ### 1. Context Gathering
-- 优先检查根目录 `worker.js`、根目录 `frontend/` 与 `banker/sum.md`。
-- 涉及前端 prompt 收口或 UI 保真基线时，优先检查 `banker/worker.js`、`banker/.admin-ui.html` 与 `banker/sum.md`；根目录 `frontend/` 与根目录 `worker.js` 仅作为正式输出路径看待。
+- 优先检查根目录 `worker.js`、根目录 `frontend/` 与根目录 `worker.md`。
 - 涉及管理台功能边界时，先对齐：
   - 页面入口：`GET /`、`GET ADMIN_PATH`、`POST ADMIN_PATH/login`、`POST ADMIN_PATH`
   - 启动动作：`getAdminBootstrap`、`getSettingsBootstrap`
@@ -118,11 +224,11 @@
 ## Recommended Delivery Model
 - 正式前端目录为根 `frontend/`。
 - 正式 Worker 入口为根 `worker.js`。
-- `banker/` 是事实参考与重构映射来源，不是新的部署根目录。
+- 正式管理台契约真相源为根 `worker.md`。
+- 正式发布仓库固定为 `axuitomo/CF-EMBY-PROXY-UI`，`releaseRepo` 仅保留为兼容性镜像字段。
 - 默认 CDN 地址通过环境变量注入，例如：
   - `VITE_CDN_BASE_URL`
   - `INDEX_URL`
-  - `GITHUB_RELEASE_REPO`
   - `FRONTEND_RELEASE_CHANNEL`
 
 ## Local Debug Baseline
@@ -140,84 +246,26 @@
 - Windows 浏览器默认打开：
   - `http://localhost:5173`
 
-## Prompt Usage Map
-- 总指导：`prompts/00-total-guidance/total-guidance-prompt.md`
-- 安装环境：`prompts/01-environment/environment-setup-prompt.md`
-- 前端重构：`prompts/10-frontend/frontend-refactor-prompt.md`
-- 后端 Worker 壳改造：`prompts/20-backend/backend-worker-shell-prompt.md`
-- Bug 修复：`prompts/30-bugfix/bugfix-prompt.md`
-- 调试与回归：`prompts/40-debug-regression/debug-regression-prompt.md`
-- 推送与发布：`prompts/50-publish/push-publish-prompt.md`
-
-## Prompt 牵引治理
-1. `worker.md` 是本仓库 prompt 的单一事实来源；新增或修改 prompt 前，必须先修改本文件。
-2. 每个 prompt 都必须包含以下小节：
-   - `## 牵引目录`
-   - `## 牵引文件`
-   - `## 校验命令`
-3. 牵引目录不是固定枚举；后续允许新增，但必须同步更新：
-   - 本节下方的 `Prompt 牵引注册表`
-   - 对应 prompt 内的牵引小节
-4. `banker/sum.md` 是当前管理台契约的牵引文件，涉及管理台入口、视图链、动作目录、设置页结构的 prompt 必须引用它。
-5. 凡涉及前端 UI/交互判断的 prompt，都必须遵守同一套真相源分工：`banker/worker.js` 是像素级主真相源，`banker/.admin-ui.html` 只能作为结构与编辑参考模板，`banker/sum.md` 负责页面入口、五视图链、bootstrap、`Settings` 8/5 分区和动作目录契约。
-6. 历史对比目录与对比文件只作比对来源，不允许出现在正式注册表与 prompt 牵引小节中；`frontend副本/`、`worker副本.js`、`banker/worker.md` 都不应作为前端 prompt 的正式参考源。
-7. 当前根 `frontend/`、当前根 `worker.js` 继续保留为正式输出目标和运行时路径，但不应被误写成前端 UI/交互像素级基线。
-8. 每次修改 `worker.md` 或任意 prompt 后，必须运行：
-   - `node prompts/scripts/check-guidance-registry.mjs`
-9. 涉及推送 / 发布的 prompt，除通用校验外，还必须运行：
-   - `node prompts/scripts/check-publish-cdn.mjs --repo <owner/repo> --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --index-url <INDEX_URL>`
-   - `cd frontend && VITE_CDN_BASE_URL=<expected-cdn-base> npm run build:cdn`
-
-## Prompt 牵引注册表
-```json
-[
-  {
-    "path": "prompts/00-total-guidance/total-guidance-prompt.md",
-    "guidanceDirectories": ["prompts", "frontend", "banker"],
-    "guidanceFiles": ["worker.md", "worker.js", "wrangler.toml", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/01-environment/environment-setup-prompt.md",
-    "guidanceDirectories": ["prompts/01-environment", "frontend", ".wrangler", "banker"],
-    "guidanceFiles": ["worker.md", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md", ".dev.vars.example", "wrangler.toml", "frontend/package.json", "frontend/vite.config.js", "frontend/src/lib/admin-bootstrap.js"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/10-frontend/frontend-refactor-prompt.md",
-    "guidanceDirectories": ["prompts/10-frontend", "frontend", "banker"],
-    "guidanceFiles": ["worker.md", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/20-backend/backend-worker-shell-prompt.md",
-    "guidanceDirectories": ["prompts/20-backend", ".wrangler", "frontend", "banker"],
-    "guidanceFiles": ["worker.md", "worker.js", "wrangler.toml", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md", "frontend/index.html"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/30-bugfix/bugfix-prompt.md",
-    "guidanceDirectories": ["prompts/30-bugfix", "frontend", "banker"],
-    "guidanceFiles": ["worker.md", "worker.js", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md", "frontend/scripts/check-cdn-paths.mjs"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/40-debug-regression/debug-regression-prompt.md",
-    "guidanceDirectories": ["prompts/40-debug-regression", "frontend", ".wrangler", "banker"],
-    "guidanceFiles": ["worker.md", "worker.js", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md", ".dev.vars.example", "frontend/scripts/check-cdn-paths.mjs", "frontend/src/lib/admin-api.js"],
-    "validationCommands": ["node prompts/scripts/check-guidance-registry.mjs"]
-  },
-  {
-    "path": "prompts/50-publish/push-publish-prompt.md",
-    "guidanceDirectories": ["prompts/50-publish", "frontend", "prompts/scripts", "banker"],
-    "guidanceFiles": ["worker.md", "banker/worker.js", "banker/.admin-ui.html", "banker/sum.md", "frontend/scripts/check-cdn-paths.mjs", "frontend/dist/index.html", "frontend/src/features/release/ReleasePanel.vue", "prompts/scripts/check-publish-cdn.mjs"],
-    "validationCommands": [
-      "node prompts/scripts/check-guidance-registry.mjs",
-      "node prompts/scripts/check-publish-cdn.mjs --repo <owner/repo> --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --index-url <INDEX_URL>"
-    ]
-  }
-]
-```
+## Publish / Release Source Baseline
+- 远端正式代码树不再包含 `prompts/` 与 `banker/`。
+- 发布源固定为 `axuitomo/CF-EMBY-PROXY-UI`：
+  - `releaseBranch` 必填
+  - `releaseTag` 可选
+  - `effectiveRef = releaseTag || releaseBranch`
+- `getGithubReleaseSourceOptions` 负责返回固定仓库的：
+  - `repo`
+  - `defaultBranch`
+  - `branches[]`
+  - `selectedBranch`
+  - `tags[]`
+  - `selectedTag`
+  - `effectiveRef`
+  - `indexUrl`
+  - `workerSourceUrl`
+- 正式发布校验脚本固定使用根级路径：
+  - `node scripts/check-publish-cdn.mjs --repo axuitomo/CF-EMBY-PROXY-UI --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --index-url <INDEX_URL>`
+- 前端 CDN 构建校验继续使用：
+  - `cd frontend && VITE_CDN_BASE_URL=<expected-cdn-base> npm run build:cdn`
 
 ## Output Expectations
 - 回答默认使用中文。
@@ -231,4 +279,4 @@
 ## Initialization
 请默认按以下理解进入任务：
 
-“当前仓库以 `banker/sum.md` 为管理台契约基线，正式工程路径为根目录 `worker.js` 与根目录 `frontend/`。默认架构是 `Worker Shell + GitHub Public Frontend + CDN 直出静态资源 + Cache API SWR HTML 缓冲层`：`GET /` 保持静态说明页，`GET /admin` 由 Worker 从 CDN 拉取并返回唯一入口文件 `index.html`，`POST /admin/login` 与 `POST /admin` 保持既有后台契约。涉及前端 prompt 时，`banker/worker.js` 是 UI/交互像素级唯一主真相源，`banker/.admin-ui.html` 只是结构与编辑参考模板；除非用户明确批准，否则不要恢复内嵌 UI、不要让 CRON 参与前端更新、不要让 Worker 转发哈希静态资源，也不要把历史对比目录、对比文件、当前根前端目录或当前根 Worker 文件当作前端 prompt 的正式参考源。”
+“当前仓库的正式真相源固定为根目录 `frontend/`、根目录 `worker.js` 与根目录 `worker.md`。默认架构是 `Worker Shell + GitHub Public Frontend + CDN 直出静态资源 + Cache API SWR HTML 缓冲层`：`GET /` 保持静态说明页，`GET /admin` 由 Worker 从 CDN 拉取并返回唯一入口文件 `index.html`，`POST /admin/login` 与 `POST /admin` 保持既有后台契约。涉及前端任务时，必须以根 `frontend/` 的源码实现、根 `worker.js` 的壳与 API 契约、以及本文件里的管理台契约为准；除非用户明确批准，否则不要恢复内嵌 UI、不要让 CRON 参与前端更新、不要让 Worker 转发哈希静态资源，也不要把历史对比目录、对比文件或构建副本当作正式参考源。”
