@@ -10,3 +10,4 @@ npm-debug.log*
 .venv/
 bundled/
 package-lock.json
+prompts/
