@@ -5127,6 +5127,34 @@ const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_API_PAGE_SIZE = 100;
 const GITHUB_API_MAX_PAGES = 10;
 const GITHUB_TAG_REACHABILITY_CONCURRENCY = 6;
+const GITHUB_API_USER_AGENT = "cf-emby-proxy-ui-release-source/1.0";
+
+function readGithubApiToken(env = null) {
+  const primaryToken = String(env?.GITHUB_TOKEN || "").trim();
+  if (primaryToken) return primaryToken;
+  return String(env?.GITHUB_API_TOKEN || "").trim();
+}
+
+function readGithubApiTokenSource(env = null) {
+  const primaryToken = String(env?.GITHUB_TOKEN || "").trim();
+  if (primaryToken) return "GITHUB_TOKEN";
+  const legacyToken = String(env?.GITHUB_API_TOKEN || "").trim();
+  if (legacyToken) return "GITHUB_API_TOKEN";
+  return "";
+}
+
+function buildGithubApiRequestHeaders(env = null) {
+  const headers = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    "User-Agent": GITHUB_API_USER_AGENT
+  };
+  const githubApiToken = readGithubApiToken(env);
+  if (githubApiToken) {
+    headers.Authorization = `Bearer ${githubApiToken}`;
+  }
+  return headers;
+}
 
 function buildGithubApiUrl(pathname = "", query = {}) {
   const url = new URL(String(pathname || "").trim(), GITHUB_API_BASE_URL);
@@ -5137,13 +5165,125 @@ function buildGithubApiUrl(pathname = "", query = {}) {
   return url;
 }
 
-function buildGithubApiErrorMessage(response, fallbackMessage = "GitHub API 请求失败") {
+function normalizeGithubApiHeaderValue(response, headerName = "") {
+  return String(response?.headers?.get?.(headerName) || "").trim();
+}
+
+function normalizeGithubRateLimitResetAt(value = "") {
+  const rawValue = Number(value);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) return "";
+  try {
+    return new Date(rawValue * 1000).toISOString();
+  } catch {
+    return "";
+  }
+}
+
+async function readGithubApiFailurePayload(response) {
+  const contentType = normalizeGithubApiHeaderValue(response, "Content-Type").toLowerCase();
+  let apiMessage = "";
+  let documentationUrl = "";
+  let bodySnippet = "";
+  if (contentType.includes("json")) {
+    try {
+      const errorPayload = await response.clone().json();
+      apiMessage = String(
+        errorPayload?.message
+        || errorPayload?.error_description
+        || errorPayload?.error
+        || ""
+      ).trim();
+      documentationUrl = String(errorPayload?.documentation_url || errorPayload?.docs_url || "").trim();
+    } catch {}
+  }
+  if (!apiMessage) {
+    try {
+      const rawText = String(await response.clone().text() || "").trim();
+      if (rawText) bodySnippet = rawText.slice(0, 280);
+    } catch {}
+  }
+  return {
+    apiMessage,
+    documentationUrl,
+    bodySnippet,
+    contentType
+  };
+}
+
+function buildGithubApiFailureDetails(response, env = null, baseDetails = {}, failurePayload = {}) {
+  const tokenSource = readGithubApiTokenSource(env);
+  const rateLimitReset = normalizeGithubApiHeaderValue(response, "X-RateLimit-Reset");
+  const details = {
+    ...(isPlainObject(baseDetails) ? baseDetails : {}),
+    httpStatus: Number(response?.status) || 0,
+    githubTokenConfigured: !!tokenSource,
+    githubTokenSource: tokenSource || undefined,
+    responseContentType: failurePayload?.contentType || normalizeGithubApiHeaderValue(response, "Content-Type") || undefined,
+    githubMessage: String(failurePayload?.apiMessage || "").trim() || undefined,
+    githubDocumentationUrl: String(failurePayload?.documentationUrl || "").trim() || undefined,
+    githubRequestId: normalizeGithubApiHeaderValue(response, "X-GitHub-Request-Id") || undefined,
+    rateLimitLimit: normalizeGithubApiHeaderValue(response, "X-RateLimit-Limit") || undefined,
+    rateLimitRemaining: normalizeGithubApiHeaderValue(response, "X-RateLimit-Remaining") || undefined,
+    rateLimitReset: rateLimitReset || undefined,
+    rateLimitResetAt: normalizeGithubRateLimitResetAt(rateLimitReset) || undefined,
+    rateLimitResource: normalizeGithubApiHeaderValue(response, "X-RateLimit-Resource") || undefined,
+    retryAfter: normalizeGithubApiHeaderValue(response, "Retry-After") || undefined,
+    responseServer: normalizeGithubApiHeaderValue(response, "Server") || undefined,
+    responseCfRay: normalizeGithubApiHeaderValue(response, "CF-Ray") || undefined,
+    responseBodySnippet: String(failurePayload?.bodySnippet || "").trim() || undefined
+  };
+  return Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined && value !== ""));
+}
+
+function buildGithubApiErrorMessage(response, fallbackMessage = "GitHub API 请求失败", env = null, failureDetails = {}) {
   const status = Number(response?.status) || 0;
+  const tokenConfigured = failureDetails?.githubTokenConfigured === true;
+  const githubMessage = String(failureDetails?.githubMessage || "").trim().toLowerCase();
+  const responseBodySnippet = String(failureDetails?.responseBodySnippet || "").trim().toLowerCase();
+  const rateLimitRemaining = String(failureDetails?.rateLimitRemaining || "").trim();
+  const rateLimitResetAt = String(failureDetails?.rateLimitResetAt || "").trim();
+  const retryAfter = String(failureDetails?.retryAfter || "").trim();
+  const contentType = String(failureDetails?.responseContentType || "").trim().toLowerCase();
+  const responseServer = String(failureDetails?.responseServer || "").trim().toLowerCase();
+  const failureText = `${githubMessage}\n${responseBodySnippet}`;
+
+  if (status === 401 || githubMessage.includes("bad credentials")) {
+    return tokenConfigured
+      ? "GITHUB_TOKEN 无效、过期，或当前 Worker 没有正确读取到该 Secret"
+      : "GitHub API 未授权，请检查 GITHUB_TOKEN 配置";
+  }
+  if (failureText.includes("user-agent header")) {
+    return "GitHub API 拒绝了当前请求：缺少必需的 User-Agent 请求头";
+  }
   if (status === 403 || status === 429) {
-    return "GitHub API 请求受限，请稍后重试";
+    if (githubMessage.includes("secondary rate limit")) {
+      return retryAfter
+        ? `GitHub API 次级限流，建议 ${retryAfter} 秒后重试`
+        : "GitHub API 次级限流，请稍后重试";
+    }
+    if (rateLimitRemaining === "0") {
+      return tokenConfigured
+        ? `GitHub API 配额已耗尽${rateLimitResetAt ? `，预计 ${rateLimitResetAt} 后恢复` : ""}`
+        : `GitHub API 匿名配额已耗尽${rateLimitResetAt ? `，预计 ${rateLimitResetAt} 后恢复` : ""}，建议为 Worker 配置 GITHUB_TOKEN`;
+    }
+    if (githubMessage.includes("resource not accessible by personal access token") || githubMessage.includes("resource not accessible")) {
+      return "GITHUB_TOKEN 无法访问固定发布仓库，请检查仓库授权范围、只读权限和组织 SSO 授权";
+    }
+    if (githubMessage.includes("sso")) {
+      return "GITHUB_TOKEN 尚未通过组织 SSO 授权，GitHub 拒绝了当前请求";
+    }
+    if (contentType && !contentType.includes("json") && responseServer && !responseServer.includes("github")) {
+      return "上游返回了非 GitHub JSON 响应，可能不是 GitHub API 本身拒绝，而是被中间层或网关拦截";
+    }
+    return tokenConfigured
+      ? "GitHub API 拒绝了当前请求，请检查 GITHUB_TOKEN 是否已部署到当前 Worker、仓库范围和权限是否正确"
+      : "GitHub API 请求受限，请稍后重试，或为 Worker 配置 GITHUB_TOKEN";
   }
   if (status === 404) {
     return "固定发布仓库不存在或当前请求无法访问";
+  }
+  if (contentType && !contentType.includes("json")) {
+    return "GitHub API 返回了非 JSON 响应，可能是上游错误页、网关异常或访问被拦截";
   }
   return fallbackMessage;
 }
@@ -5151,14 +5291,12 @@ function buildGithubApiErrorMessage(response, fallbackMessage = "GitHub API 请�
 async function fetchGithubApiJson(pathname = "", options = {}) {
   const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
   const url = buildGithubApiUrl(pathname, options.query);
+  const githubEnv = options?.env || null;
   let response = null;
   try {
     response = await fetch(url.toString(), {
       method: "GET",
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION
-      }
+      headers: buildGithubApiRequestHeaders(githubEnv)
     });
   } catch (error) {
     throw createStructuredConfigError(
@@ -5175,22 +5313,36 @@ async function fetchGithubApiJson(pathname = "", options = {}) {
   }
 
   if (!response.ok) {
-    let apiMessage = "";
-    try {
-      const errorPayload = await response.clone().json();
-      apiMessage = String(errorPayload?.message || "").trim();
-    } catch {}
-    throw createStructuredConfigError(
-      response.status === 404 ? "GITHUB_RELEASE_SOURCE_NOT_FOUND" : "GITHUB_RELEASE_SOURCE_FETCH_FAILED",
-      apiMessage || buildGithubApiErrorMessage(response),
-      response.status === 404 ? 404 : 502,
-      {
-        repo: FIXED_GITHUB_RELEASE_REPO,
-        owner,
-        repository: repo,
-        url: url.toString(),
-        httpStatus: response.status
+    const failurePayload = await readGithubApiFailurePayload(response);
+    const failureDetails = buildGithubApiFailureDetails(response, githubEnv, {
+      repo: FIXED_GITHUB_RELEASE_REPO,
+      owner,
+      repository: repo,
+      url: url.toString()
+    }, failurePayload);
+    const errorCode = (() => {
+      const status = Number(response.status) || 0;
+      const githubMessage = String(failurePayload?.apiMessage || "").trim().toLowerCase();
+      const bodySnippet = String(failurePayload?.bodySnippet || "").trim().toLowerCase();
+      if (status === 401 || githubMessage.includes("bad credentials")) return "GITHUB_TOKEN_INVALID";
+      if (`${githubMessage}\n${bodySnippet}`.includes("user-agent header")) return "GITHUB_RELEASE_SOURCE_USER_AGENT_REQUIRED";
+      if (status === 403 || status === 429) {
+        if (String(failureDetails.rateLimitRemaining || "").trim() === "0") return "GITHUB_RELEASE_SOURCE_RATE_LIMITED";
+        if (githubMessage.includes("secondary rate limit")) return "GITHUB_RELEASE_SOURCE_SECONDARY_RATE_LIMITED";
+        if (githubMessage.includes("resource not accessible")) return "GITHUB_TOKEN_PERMISSION_DENIED";
+        if (githubMessage.includes("sso")) return "GITHUB_TOKEN_SSO_REQUIRED";
       }
+      if (failureDetails.responseContentType && !String(failureDetails.responseContentType).toLowerCase().includes("json")) {
+        return "GITHUB_RELEASE_SOURCE_NON_JSON_RESPONSE";
+      }
+      return response.status === 404 ? "GITHUB_RELEASE_SOURCE_NOT_FOUND" : "GITHUB_RELEASE_SOURCE_FETCH_FAILED";
+    })();
+    console.warn("[github_release_source.fetch_failed]", errorCode, failureDetails);
+    throw createStructuredConfigError(
+      errorCode,
+      buildGithubApiErrorMessage(response, "GitHub API 请求失败", githubEnv, failureDetails),
+      response.status === 404 ? 404 : 502,
+      failureDetails
     );
   }
 
@@ -5226,9 +5378,11 @@ async function fetchGithubApiCollection(pathname = "", options = {}) {
   return items;
 }
 
-async function getFixedGithubReleaseRepositoryInfo() {
+async function getFixedGithubReleaseRepositoryInfo(env = null) {
   const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
-  const payload = await fetchGithubApiJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+  const payload = await fetchGithubApiJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
+    env
+  });
   const defaultBranch = normalizeGithubReleaseRefValue(payload?.default_branch);
   return {
     defaultBranch,
@@ -5236,11 +5390,13 @@ async function getFixedGithubReleaseRepositoryInfo() {
   };
 }
 
-async function listFixedGithubReleaseBranches() {
+async function listFixedGithubReleaseBranches(env = null) {
   const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
   const [{ defaultBranch }, branchPayload] = await Promise.all([
-    getFixedGithubReleaseRepositoryInfo(),
-    fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`)
+    getFixedGithubReleaseRepositoryInfo(env),
+    fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`, {
+      env
+    })
   ]);
   const branches = [...new Set(branchPayload
     .map(item => normalizeGithubReleaseRefValue(item?.name))
@@ -5254,9 +5410,11 @@ async function listFixedGithubReleaseBranches() {
   };
 }
 
-async function listFixedGithubReleaseTags() {
+async function listFixedGithubReleaseTags(env = null) {
   const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
-  const tagPayload = await fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags`);
+  const tagPayload = await fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags`, {
+    env
+  });
   const tags = [];
   const seen = new Set();
   for (const item of tagPayload) {
@@ -5271,19 +5429,33 @@ async function listFixedGithubReleaseTags() {
   return tags;
 }
 
-async function isGithubTagReachableFromBranch(tagName = "", branchName = "") {
+async function isGithubTagReachableFromBranch(tagName = "", branchName = "", env = null) {
   const normalizedTag = normalizeGithubReleaseRefValue(tagName);
   const normalizedBranch = normalizeGithubReleaseRefValue(branchName);
   if (!normalizedTag || !normalizedBranch) return false;
   const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
-  const comparison = await fetchGithubApiJson(
-    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(normalizedTag)}...${encodeURIComponent(normalizedBranch)}`
-  );
+  let comparison = null;
+  try {
+    comparison = await fetchGithubApiJson(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(normalizedTag)}...${encodeURIComponent(normalizedBranch)}`,
+      { env }
+    );
+  } catch (error) {
+    const errorCode = String(error?.code || "").trim();
+    const githubMessage = String(error?.details?.githubMessage || error?.message || "").trim().toLowerCase();
+    const sourceUrl = String(error?.details?.url || "").trim();
+    const isCompareRequest = sourceUrl.includes("/compare/");
+    const isNoCommonAncestor = githubMessage.includes("no common ancestor");
+    if (isCompareRequest && (errorCode === "GITHUB_RELEASE_SOURCE_NOT_FOUND" || isNoCommonAncestor)) {
+      return false;
+    }
+    throw error;
+  }
   const status = String(comparison?.status || "").trim().toLowerCase();
   return status === "ahead" || status === "identical";
 }
 
-async function filterGithubTagsReachableFromBranch(tags = [], branchName = "") {
+async function filterGithubTagsReachableFromBranch(tags = [], branchName = "", env = null) {
   const queue = (Array.isArray(tags) ? tags : []).slice();
   const results = [];
   const workerCount = Math.max(1, Math.min(GITHUB_TAG_REACHABILITY_CONCURRENCY, queue.length || 1));
@@ -5292,7 +5464,7 @@ async function filterGithubTagsReachableFromBranch(tags = [], branchName = "") {
       const currentTag = queue.shift();
       const tagName = normalizeGithubReleaseRefValue(currentTag?.name);
       if (!tagName) continue;
-      if (await isGithubTagReachableFromBranch(tagName, branchName)) {
+      if (await isGithubTagReachableFromBranch(tagName, branchName, env)) {
         results.push({
           name: tagName,
           commitSha: String(currentTag?.commitSha || "").trim()
@@ -5305,9 +5477,10 @@ async function filterGithubTagsReachableFromBranch(tags = [], branchName = "") {
 
 async function buildGithubReleaseSourceOptionsPayload(config = {}, options = {}) {
   const runtimeConfig = isPlainObject(config) ? config : {};
+  const githubEnv = options?.env || null;
   const requestedBranch = normalizeGithubReleaseRefValue(options?.branch ?? runtimeConfig.releaseBranch);
   const requestedTag = normalizeGithubReleaseRefValue(options?.tag ?? runtimeConfig.releaseTag);
-  const { defaultBranch, branches } = await listFixedGithubReleaseBranches();
+  const { defaultBranch, branches } = await listFixedGithubReleaseBranches(githubEnv);
   if (!branches.length) {
     throw createStructuredConfigError(
       "GITHUB_RELEASE_BRANCH_LIST_EMPTY",
@@ -5320,11 +5493,16 @@ async function buildGithubReleaseSourceOptionsPayload(config = {}, options = {})
   const selectedBranch = branches.includes(requestedBranch)
     ? requestedBranch
     : (defaultBranch || branches[0] || "");
-  const reachableTags = await filterGithubTagsReachableFromBranch(await listFixedGithubReleaseTags(), selectedBranch);
+  const reachableTags = await filterGithubTagsReachableFromBranch(
+    await listFixedGithubReleaseTags(githubEnv),
+    selectedBranch,
+    githubEnv
+  );
   const selectedTag = requestedTag && reachableTags.some(item => item.name === requestedTag)
     ? requestedTag
     : "";
   const effectiveRef = selectedTag || selectedBranch;
+  const effectiveRefType = resolveGithubReleaseEffectiveRefType(selectedTag, selectedBranch);
 
   return {
     repo: FIXED_GITHUB_RELEASE_REPO,
@@ -5342,6 +5520,7 @@ async function buildGithubReleaseSourceOptionsPayload(config = {}, options = {})
     })),
     selectedTag,
     effectiveRef,
+    effectiveRefType,
     indexUrl: buildGithubFrontendIndexUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef),
     workerSourceUrl: buildGithubWorkerSourceUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef)
   };
@@ -5367,7 +5546,8 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   const requestedTag = normalizeGithubReleaseRefValue(releaseConfig.releaseTag);
   const releaseOptions = await buildGithubReleaseSourceOptionsPayload(releaseConfig, {
     branch: releaseConfig.releaseBranch,
-    tag: releaseConfig.releaseTag
+    tag: releaseConfig.releaseTag,
+    env: overrides?.env || null
   });
   if (requestedTag && requestedTag !== releaseOptions.selectedTag) {
     throw createStructuredConfigError(
@@ -5420,7 +5600,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   } catch (error) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_FETCH_FAILED",
-      `拉取 GitHub Worker 源失败：${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
+      `拉取发布源 worker.js 失败：${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
       502,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5434,8 +5614,8 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
     throw createStructuredConfigError(
       response.status === 404 ? "WORKER_RELEASE_SOURCE_NOT_FOUND" : "WORKER_RELEASE_FETCH_FAILED",
       response.status === 404
-        ? "GitHub 仓库中的 worker.js 不存在，请检查仓库、分支/标签和文件路径"
-        : `拉取 GitHub Worker 源失败（HTTP ${response.status}）`,
+        ? "发布源中的 worker.js 不存在，请检查仓库、分支/标签和文件路径"
+        : `拉取发布源 worker.js 失败（HTTP ${response.status}）`,
       response.status === 404 ? 404 : 502,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5450,7 +5630,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (!isAcceptedGithubWorkerContentType(contentType)) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_CONTENT_TYPE_INVALID",
-      `GitHub worker.js 返回的内容类型无效：${contentType || "unknown"}`,
+      `发布源 worker.js 返回的内容类型无效：${contentType || "unknown"}`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5463,7 +5643,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (Number.isFinite(contentLength) && contentLength > GITHUB_RELEASE_WORKER_MAX_BYTES) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_TOO_LARGE",
-      `GitHub worker.js 体积超过限制（${contentLength} bytes）`,
+      `发布源 worker.js 体积超过限制（${contentLength} bytes）`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5478,7 +5658,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (!String(scriptContent || "").trim()) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_EMPTY",
-      "GitHub worker.js 为空，无法更新 Worker",
+      "发布源 worker.js 为空，无法更新 Worker",
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5489,7 +5669,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (scriptBytes > GITHUB_RELEASE_WORKER_MAX_BYTES) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_TOO_LARGE",
-      `GitHub worker.js 体积超过限制（${scriptBytes} bytes）`,
+      `发布源 worker.js 体积超过限制（${scriptBytes} bytes）`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -7607,10 +7787,10 @@ function splitGithubReleaseRepoSlug(repoSlug = "") {
 }
 
 function buildGithubWorkerSourceUrl(repoSlug = "", ref = "") {
-  const { owner, repo } = splitGithubReleaseRepoSlug(repoSlug);
+  const normalizedRepoSlug = normalizeGithubReleaseRepoSlug(repoSlug);
   const effectiveRef = normalizeGithubReleaseRefValue(ref);
-  if (!owner || !repo || !effectiveRef) return "";
-  return `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(effectiveRef)}/worker.js`;
+  if (!normalizedRepoSlug || !effectiveRef) return "";
+  return `https://cdn.jsdelivr.net/gh/${normalizedRepoSlug}@${encodeURIComponent(effectiveRef)}/worker.js`;
 }
 
 function buildGithubFrontendIndexUrl(repoSlug = "", ref = "") {
@@ -7620,12 +7800,19 @@ function buildGithubFrontendIndexUrl(repoSlug = "", ref = "") {
   return `https://cdn.jsdelivr.net/gh/${normalizedRepoSlug}@${encodeURIComponent(effectiveRef)}/frontend/dist/index.html`;
 }
 
+function resolveGithubReleaseEffectiveRefType(releaseTag = "", releaseBranch = "") {
+  if (normalizeGithubReleaseRefValue(releaseTag)) return "tag";
+  if (normalizeGithubReleaseRefValue(releaseBranch)) return "branch";
+  return "";
+}
+
 function buildResolvedAdminIndexState(env = null, config = {}) {
   const runtimeConfig = isPlainObject(config) ? config : {};
   const releaseRepo = FIXED_GITHUB_RELEASE_REPO;
   const releaseBranch = normalizeGithubReleaseRefValue(runtimeConfig.releaseBranch);
   const releaseTag = normalizeGithubReleaseRefValue(runtimeConfig.releaseTag);
   const effectiveRef = releaseTag || releaseBranch;
+  const effectiveRefType = resolveGithubReleaseEffectiveRefType(releaseTag, releaseBranch);
   const derivedIndexUrl = buildGithubFrontendIndexUrl(releaseRepo, effectiveRef);
   const configIndexUrl = normalizeHttpUrl(runtimeConfig.indexUrl);
   const envIndexUrl = normalizeHttpUrl(env?.INDEX_URL);
@@ -7638,6 +7825,7 @@ function buildResolvedAdminIndexState(env = null, config = {}) {
     releaseBranch,
     releaseTag,
     effectiveRef,
+    effectiveRefType,
     derivedIndexUrl,
     workerSourceUrl: buildGithubWorkerSourceUrl(releaseRepo, effectiveRef),
     configIndexUrl,
@@ -15688,7 +15876,8 @@ const Database = {
       } catch {}
       return jsonResponse(await buildGithubReleaseSourceOptionsPayload(config, {
         branch: data?.branch,
-        tag: data?.tag
+        tag: data?.tag,
+        env
       }));
     },
 
@@ -15878,7 +16067,10 @@ const Database = {
           ...authContext,
           request
         });
-        const releaseSource = await fetchGithubReleaseWorkerScriptSource(config, data);
+        const releaseSource = await fetchGithubReleaseWorkerScriptSource(config, {
+          ...(isPlainObject(data) ? data : {}),
+          env
+        });
         const scriptContent = String(releaseSource.scriptContent || "");
         const uploadResult = await updateCloudflareWorkerScriptContent(
           authContext.cfAccountId,
@@ -22544,6 +22736,8 @@ function normalizeAdminShellRuntimeStatus(options = {}) {
     releaseBranch: String(options.releaseBranch || shellState.releaseBranch || indexState.releaseBranch || "").trim(),
     releaseTag: String(options.releaseTag || shellState.releaseTag || indexState.releaseTag || "").trim(),
     effectiveRef: String(options.effectiveRef || shellState.effectiveRef || indexState.effectiveRef || "").trim(),
+    effectiveRefType: String(options.effectiveRefType || shellState.effectiveRefType || indexState.effectiveRefType || "").trim(),
+    workerSourceUrl: String(options.workerSourceUrl || shellState.workerSourceUrl || indexState.workerSourceUrl || "").trim(),
     remoteShellIndexUrl: configuredRemoteIndexUrl,
     remoteShellOrigin: String(shellState.remoteShellOrigin || "").trim(),
     remoteCacheState: String(options.remoteCacheState || "").trim().toLowerCase(),
@@ -22601,6 +22795,8 @@ function withAdminShellRuntimeStatus(runtimeStatus = {}, env, config = {}, initH
       releaseBranch: adminIndexState.releaseBranch,
       releaseTag: adminIndexState.releaseTag,
       effectiveRef: adminIndexState.effectiveRef,
+      effectiveRefType: adminIndexState.effectiveRefType,
+      workerSourceUrl: adminIndexState.workerSourceUrl,
       mode: isPlainObject(safeRuntimeStatus.adminShell) && String(safeRuntimeStatus.adminShell.mode || "").trim()
         ? safeRuntimeStatus.adminShell.mode
         : (adminIndexState.indexUrl ? "remote" : "gate"),
@@ -22699,6 +22895,8 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     releaseBranch: String(indexState.releaseBranch || "").trim(),
     releaseTag: String(indexState.releaseTag || "").trim(),
     indexUrl: String(indexState.indexUrl || "").trim(),
+    workerSourceUrl: String(indexState.workerSourceUrl || "").trim(),
+    effectiveRefType: String(indexState.effectiveRefType || "").trim(),
     currentConfig: sanitizeRuntimeConfig(config)
   });
   return `<style>
@@ -22746,8 +22944,8 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       <div class="admin-gate-hero">
         <div class="admin-gate-kicker">Index Source Required</div>
         <h1 class="admin-gate-title">先配置 GitHub 发布源，再进入 /admin 壳层</h1>
-        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会固定使用 <code>${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</code>，只让你选择分支与可达 Tag，并自动派生正式前端入口。</p>
-        <p class="admin-gate-note">Tag 留空时表示直接使用所选分支的最新提交；这里不会执行 Worker 更新，只会把正式发布源配置写回当前系统设置。</p>
+        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会固定使用 <code>${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</code>，只让你选择分支与可达 Tag，并自动派生正式前端入口和 Worker 发布源。</p>
+        <p class="admin-gate-note">正式版本请优先选择 Tag；Tag 留空时表示直接使用所选分支的最新提交，只属于兼容/测试路径。这里不会执行 Worker 更新，只会把正式发布源配置写回当前系统设置。</p>
       </div>
       <div class="admin-gate-body">
         <form id="admin-index-gate-form" class="admin-gate-form-grid" novalidate>
@@ -22777,6 +22975,10 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
             <span class="admin-gate-label">INDEX_URL</span>
             <input id="admin-gate-index-url" class="admin-gate-readonly" type="text" value="${escapeHtml(String(indexState.derivedIndexUrl || "").trim())}" readonly />
           </label>
+          <label class="admin-gate-field admin-gate-field-full">
+            <span class="admin-gate-label">WORKER_SOURCE_URL</span>
+            <input id="admin-gate-worker-source-url" class="admin-gate-readonly" type="text" value="${escapeHtml(String(indexState.workerSourceUrl || "").trim())}" readonly />
+          </label>
           <div class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">当前状态</span>
             <div id="admin-gate-status" class="admin-gate-status" role="status" aria-live="polite">正在加载固定发布仓库的分支与 Tag 选项...</div>
@@ -22796,6 +22998,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     const releaseBranchInput = document.getElementById("admin-gate-release-branch");
     const releaseTagInput = document.getElementById("admin-gate-release-tag");
     const indexUrlInput = document.getElementById("admin-gate-index-url");
+    const workerSourceUrlInput = document.getElementById("admin-gate-worker-source-url");
     const submitButton = document.getElementById("admin-gate-submit");
     const refreshButton = document.getElementById("admin-gate-refresh");
     const gateStatus = document.getElementById("admin-gate-status");
@@ -22827,18 +23030,30 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       const releaseBranch = normalizeReleaseRef(releaseBranchInput?.value || "");
       const releaseTag = normalizeReleaseRef(releaseTagInput?.value || "");
       const effectiveRef = releaseTag || releaseBranch;
+      const effectiveRefType = releaseTag ? "tag" : (releaseBranch ? "branch" : "");
       const indexUrl = releaseRepo && effectiveRef
         ? "https://cdn.jsdelivr.net/gh/" + releaseRepo + "@" + encodeURIComponent(effectiveRef) + "/frontend/dist/index.html"
         : "";
       const workerSourceUrl = releaseRepo && effectiveRef
-        ? "https://raw.githubusercontent.com/" + releaseRepo.split("/").map(encodeURIComponent).join("/") + "/" + encodeURIComponent(effectiveRef) + "/worker.js"
+        ? "https://cdn.jsdelivr.net/gh/" + releaseRepo + "@" + encodeURIComponent(effectiveRef) + "/worker.js"
         : "";
-      return { releaseRepo, releaseBranch, releaseTag, effectiveRef, indexUrl, workerSourceUrl };
+      return { releaseRepo, releaseBranch, releaseTag, effectiveRef, effectiveRefType, indexUrl, workerSourceUrl };
+    }
+
+    function buildReleaseSelectionStatus(nextState = {}) {
+      if (!nextState.releaseBranch) {
+        return "请先选择一个分支；正式版本建议锁定 Tag。";
+      }
+      if (nextState.releaseTag) {
+        return "当前已锁定 Tag " + nextState.releaseTag + "，保存后会使用同一 Tag 派生 INDEX_URL 与 Worker URL。";
+      }
+      return "当前未选择 Tag，保存后会跟踪分支最新提交；这是兼容/测试路径，不视为正式版本。";
     }
 
     function syncDerivedPreview() {
       const nextState = buildDerivedState();
       if (indexUrlInput) indexUrlInput.value = nextState.indexUrl;
+      if (workerSourceUrlInput) workerSourceUrlInput.value = nextState.workerSourceUrl;
       return nextState;
     }
 
@@ -22884,7 +23099,8 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       gateState.tags = tagOptions;
       fillBranchOptions(branchOptions, normalizeReleaseRef(payload?.selectedBranch || ""));
       fillTagOptions(tagOptions, normalizeReleaseRef(payload?.selectedTag || ""));
-      syncDerivedPreview();
+      const nextState = syncDerivedPreview();
+      setGateStatus(buildReleaseSelectionStatus(nextState), nextState.effectiveRefType === "tag" ? "success" : "");
     }
 
     async function fetchReleaseOptions(options = {}) {
@@ -22918,7 +23134,6 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       try {
         const payload = await fetchReleaseOptions(options);
         applyReleaseOptions(payload);
-        setGateStatus("分支与 Tag 选项已刷新，可以直接保存进入 /admin。", "success");
         return payload;
       } catch (error) {
         setGateStatus(error?.message ? "分支 / Tag 读取失败：" + error.message : "分支 / Tag 读取失败，请稍后重试。", "error");
@@ -22931,6 +23146,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     releaseBranchInput?.addEventListener("change", async () => {
       const selectedBranch = normalizeReleaseRef(releaseBranchInput.value || "");
       fillTagOptions([], "");
+      setGateStatus("正在按所选分支刷新可达 Tag...", "");
       syncDerivedPreview();
       await refreshReleaseOptions({
         branch: selectedBranch,
@@ -22939,7 +23155,8 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     });
 
     releaseTagInput?.addEventListener("change", () => {
-      syncDerivedPreview();
+      const nextState = syncDerivedPreview();
+      setGateStatus(buildReleaseSelectionStatus(nextState), nextState.effectiveRefType === "tag" ? "success" : "");
     });
 
     refreshButton?.addEventListener("click", async () => {
@@ -23143,7 +23360,15 @@ function buildAdminNotModifiedResponseFrom(response, cacheControl = ADMIN_HTML_C
 }
 
 function buildAdminRemoteBootstrapMarkup(bootstrapJson = "{}") {
-  return `<script id="admin-bootstrap" type="application/json">${String(bootstrapJson || "{}")}</script><script id="admin-bootstrap-loader">try{window.__ADMIN_BOOTSTRAP__=JSON.parse(document.getElementById("admin-bootstrap")?.textContent||"{}")}catch(_){window.__ADMIN_BOOTSTRAP__=window.__ADMIN_BOOTSTRAP__||{},window.__ADMIN_UI_BOOT_ERROR__=window.__ADMIN_UI_BOOT_ERROR__||"admin bootstrap parse failed: "+(_?.message||String(_||"unknown_error"))}</script>`;
+  return `${buildAdminRemoteBootstrapScriptMarkup(bootstrapJson)}${ADMIN_REMOTE_BOOTSTRAP_LOADER_HTML}`;
+}
+
+const ADMIN_REMOTE_BOOTSTRAP_SCRIPT_REGEX = /<script(?=[^>]*\bid="admin-bootstrap")(?=[^>]*\btype="application\/json")[^>]*>[\s\S]*?<\/script>/i;
+const ADMIN_REMOTE_BOOTSTRAP_LOADER_REGEX = /<script(?=[^>]*\bid="admin-bootstrap-loader")[^>]*>[\s\S]*?<\/script>/i;
+const ADMIN_REMOTE_BOOTSTRAP_LOADER_HTML = '<script id="admin-bootstrap-loader">try{window.__ADMIN_BOOTSTRAP__=JSON.parse(document.getElementById("admin-bootstrap")?.textContent||"{}")}catch(_){window.__ADMIN_BOOTSTRAP__=window.__ADMIN_BOOTSTRAP__||{},window.__ADMIN_UI_BOOT_ERROR__=window.__ADMIN_UI_BOOT_ERROR__||"admin bootstrap parse failed: "+(_?.message||String(_||"unknown_error"))}</script>';
+
+function buildAdminRemoteBootstrapScriptMarkup(bootstrapJson = "{}") {
+  return `<script id="admin-bootstrap" type="application/json">${String(bootstrapJson || "{}")}</script>`;
 }
 
 function injectMarkupIntoHtmlDocument(html = "", markup = "") {
@@ -23160,6 +23385,34 @@ function injectMarkupIntoHtmlDocument(html = "", markup = "") {
     return `${sourceHtml.slice(0, insertIndex)}${injectedMarkup}${sourceHtml.slice(insertIndex)}`;
   }
   return `${injectedMarkup}${sourceHtml}`;
+}
+
+function applyAdminRemoteBootstrapMarkup(html = "", bootstrapJson = "{}") {
+  const sourceHtml = String(html || "");
+  if (!sourceHtml) return sourceHtml;
+
+  const bootstrapScriptMarkup = buildAdminRemoteBootstrapScriptMarkup(bootstrapJson);
+  const hasLoaderScript = ADMIN_REMOTE_BOOTSTRAP_LOADER_REGEX.test(sourceHtml);
+
+  if (ADMIN_REMOTE_BOOTSTRAP_SCRIPT_REGEX.test(sourceHtml)) {
+    let nextHtml = sourceHtml.replace(ADMIN_REMOTE_BOOTSTRAP_SCRIPT_REGEX, bootstrapScriptMarkup);
+    if (!hasLoaderScript) {
+      nextHtml = nextHtml.replace(
+        bootstrapScriptMarkup,
+        `${bootstrapScriptMarkup}${ADMIN_REMOTE_BOOTSTRAP_LOADER_HTML}`
+      );
+    }
+    return nextHtml;
+  }
+
+  if (hasLoaderScript) {
+    return sourceHtml.replace(
+      ADMIN_REMOTE_BOOTSTRAP_LOADER_REGEX,
+      `${bootstrapScriptMarkup}$&`
+    );
+  }
+
+  return injectMarkupIntoHtmlDocument(sourceHtml, buildAdminRemoteBootstrapMarkup(bootstrapJson));
 }
 
 function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
@@ -23358,10 +23611,7 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
   }
 
   const bootstrapJson = serializeInlineJson(bootstrap);
-  const renderedHtml = injectMarkupIntoHtmlDocument(
-    remoteHtml,
-    buildAdminRemoteBootstrapMarkup(bootstrapJson)
-  );
+  const renderedHtml = applyAdminRemoteBootstrapMarkup(remoteHtml, bootstrapJson);
   const lastModified = normalizeAdminHttpDateHeader(remoteResponse.headers.get("Last-Modified") || "") || new Date().toUTCString();
   return buildAdminRemoteShellStoredResponse(renderedHtml, {
     variantEtag: buildAdminRemoteShellVariantEtag({

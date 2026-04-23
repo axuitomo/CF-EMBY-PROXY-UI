@@ -33,6 +33,7 @@
     --app-border-strong: rgba(255, 255, 255, 0.22);
     --app-shadow-lg: 0 28px 90px rgba(8, 17, 31, 0.35);
     --app-input-bg: rgba(2, 6, 23, 0.7);
+    --app-input-radius: 1rem;
     --app-secondary-btn-bg: rgba(255, 255, 255, 0.06);
     --app-secondary-btn-hover-bg: rgba(255, 255, 255, 0.1);
     color-scheme: var(--app-color-scheme);
@@ -60,6 +61,7 @@
     --app-border-strong: rgba(100, 116, 139, 0.45);
     --app-shadow-lg: 0 24px 72px rgba(15, 23, 42, 0.1);
     --app-input-bg: rgba(255, 255, 255, 0.94);
+    --app-input-radius: 1rem;
     --app-secondary-btn-bg: rgba(255, 255, 255, 0.72);
     --app-secondary-btn-hover-bg: rgba(255, 255, 255, 0.94);
   }
@@ -85,6 +87,15 @@
 
   a {
     @apply transition-colors;
+  }
+
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+  select,
+  textarea,
+  label:has(> input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color'])),
+  label:has(> select),
+  label:has(> textarea) {
+    border-radius: var(--app-input-radius) !important;
   }
 }
 
@@ -141,6 +152,7 @@
     border-color: var(--app-border-subtle);
     background: var(--app-input-bg);
     color: var(--app-text);
+    border-radius: var(--app-input-radius) !important;
   }
 
   .field-textarea {

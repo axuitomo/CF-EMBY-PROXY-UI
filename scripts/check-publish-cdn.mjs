@@ -55,6 +55,13 @@ const indexUrl = String(
   || process.env.ADMIN_SHELL_INDEX
   || ''
 ).trim();
+const workerUrl = String(
+  args['worker-url']
+  || process.env.WORKER_SOURCE_URL
+  || process.env.WORKER_URL
+  || process.env.ADMIN_SHELL_WORKER_URL
+  || ''
+).trim();
 const rawExplicitRepo = String(
   args.repo
   || process.env.GITHUB_RELEASE_REPO
@@ -103,6 +110,7 @@ const repoSlug = (() => {
 const { owner, repo } = repoSlug;
 const expectedBase = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${targetRef}/frontend/dist/`;
 const expectedIndexUrl = new URL('index.html', expectedBase).toString();
+const expectedWorkerUrl = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${targetRef}/worker.js`;
 
 const failures = [];
 if (cdnBase !== expectedBase) {
@@ -110,6 +118,9 @@ if (cdnBase !== expectedBase) {
 }
 if (indexUrl !== expectedIndexUrl) {
   failures.push(`INDEX_URL 不匹配。期望：${expectedIndexUrl}，实际：${indexUrl}`);
+}
+if (workerUrl && workerUrl !== expectedWorkerUrl) {
+  failures.push(`WORKER_SOURCE_URL 不匹配。期望：${expectedWorkerUrl}，实际：${workerUrl}`);
 }
 
 const releasePanelPath = path.resolve(process.cwd(), 'frontend/src/features/release/ReleasePanel.vue');
@@ -129,3 +140,4 @@ console.log(`[check-publish-cdn] 目标 ref ${targetRef} 的 CDN 链接校验通
 console.log(`[check-publish-cdn] releaseRepo = ${owner}/${repo}`);
 console.log(`[check-publish-cdn] VITE_CDN_BASE_URL = ${expectedBase}`);
 console.log(`[check-publish-cdn] INDEX_URL = ${expectedIndexUrl}`);
+console.log(`[check-publish-cdn] WORKER_SOURCE_URL = ${expectedWorkerUrl}`);

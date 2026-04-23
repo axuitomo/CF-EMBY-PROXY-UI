@@ -1,18 +1,1 @@
-{
-  "_feature-overview-qFBW-n2D.js": {
-    "file": "assets/feature-overview-qFBW-n2D.js",
-    "name": "feature-overview"
-  },
-  "index.html": {
-    "file": "assets/index-BR9xtlym.js",
-    "name": "index",
-    "src": "index.html",
-    "isEntry": true,
-    "imports": [
-      "_feature-overview-qFBW-n2D.js"
-    ],
-    "css": [
-      "assets/index-COrj-224.css"
-    ]
-  }
-}
+{}

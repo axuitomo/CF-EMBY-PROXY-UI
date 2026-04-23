@@ -25,7 +25,6 @@ const props = defineProps({
   }
 });
 
-const FIXED_GITHUB_RELEASE_REPO = 'axuitomo/CF-EMBY-PROXY-UI';
 const form = reactive(createEmptyForm());
 const feedback = reactive({
   tone: '',
@@ -59,8 +58,6 @@ const importSettingsLoading = computed(() => Boolean(props.adminConsole?.state?.
 const configSnapshotsLoading = computed(() => Boolean(props.adminConsole?.state?.loading?.configSnapshots));
 const clearConfigSnapshotsLoading = computed(() => Boolean(props.adminConsole?.state?.loading?.clearConfigSnapshots));
 const restoreConfigSnapshotLoading = computed(() => Boolean(props.adminConsole?.state?.loading?.restoreConfigSnapshot));
-const releaseSourceOptionsLoading = computed(() => Boolean(props.adminConsole?.state?.loading?.githubReleaseSourceOptions));
-const updateWorkerScriptLoading = computed(() => Boolean(props.adminConsole?.state?.loading?.updateWorkerScriptContent));
 const authRequired = computed(() => props.adminConsole?.state?.authRequired === true);
 const settingsError = computed(() => String(props.adminConsole?.state?.errors?.settings || '').trim());
 const loadConfigError = computed(() => String(props.adminConsole?.state?.errors?.loadConfig || '').trim());
@@ -73,26 +70,6 @@ const importSettingsError = computed(() => String(props.adminConsole?.state?.err
 const configSnapshotsError = computed(() => String(props.adminConsole?.state?.errors?.configSnapshots || '').trim());
 const clearConfigSnapshotsError = computed(() => String(props.adminConsole?.state?.errors?.clearConfigSnapshots || '').trim());
 const restoreConfigSnapshotError = computed(() => String(props.adminConsole?.state?.errors?.restoreConfigSnapshot || '').trim());
-const releaseSourceError = computed(() => String(props.adminConsole?.state?.errors?.githubReleaseSourceOptions || '').trim());
-const updateWorkerScriptError = computed(() => String(props.adminConsole?.state?.errors?.updateWorkerScriptContent || '').trim());
-const releaseSourceOptions = computed(() => {
-  const payload = props.adminConsole?.releaseSourceOptions;
-  return payload && typeof payload === 'object'
-    ? payload
-    : createEmptyReleaseSourceOptionsState();
-});
-const lastWorkerScriptUpdate = computed(() => {
-  const payload = props.adminConsole?.lastWorkerScriptUpdate;
-  return payload && typeof payload === 'object' ? payload : {};
-});
-const releaseSourceState = computed(() => buildReleaseSourceState(form));
-const releaseRepoHref = computed(() => `https://github.com/${releaseSourceState.value.releaseRepo || FIXED_GITHUB_RELEASE_REPO}`);
-const releaseBranchOptions = computed(() => (
-  Array.isArray(releaseSourceOptions.value.branches) ? releaseSourceOptions.value.branches : []
-));
-const releaseTagOptions = computed(() => (
-  Array.isArray(releaseSourceOptions.value.tags) ? releaseSourceOptions.value.tags : []
-));
 
 const baseFormState = computed(() => buildFormFromConfig(config.value));
 const hasChanges = computed(() => serializeFormState(form) !== serializeFormState(baseFormState.value));
@@ -108,8 +85,6 @@ const anySettingsBusy = computed(() => (
   || configSnapshotsLoading.value
   || clearConfigSnapshotsLoading.value
   || restoreConfigSnapshotLoading.value
-  || releaseSourceOptionsLoading.value
-  || updateWorkerScriptLoading.value
 ));
 const currentNodeCount = computed(() => (
   Array.isArray(settingsBootstrap.value.nodes) ? settingsBootstrap.value.nodes.length : 0
@@ -202,11 +177,6 @@ const summaryTiles = computed(() => [
 
 watch(baseFormState, (nextState) => {
   Object.assign(form, nextState);
-  void syncReleaseSourceOptions({
-    branch: nextState.releaseBranch,
-    tag: nextState.releaseTag,
-    quiet: true
-  });
 }, { immediate: true, deep: true });
 
 watch([
@@ -217,9 +187,7 @@ watch([
   exportConfigError,
   exportSettingsError,
   importFullError,
-  importSettingsError,
-  releaseSourceError,
-  updateWorkerScriptError
+  importSettingsError
 ], ([
   nextSettingsError,
   nextSaveError,
@@ -228,13 +196,9 @@ watch([
   nextExportConfigError,
   nextExportSettingsError,
   nextImportFullError,
-  nextImportSettingsError,
-  nextReleaseSourceError,
-  nextUpdateWorkerScriptError
+  nextImportSettingsError
 ]) => {
-  const nextError = nextUpdateWorkerScriptError
-    || nextReleaseSourceError
-    || nextImportSettingsError
+  const nextError = nextImportSettingsError
     || nextImportFullError
     || nextExportSettingsError
     || nextExportConfigError
@@ -272,11 +236,6 @@ async function handleRefresh() {
 
 function handleReset() {
   Object.assign(form, buildFormFromConfig(config.value));
-  void syncReleaseSourceOptions({
-    branch: form.releaseBranch,
-    tag: form.releaseTag,
-    quiet: true
-  });
   feedback.tone = 'success';
   feedback.text = '已恢复到最近一次从 Worker 读取到的配置。';
 }
@@ -297,100 +256,6 @@ async function handleSave() {
 
   feedback.tone = 'success';
   feedback.text = `设置已保存，时间 ${formatDateTime(result.savedAt)}。`;
-}
-
-async function syncReleaseSourceOptions(options = {}) {
-  if (typeof props.adminConsole?.getGithubReleaseSourceOptions !== 'function') return null;
-
-  const normalizedBranch = String(options.branch || '').trim();
-  const hasTag = Object.prototype.hasOwnProperty.call(options, 'tag');
-  const normalizedTag = hasTag ? String(options.tag || '').trim() : String(form.releaseTag || '').trim();
-  const result = await props.adminConsole.getGithubReleaseSourceOptions({
-    ...(normalizedBranch ? { branch: normalizedBranch } : {}),
-    ...(hasTag ? { tag: normalizedTag } : {})
-  });
-  if (!result) {
-    if (!options.quiet && releaseSourceError.value) {
-      feedback.tone = 'error';
-      feedback.text = releaseSourceError.value;
-    }
-    return null;
-  }
-
-  const derived = buildReleaseSourceState({
-    releaseBranch: result.selectedBranch,
-    releaseTag: result.selectedTag
-  });
-  form.releaseRepo = String(result.repo || FIXED_GITHUB_RELEASE_REPO).trim() || FIXED_GITHUB_RELEASE_REPO;
-  form.releaseBranch = String(result.selectedBranch || '').trim();
-  form.releaseTag = String(result.selectedTag || '').trim();
-  form.indexUrl = derived.indexUrl || String(result.indexUrl || '').trim();
-  return result;
-}
-
-async function handleReleaseSourceRefresh() {
-  feedback.tone = '';
-  feedback.text = '';
-
-  const result = await syncReleaseSourceOptions({
-    branch: form.releaseBranch,
-    tag: form.releaseTag
-  });
-  if (!result) return null;
-
-  feedback.tone = 'success';
-  feedback.text = `正式发布源选项已刷新，当前分支 ${result.selectedBranch || '未选择'}。`;
-  return result;
-}
-
-async function handleReleaseBranchChange() {
-  const result = await syncReleaseSourceOptions({
-    branch: form.releaseBranch,
-    tag: ''
-  });
-  if (!result) return null;
-  form.releaseTag = String(result.selectedTag || '').trim();
-  return result;
-}
-
-function handleReleaseTagChange() {
-  const availableTags = new Set(releaseTagOptions.value.map((item) => String(item?.name || '').trim()).filter(Boolean));
-  if (form.releaseTag && !availableTags.has(String(form.releaseTag || '').trim())) {
-    form.releaseTag = '';
-  }
-  form.indexUrl = releaseSourceState.value.indexUrl;
-}
-
-async function handleUpdateWorkerScript() {
-  if (typeof props.adminConsole?.updateWorkerScriptContent !== 'function' || updateWorkerScriptLoading.value) return null;
-
-  const currentRelease = buildReleaseSourceState(form);
-  if (!currentRelease.releaseBranch) {
-    feedback.tone = 'error';
-    feedback.text = '请先选择一个正式发布分支，再同步远端 worker.js。';
-    return null;
-  }
-
-  feedback.tone = '';
-  feedback.text = '';
-
-  const result = await props.adminConsole.updateWorkerScriptContent({
-    releaseBranch: currentRelease.releaseBranch,
-    releaseTag: currentRelease.releaseTag
-  });
-  if (!result) {
-    if (updateWorkerScriptError.value) {
-      feedback.tone = 'error';
-      feedback.text = updateWorkerScriptError.value;
-    }
-    return null;
-  }
-
-  const effectiveRef = String(result.effectiveRef || currentRelease.effectiveRef || '').trim()
-    || currentRelease.releaseBranch;
-  feedback.tone = 'success';
-  feedback.text = `远端 worker.js 已同步到当前 Worker，来源 ref ${effectiveRef}。`;
-  return result;
 }
 
 const configBackupPanelActions = {
@@ -1133,10 +998,6 @@ function createEmptyForm() {
     videoProgressForwardIntervalSec: '3',
     directStaticAssets: false,
     directHlsDash: false,
-    releaseRepo: FIXED_GITHUB_RELEASE_REPO,
-    releaseBranch: '',
-    releaseTag: '',
-    indexUrl: '',
     multiLinkCopyPanelEnabled: false,
     dashboardShowD1WriteHotspot: false,
     dashboardShowKvD1Status: false,
@@ -1225,7 +1086,6 @@ function buildFormFromConfig(rawConfig = {}) {
     'tgDailyReportD1Enabled'
   ].some((key) => Object.prototype.hasOwnProperty.call(currentConfig, key));
   const hasExplicitExperienceMode = Object.prototype.hasOwnProperty.call(currentConfig, 'settingsExperienceMode');
-  const releaseState = buildReleaseSourceState(currentConfig);
 
   return {
     settingsExperienceMode: resolveSelectValue(
@@ -1250,10 +1110,6 @@ function buildFormFromConfig(rawConfig = {}) {
     videoProgressForwardIntervalSec: formatIntegerInput(currentConfig.videoProgressForwardIntervalSec, 3),
     directStaticAssets: currentConfig.directStaticAssets === true,
     directHlsDash: currentConfig.directHlsDash === true,
-    releaseRepo: releaseState.releaseRepo,
-    releaseBranch: releaseState.releaseBranch,
-    releaseTag: releaseState.releaseTag,
-    indexUrl: releaseState.indexUrl || String(currentConfig.indexUrl || '').trim(),
     multiLinkCopyPanelEnabled: currentConfig.multiLinkCopyPanelEnabled === true,
     dashboardShowD1WriteHotspot: currentConfig.dashboardShowD1WriteHotspot === true,
     dashboardShowKvD1Status: currentConfig.dashboardShowKvD1Status === true,
@@ -1338,7 +1194,6 @@ function buildFormFromConfig(rawConfig = {}) {
 
 function buildConfigPayload(currentConfig = {}, currentForm = {}) {
   const fallbackConfig = currentConfig && typeof currentConfig === 'object' ? currentConfig : {};
-  const releaseState = buildReleaseSourceState(currentForm);
 
   return {
     ...fallbackConfig,
@@ -1361,10 +1216,6 @@ function buildConfigPayload(currentConfig = {}, currentForm = {}) {
     videoProgressForwardIntervalSec: parseIntegerValue(currentForm.videoProgressForwardIntervalSec, fallbackConfig.videoProgressForwardIntervalSec, 3),
     directStaticAssets: currentForm.directStaticAssets === true,
     directHlsDash: currentForm.directHlsDash === true,
-    releaseRepo: releaseState.releaseRepo,
-    releaseBranch: releaseState.releaseBranch,
-    releaseTag: releaseState.releaseTag,
-    indexUrl: releaseState.indexUrl || String(currentForm.indexUrl || fallbackConfig.indexUrl || '').trim(),
     multiLinkCopyPanelEnabled: currentForm.multiLinkCopyPanelEnabled === true,
     dashboardShowD1WriteHotspot: currentForm.dashboardShowD1WriteHotspot === true,
     dashboardShowKvD1Status: currentForm.dashboardShowKvD1Status === true,
@@ -1477,47 +1328,6 @@ function parseNumberValue(value, fallback, defaultValue) {
   return defaultValue;
 }
 
-function normalizeReleaseRefValue(value = '') {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (/[\x00-\x20~^:?*[\\\]]/.test(raw)) return '';
-  if (raw.includes('..') || raw.includes('@{') || raw.includes('//')) return '';
-  if (raw.startsWith('/') || raw.endsWith('/') || raw.endsWith('.') || raw.endsWith('.lock')) return '';
-  return raw;
-}
-
-function buildReleaseSourceState(source = {}) {
-  const releaseBranch = normalizeReleaseRefValue(source?.releaseBranch || '');
-  const releaseTag = normalizeReleaseRefValue(source?.releaseTag || '');
-  const effectiveRef = releaseTag || releaseBranch;
-  return {
-    releaseRepo: FIXED_GITHUB_RELEASE_REPO,
-    releaseBranch,
-    releaseTag,
-    effectiveRef,
-    indexUrl: effectiveRef
-      ? `https://cdn.jsdelivr.net/gh/${FIXED_GITHUB_RELEASE_REPO}@${encodeURIComponent(effectiveRef)}/frontend/dist/index.html`
-      : '',
-    workerSourceUrl: effectiveRef
-      ? `https://raw.githubusercontent.com/${FIXED_GITHUB_RELEASE_REPO.split('/').map(encodeURIComponent).join('/')}/${encodeURIComponent(effectiveRef)}/worker.js`
-      : ''
-  };
-}
-
-function createEmptyReleaseSourceOptionsState() {
-  return {
-    repo: FIXED_GITHUB_RELEASE_REPO,
-    defaultBranch: '',
-    branches: [],
-    selectedBranch: '',
-    tags: [],
-    selectedTag: '',
-    effectiveRef: '',
-    indexUrl: '',
-    workerSourceUrl: ''
-  };
-}
-
 function parseTextList(value = '') {
   return [...new Set(
     String(value || '')
@@ -1558,7 +1368,6 @@ function joinTextList(values = []) {
 }
 
 function serializeFormState(value = {}) {
-  const releaseState = buildReleaseSourceState(value);
   return JSON.stringify({
     settingsExperienceMode: resolveSelectValue(value.settingsExperienceMode, 'novice'),
     uiRadiusPx: String(value.uiRadiusPx || '').trim(),
@@ -1579,10 +1388,6 @@ function serializeFormState(value = {}) {
     videoProgressForwardIntervalSec: String(value.videoProgressForwardIntervalSec || '').trim(),
     directStaticAssets: value.directStaticAssets === true,
     directHlsDash: value.directHlsDash === true,
-    releaseRepo: releaseState.releaseRepo,
-    releaseBranch: releaseState.releaseBranch,
-    releaseTag: releaseState.releaseTag,
-    indexUrl: releaseState.indexUrl || String(value.indexUrl || '').trim(),
     multiLinkCopyPanelEnabled: value.multiLinkCopyPanelEnabled === true,
     dashboardShowD1WriteHotspot: value.dashboardShowD1WriteHotspot === true,
     dashboardShowKvD1Status: value.dashboardShowKvD1Status === true,
@@ -1843,156 +1648,6 @@ function summarizeConfigSnapshotChangedKeys(changedKeys = []) {
         <p class="mt-3 text-sm leading-6 text-slate-300">{{ tile.note }}</p>
       </article>
     </div>
-
-    <article class="form-card mt-6">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="max-w-3xl">
-          <div class="flex items-center gap-3">
-            <Server class="h-5 w-5 text-brand-300" />
-            <h3 class="text-sm font-medium text-white">正式发布源与 Worker 更新</h3>
-          </div>
-          <p class="mt-3 text-sm leading-6 text-slate-300">
-            正式发布仓库已经固定为 <code>{{ releaseSourceState.releaseRepo }}</code>。这里统一维护分支、按分支过滤后的 Tag，
-            同时预览派生出来的 <code>INDEX_URL</code> 与远端 <code>worker.js</code> 来源。
-          </p>
-        </div>
-
-        <div class="flex flex-wrap gap-3">
-          <button
-            type="button"
-            class="secondary-btn"
-            :disabled="authRequired || releaseSourceOptionsLoading || updateWorkerScriptLoading"
-            @click="handleReleaseSourceRefresh"
-          >
-            <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': releaseSourceOptionsLoading }" />
-            {{ releaseSourceOptionsLoading ? '刷新中' : '刷新分支 / Tag' }}
-          </button>
-          <button
-            type="button"
-            class="primary-btn"
-            :disabled="authRequired || releaseSourceOptionsLoading || updateWorkerScriptLoading || !releaseSourceState.releaseBranch"
-            @click="handleUpdateWorkerScript"
-          >
-            <Save class="h-4 w-4" />
-            {{ updateWorkerScriptLoading ? '同步中' : '同步远端 worker.js' }}
-          </button>
-        </div>
-      </div>
-
-      <div class="mt-5 grid gap-4 xl:grid-cols-[1.12fr_0.88fr]">
-        <div class="grid gap-4 md:grid-cols-2">
-          <label class="field-shell">
-            <span class="field-label">固定 GitHub Repo</span>
-            <a
-              :href="releaseRepoHref"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="field-input inline-flex items-center justify-between gap-3 no-underline"
-            >
-              <span class="truncate">{{ releaseSourceState.releaseRepo }}</span>
-              <span class="text-xs text-slate-400">GitHub</span>
-            </a>
-            <span class="field-hint">正式发布源固定，不再接受自定义 repo。</span>
-          </label>
-
-          <label class="field-shell">
-            <span class="field-label">Release Branch</span>
-            <select
-              v-model="form.releaseBranch"
-              class="field-input"
-              :disabled="authRequired || releaseSourceOptionsLoading || updateWorkerScriptLoading"
-              @change="handleReleaseBranchChange"
-            >
-              <option value="">请选择分支</option>
-              <option
-                v-for="branch in releaseBranchOptions"
-                :key="branch.id || branch.name"
-                :value="branch.name"
-              >
-                {{ branch.isDefault ? `${branch.name} (default)` : branch.name }}
-              </option>
-            </select>
-            <span class="field-hint">切换分支后会重新加载该分支可达的 Tag 列表。</span>
-          </label>
-
-          <label class="field-shell md:col-span-2">
-            <span class="field-label">Release Tag</span>
-            <select
-              v-model="form.releaseTag"
-              class="field-input"
-              :disabled="authRequired || releaseSourceOptionsLoading || updateWorkerScriptLoading || !form.releaseBranch"
-              @change="handleReleaseTagChange"
-            >
-              <option value="">使用分支最新提交</option>
-              <option
-                v-for="tag in releaseTagOptions"
-                :key="tag.id || tag.name"
-                :value="tag.name"
-              >
-                {{ tag.name }}
-              </option>
-            </select>
-            <span class="field-hint">
-              {{ releaseTagOptions.length ? '只显示当前分支 head 可达的 tag。' : '当前分支暂无可达 tag，将直接使用分支最新提交。' }}
-            </span>
-          </label>
-
-          <label class="field-shell md:col-span-2">
-            <span class="field-label">INDEX_URL</span>
-            <input :value="releaseSourceState.indexUrl || '未派生'" type="text" class="field-input" readonly />
-            <span class="field-hint">保存设置时会把当前分支 / Tag 派生出的入口地址写回 Worker 配置。</span>
-          </label>
-
-          <label class="field-shell md:col-span-2">
-            <span class="field-label">Worker Source Preview</span>
-            <input :value="releaseSourceState.workerSourceUrl || '未派生'" type="text" class="field-input" readonly />
-            <span class="field-hint">这里只在 Settings 中保留预览，`/admin` 中间设置页不会再展示这个地址。</span>
-          </label>
-        </div>
-
-        <div class="grid gap-4">
-          <div class="rounded-3xl border border-white/10 bg-slate-950/45 px-5 py-4">
-            <p class="field-label">当前生效 ref</p>
-            <p class="mt-3 text-lg font-semibold text-white">
-              {{ releaseSourceState.effectiveRef || '未选择' }}
-            </p>
-            <p class="mt-3 text-sm leading-6 text-slate-300">
-              Tag 优先于分支；若 Tag 留空，则直接使用当前分支最新提交。
-            </p>
-          </div>
-
-          <div class="rounded-3xl border border-white/10 bg-slate-950/45 px-5 py-4">
-            <p class="field-label">最近一次 Worker 更新</p>
-            <template v-if="lastWorkerScriptUpdate.success">
-              <p class="mt-3 text-lg font-semibold text-white">
-                {{ lastWorkerScriptUpdate.effectiveRef || lastWorkerScriptUpdate.releaseBranch || 'unknown' }}
-              </p>
-              <p class="mt-2 text-sm leading-6 text-slate-300">
-                {{ formatDateTime(lastWorkerScriptUpdate.modifiedOn) }}
-              </p>
-              <p class="mt-3 text-sm leading-6 text-slate-300 break-all">
-                {{ lastWorkerScriptUpdate.sourceUrl || 'sourceUrl 未返回' }}
-              </p>
-            </template>
-            <template v-else>
-              <p class="mt-3 text-sm leading-6 text-slate-300">
-                还没有执行过远端 <code>worker.js</code> 同步。这个动作只会更新 Cloudflare Worker 脚本，不会替你保存 Settings。
-              </p>
-            </template>
-          </div>
-
-          <div
-            v-if="releaseSourceError || updateWorkerScriptError"
-            class="rounded-3xl border border-rose-400/25 bg-rose-500/10 px-5 py-4 text-rose-100"
-          >
-            <p class="text-sm font-semibold">发布源 / Worker 更新提示</p>
-            <p class="mt-2 text-sm leading-6">
-              {{ updateWorkerScriptError || releaseSourceError }}
-            </p>
-          </div>
-        </div>
-      </div>
-    </article>
 
     <div class="mt-6 grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
       <article class="form-card">

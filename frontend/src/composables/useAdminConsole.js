@@ -4,8 +4,6 @@ import { callAdminAction, resolveAdminLoginHref } from '@/lib/admin-api';
 import { readInlineAdminBootstrap } from '@/lib/admin-bootstrap';
 import { resolveAdminUrl, runtimeConfig } from '@/config/runtime';
 
-const FIXED_GITHUB_RELEASE_REPO = 'axuitomo/CF-EMBY-PROXY-UI';
-
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -169,104 +167,12 @@ function normalizeWorkerScriptUpdatePayload(rawPayload = {}) {
   };
 }
 
-function normalizeGithubReleaseOptionName(value = '') {
-  return String(value || '').trim();
-}
-
-function normalizeGithubReleaseBranchOption(rawOption = {}, index = 0, defaultBranch = '') {
-  if (typeof rawOption === 'string') {
-    const name = normalizeGithubReleaseOptionName(rawOption);
-    if (!name) return null;
-    return {
-      id: `github-release-branch-${index + 1}`,
-      name,
-      selected: false,
-      isDefault: name === defaultBranch
-    };
-  }
-  if (!isPlainObject(rawOption)) return null;
-
-  const name = normalizeGithubReleaseOptionName(rawOption.name || rawOption.value || rawOption.branch);
-  if (!name) return null;
-  return {
-    id: String(rawOption.id || `github-release-branch-${index + 1}`).trim() || `github-release-branch-${index + 1}`,
-    name,
-    selected: rawOption.selected === true,
-    isDefault: rawOption.isDefault === true || name === defaultBranch
-  };
-}
-
-function normalizeGithubReleaseTagOption(rawOption = {}, index = 0) {
-  if (typeof rawOption === 'string') {
-    const name = normalizeGithubReleaseOptionName(rawOption);
-    if (!name) return null;
-    return {
-      id: `github-release-tag-${index + 1}`,
-      name,
-      commitSha: '',
-      selected: false
-    };
-  }
-  if (!isPlainObject(rawOption)) return null;
-
-  const name = normalizeGithubReleaseOptionName(rawOption.name || rawOption.value || rawOption.tag);
-  if (!name) return null;
-  return {
-    id: String(rawOption.id || `github-release-tag-${index + 1}`).trim() || `github-release-tag-${index + 1}`,
-    name,
-    commitSha: String(rawOption.commitSha || '').trim(),
-    selected: rawOption.selected === true
-  };
-}
-
-function normalizeGithubReleaseSourceOptionsPayload(rawPayload = {}) {
-  const payload = isPlainObject(rawPayload) ? rawPayload : {};
-  const repo = String(payload.repo || FIXED_GITHUB_RELEASE_REPO).trim() || FIXED_GITHUB_RELEASE_REPO;
-  const defaultBranch = normalizeGithubReleaseOptionName(payload.defaultBranch || '');
-  const branches = (Array.isArray(payload.branches) ? payload.branches : [])
-    .map((item, index) => normalizeGithubReleaseBranchOption(item, index, defaultBranch))
-    .filter(Boolean);
-  const tags = (Array.isArray(payload.tags) ? payload.tags : [])
-    .map((item, index) => normalizeGithubReleaseTagOption(item, index))
-    .filter(Boolean);
-  const selectedBranch = normalizeGithubReleaseOptionName(payload.selectedBranch || '')
-    || branches.find((item) => item.selected)?.name
-    || defaultBranch
-    || branches[0]?.name
-    || '';
-  const selectedTag = normalizeGithubReleaseOptionName(payload.selectedTag || '')
-    || tags.find((item) => item.selected)?.name
-    || '';
-  return {
-    repo,
-    defaultBranch,
-    branches: branches.map((item) => ({
-      ...item,
-      selected: item.name === selectedBranch,
-      isDefault: item.isDefault === true || item.name === defaultBranch
-    })),
-    selectedBranch,
-    tags: tags.map((item) => ({
-      ...item,
-      selected: item.name === selectedTag
-    })),
-    selectedTag,
-    effectiveRef: String(payload.effectiveRef || selectedTag || selectedBranch).trim(),
-    indexUrl: String(payload.indexUrl || '').trim(),
-    workerSourceUrl: String(payload.workerSourceUrl || '').trim()
-  };
-}
-
 function createEmptyWorkerPlacementStatus() {
   return normalizeWorkerPlacementStatus({});
 }
 
 function createEmptyWorkerScriptUpdateState() {
   return normalizeWorkerScriptUpdatePayload({});
-}
-
-function createEmptyGithubReleaseSourceOptionsState() {
-  return normalizeGithubReleaseSourceOptionsPayload({});
 }
 
 function normalizeTidyPreviewGroup(rawGroup = {}, index = 0) {
@@ -1451,7 +1357,6 @@ export function useAdminConsole() {
       hydrate: false,
       snapshot: false,
       runtimeStatus: false,
-      githubReleaseSourceOptions: false,
       workerPlacementStatus: false,
       saveWorkerPlacement: false,
       updateWorkerScriptContent: false,
@@ -1494,7 +1399,6 @@ export function useAdminConsole() {
       hydrate: '',
       snapshot: '',
       runtimeStatus: '',
-      githubReleaseSourceOptions: '',
       workerPlacementStatus: '',
       saveWorkerPlacement: '',
       updateWorkerScriptContent: '',
@@ -1536,7 +1440,6 @@ export function useAdminConsole() {
       updateDnsRecord: ''
     },
     settingsBootstrap: null,
-    releaseSourceOptions: createEmptyGithubReleaseSourceOptionsState(),
     workerPlacementStatus: createEmptyWorkerPlacementStatus(),
     lastWorkerScriptUpdate: createEmptyWorkerScriptUpdateState(),
     lastConfigSavedAt: '',
@@ -1572,11 +1475,6 @@ export function useAdminConsole() {
         return this.snapshot.runtimeStatus;
       }
       return isPlainObject(this.adminBootstrap.runtimeStatus) ? this.adminBootstrap.runtimeStatus : {};
-    },
-    get releaseSourceOptions() {
-      return isPlainObject(state.releaseSourceOptions)
-        ? state.releaseSourceOptions
-        : createEmptyGithubReleaseSourceOptionsState();
     },
     get cacheMeta() {
       return isPlainObject(this.snapshot.cacheMeta) ? this.snapshot.cacheMeta : {};
@@ -2223,39 +2121,6 @@ export function useAdminConsole() {
         return null;
       } finally {
         state.loading.runtimeStatus = false;
-      }
-    },
-    async getGithubReleaseSourceOptions(options = {}) {
-      if (state.loading.githubReleaseSourceOptions) return this.releaseSourceOptions;
-
-      const branch = String(options?.branch || '').trim();
-      const hasTag = Object.prototype.hasOwnProperty.call(options || {}, 'tag');
-      const tag = hasTag ? String(options?.tag || '').trim() : '';
-
-      state.loading.githubReleaseSourceOptions = true;
-      state.errors.githubReleaseSourceOptions = '';
-
-      try {
-        const payload = normalizeGithubReleaseSourceOptionsPayload(await callAdminAction('getGithubReleaseSourceOptions', {
-          ...(branch ? { branch } : {}),
-          ...(hasTag ? { tag } : {})
-        }, {
-          seedBootstrap: state.seedBootstrap
-        }));
-
-        state.releaseSourceOptions = payload;
-        state.authRequired = false;
-        return payload;
-      } catch (error) {
-        if (isAuthError(error)) {
-          state.authRequired = true;
-          state.errors.githubReleaseSourceOptions = '';
-        } else {
-          state.errors.githubReleaseSourceOptions = getErrorMessage(error, '发布源选项读取失败');
-        }
-        return null;
-      } finally {
-        state.loading.githubReleaseSourceOptions = false;
       }
     },
     async getWorkerPlacementStatus() {
