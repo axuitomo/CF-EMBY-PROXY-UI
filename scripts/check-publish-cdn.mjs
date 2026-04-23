@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -18,36 +17,31 @@ function parseArgs(argv = []) {
   return args;
 }
 
-function normalizeBaseUrl(value = '') {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  return text.endsWith('/') ? text : `${text}/`;
-}
-
 function normalizeGithubRepoSlug(value = '') {
   const text = String(value || '').trim().replace(/^\/+|\/+$/g, '');
   const match = text.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/);
   return match ? `${match[1]}/${match[2]}` : '';
 }
 
-function parseGithubSlug(remoteUrl = '') {
-  const text = String(remoteUrl || '').trim();
-  const sshMatch = text.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
-  if (sshMatch) {
-    return { owner: sshMatch[1], repo: sshMatch[2] };
-  }
+function normalizeGithubReleaseRefValue(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/[\x00-\x20~^:?*[\]\\]/.test(text)) return '';
+  if (text.includes('..') || text.includes('@{') || text.includes('//')) return '';
+  if (text.startsWith('/') || text.endsWith('/') || text.endsWith('.') || text.endsWith('.lock')) return '';
+  return text;
+}
 
-  const httpsMatch = text.match(/^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?$/i);
-  if (httpsMatch) {
-    return { owner: httpsMatch[1], repo: httpsMatch[2] };
-  }
-
-  throw new Error(`无法从 origin remote 解析 GitHub 仓库：${text}`);
+function buildGithubReleaseAssetUrl(repoSlug = '', releaseTag = '', assetName = '') {
+  const repo = normalizeGithubRepoSlug(repoSlug);
+  const tag = normalizeGithubReleaseRefValue(releaseTag);
+  const normalizedAssetName = String(assetName || '').trim().replace(/^\/+/, '');
+  if (!repo || !tag || !normalizedAssetName) return '';
+  return `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(normalizedAssetName)}`;
 }
 
 const args = parseArgs(process.argv.slice(2));
-const targetRef = String(args.ref || process.env.TARGET_REF || '').trim();
-const cdnBase = normalizeBaseUrl(args['cdn-base'] || process.env.VITE_CDN_BASE_URL || process.env.CDN_BASE_URL || '');
+const targetRef = normalizeGithubReleaseRefValue(args.ref || args.tag || process.env.TARGET_REF || process.env.RELEASE_TAG || '');
 const indexUrl = String(
   args['index-url']
   || process.env.INDEX_URL
@@ -71,51 +65,29 @@ const rawExplicitRepo = String(
 const explicitRepo = normalizeGithubRepoSlug(rawExplicitRepo);
 
 if (!targetRef) {
-  console.error('[check-publish-cdn] 缺少 `--ref <target-ref>`。');
-  process.exit(1);
-}
-
-if (!cdnBase) {
-  console.error('[check-publish-cdn] 缺少 `--cdn-base <VITE_CDN_BASE_URL>`。');
+  console.error('[check-publish-release] 缺少 `--ref <release-tag>`。');
   process.exit(1);
 }
 
 if (!indexUrl) {
-  console.error('[check-publish-cdn] 缺少 `--index-url <INDEX_URL>`。');
+  console.error('[check-publish-release] 缺少 `--index-url <INDEX_URL>`。');
   process.exit(1);
 }
 
 if (!explicitRepo) {
-  console.error(`[check-publish-cdn] 非法 repo slug：${rawExplicitRepo}，请使用 owner/repo。`);
+  console.error(`[check-publish-release] 非法 repo slug：${rawExplicitRepo}，请使用 owner/repo。`);
   process.exit(1);
 }
 
 if (explicitRepo !== FIXED_GITHUB_RELEASE_REPO) {
-  console.error(`[check-publish-cdn] 正式发布仓库已固定为 ${FIXED_GITHUB_RELEASE_REPO}，实际：${explicitRepo}`);
+  console.error(`[check-publish-release] 正式发布仓库已固定为 ${FIXED_GITHUB_RELEASE_REPO}，实际：${explicitRepo}`);
   process.exit(1);
 }
 
-const repoSlug = (() => {
-  if (explicitRepo) {
-    const [owner, repo] = explicitRepo.split('/');
-    return { owner, repo };
-  }
-  const originRemote = execFileSync('git', ['remote', 'get-url', 'origin'], {
-    cwd: process.cwd(),
-    encoding: 'utf8'
-  }).trim();
-  return parseGithubSlug(originRemote);
-})();
-
-const { owner, repo } = repoSlug;
-const expectedBase = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${targetRef}/frontend/dist/`;
-const expectedIndexUrl = new URL('index.html', expectedBase).toString();
-const expectedWorkerUrl = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${targetRef}/worker.js`;
+const expectedIndexUrl = buildGithubReleaseAssetUrl(explicitRepo, targetRef, 'index.html');
+const expectedWorkerUrl = buildGithubReleaseAssetUrl(explicitRepo, targetRef, 'worker.js');
 
 const failures = [];
-if (cdnBase !== expectedBase) {
-  failures.push(`VITE_CDN_BASE_URL 不匹配。期望：${expectedBase}，实际：${cdnBase}`);
-}
 if (indexUrl !== expectedIndexUrl) {
   failures.push(`INDEX_URL 不匹配。期望：${expectedIndexUrl}，实际：${indexUrl}`);
 }
@@ -127,7 +99,7 @@ const releasePanelPath = path.resolve(process.cwd(), 'frontend/src/features/rele
 const frontendCheckPath = path.resolve(process.cwd(), 'frontend/scripts/check-cdn-paths.mjs');
 
 if (failures.length > 0) {
-  console.error('[check-publish-cdn] 校验失败：');
+  console.error('[check-publish-release] 校验失败：');
   for (const failure of failures) {
     console.error(`- ${failure}`);
   }
@@ -136,8 +108,7 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`[check-publish-cdn] 目标 ref ${targetRef} 的 CDN 链接校验通过。`);
-console.log(`[check-publish-cdn] releaseRepo = ${owner}/${repo}`);
-console.log(`[check-publish-cdn] VITE_CDN_BASE_URL = ${expectedBase}`);
-console.log(`[check-publish-cdn] INDEX_URL = ${expectedIndexUrl}`);
-console.log(`[check-publish-cdn] WORKER_SOURCE_URL = ${expectedWorkerUrl}`);
+console.log(`[check-publish-release] 目标 Release Tag ${targetRef} 的发布链接校验通过。`);
+console.log(`[check-publish-release] releaseRepo = ${explicitRepo}`);
+console.log(`[check-publish-release] INDEX_URL = ${expectedIndexUrl}`);
+console.log(`[check-publish-release] WORKER_SOURCE_URL = ${expectedWorkerUrl}`);

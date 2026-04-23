@@ -5429,6 +5429,55 @@ async function listFixedGithubReleaseTags(env = null) {
   return tags;
 }
 
+function normalizeGithubReleaseAssetRecord(asset = {}) {
+  const rawAsset = isPlainObject(asset) ? asset : {};
+  const name = String(rawAsset.name || "").trim();
+  return {
+    id: String(rawAsset.id || "").trim(),
+    name,
+    nameLower: name.toLowerCase(),
+    browserDownloadUrl: normalizeHttpUrl(rawAsset.browser_download_url),
+    contentType: String(rawAsset.content_type || "").trim(),
+    size: Number(rawAsset.size) || 0,
+    updatedAt: String(rawAsset.updated_at || "").trim()
+  };
+}
+
+function normalizeGithubPublishedReleaseRecord(release = {}) {
+  const rawRelease = isPlainObject(release) ? release : {};
+  const tagName = normalizeGithubReleaseRefValue(rawRelease.tag_name);
+  const assets = (Array.isArray(rawRelease.assets) ? rawRelease.assets : [])
+    .map(item => normalizeGithubReleaseAssetRecord(item))
+    .filter(item => item.name);
+  const assetByName = new Map(assets.map(item => [item.nameLower, item]));
+  const indexAsset = assetByName.get("index.html") || null;
+  const workerAsset = assetByName.get("worker.js") || null;
+  return {
+    tagName,
+    title: String(rawRelease.name || "").trim(),
+    targetCommitish: normalizeGithubReleaseRefValue(rawRelease.target_commitish),
+    htmlUrl: normalizeHttpUrl(rawRelease.html_url),
+    publishedAt: String(rawRelease.published_at || "").trim(),
+    createdAt: String(rawRelease.created_at || "").trim(),
+    draft: rawRelease.draft === true,
+    prerelease: rawRelease.prerelease === true,
+    indexUrl: normalizeHttpUrl(indexAsset?.browserDownloadUrl) || buildGithubFrontendIndexUrl(FIXED_GITHUB_RELEASE_REPO, tagName),
+    workerSourceUrl: normalizeHttpUrl(workerAsset?.browserDownloadUrl) || buildGithubWorkerSourceUrl(FIXED_GITHUB_RELEASE_REPO, tagName),
+    hasRequiredAssets: Boolean(tagName && indexAsset && workerAsset),
+    assets
+  };
+}
+
+async function listFixedGithubPublishedReleases(env = null) {
+  const { owner, repo } = splitGithubReleaseRepoSlug(FIXED_GITHUB_RELEASE_REPO);
+  const releasePayload = await fetchGithubApiCollection(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases`, {
+    env
+  });
+  return releasePayload
+    .map(item => normalizeGithubPublishedReleaseRecord(item))
+    .filter(item => item.tagName && item.draft !== true && item.prerelease !== true && item.hasRequiredAssets);
+}
+
 async function isGithubTagReachableFromBranch(tagName = "", branchName = "", env = null) {
   const normalizedTag = normalizeGithubReleaseRefValue(tagName);
   const normalizedBranch = normalizeGithubReleaseRefValue(branchName);
@@ -5480,49 +5529,61 @@ async function buildGithubReleaseSourceOptionsPayload(config = {}, options = {})
   const githubEnv = options?.env || null;
   const requestedBranch = normalizeGithubReleaseRefValue(options?.branch ?? runtimeConfig.releaseBranch);
   const requestedTag = normalizeGithubReleaseRefValue(options?.tag ?? runtimeConfig.releaseTag);
-  const { defaultBranch, branches } = await listFixedGithubReleaseBranches(githubEnv);
-  if (!branches.length) {
+  const releases = await listFixedGithubPublishedReleases(githubEnv);
+  if (!releases.length) {
     throw createStructuredConfigError(
-      "GITHUB_RELEASE_BRANCH_LIST_EMPTY",
-      "固定发布仓库没有可用分支",
+      "GITHUB_RELEASE_LIST_EMPTY",
+      "固定发布仓库没有可用的已发布 Release（需同时包含 index.html 和 worker.js）",
       502,
       { repo: FIXED_GITHUB_RELEASE_REPO }
     );
   }
 
-  const selectedBranch = branches.includes(requestedBranch)
-    ? requestedBranch
-    : (defaultBranch || branches[0] || "");
-  const reachableTags = await filterGithubTagsReachableFromBranch(
-    await listFixedGithubReleaseTags(githubEnv),
-    selectedBranch,
-    githubEnv
-  );
-  const selectedTag = requestedTag && reachableTags.some(item => item.name === requestedTag)
-    ? requestedTag
-    : "";
-  const effectiveRef = selectedTag || selectedBranch;
-  const effectiveRefType = resolveGithubReleaseEffectiveRefType(selectedTag, selectedBranch);
+  const selectedRelease = (() => {
+    if (requestedTag) {
+      return releases.find(item => item.tagName === requestedTag) || null;
+    }
+    if (requestedBranch) {
+      return releases.find(item => item.targetCommitish === requestedBranch) || null;
+    }
+    return releases[0] || null;
+  })();
+  const fallbackRelease = selectedRelease || releases[0] || null;
+  const selectedTag = normalizeGithubReleaseRefValue(fallbackRelease?.tagName);
+  const selectedBranch = normalizeGithubReleaseRefValue(fallbackRelease?.targetCommitish);
+  const effectiveRef = selectedTag;
+  const effectiveRefType = selectedTag ? "tag" : resolveGithubReleaseEffectiveRefType("", selectedBranch);
+  const releasePreviews = releases.map(item => ({
+    tag: item.tagName,
+    title: item.title || item.tagName,
+    targetCommitish: item.targetCommitish,
+    htmlUrl: item.htmlUrl,
+    publishedAt: item.publishedAt || item.createdAt,
+    indexUrl: item.indexUrl,
+    workerSourceUrl: item.workerSourceUrl,
+    selected: item.tagName === selectedTag
+  }));
 
   return {
     repo: FIXED_GITHUB_RELEASE_REPO,
-    defaultBranch,
-    branches: branches.map(name => ({
-      name,
-      selected: name === selectedBranch,
-      isDefault: name === defaultBranch
-    })),
+    defaultBranch: selectedBranch,
+    branches: selectedBranch ? [{
+      name: selectedBranch,
+      selected: true,
+      isDefault: true
+    }] : [],
     selectedBranch,
-    tags: reachableTags.map(item => ({
-      name: item.name,
-      commitSha: String(item.commitSha || "").trim(),
-      selected: item.name === selectedTag
+    tags: releases.map(item => ({
+      name: item.tagName,
+      commitSha: item.targetCommitish,
+      selected: item.tagName === selectedTag
     })),
+    releases: releasePreviews,
     selectedTag,
     effectiveRef,
     effectiveRefType,
-    indexUrl: buildGithubFrontendIndexUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef),
-    workerSourceUrl: buildGithubWorkerSourceUrl(FIXED_GITHUB_RELEASE_REPO, effectiveRef)
+    indexUrl: String(fallbackRelease?.indexUrl || "").trim(),
+    workerSourceUrl: String(fallbackRelease?.workerSourceUrl || "").trim()
   };
 }
 
@@ -5544,6 +5605,14 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   };
   assertReleaseSourceConfigValid(releaseConfig);
   const requestedTag = normalizeGithubReleaseRefValue(releaseConfig.releaseTag);
+  if (!requestedTag) {
+    throw createStructuredConfigError(
+      "RELEASE_TAG_REQUIRED",
+      "Worker 更新前请先配置一个已发布的 Release Tag",
+      400,
+      { field: "releaseTag" }
+    );
+  }
   const releaseOptions = await buildGithubReleaseSourceOptionsPayload(releaseConfig, {
     branch: releaseConfig.releaseBranch,
     tag: releaseConfig.releaseTag,
@@ -5551,9 +5620,9 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   });
   if (requestedTag && requestedTag !== releaseOptions.selectedTag) {
     throw createStructuredConfigError(
-      "RELEASE_TAG_NOT_REACHABLE",
-      `当前分支 ${releaseOptions.selectedBranch} 下找不到可达的 tag：${requestedTag}`,
-      400,
+      "RELEASE_TAG_NOT_FOUND",
+      `找不到已发布且包含 index.html / worker.js 的 Release Tag：${requestedTag}`,
+      404,
       {
         repo: FIXED_GITHUB_RELEASE_REPO,
         releaseBranch: releaseOptions.selectedBranch,
@@ -5577,14 +5646,14 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
     derivedIndexUrl: releaseOptions.indexUrl,
     workerSourceUrl: releaseOptions.workerSourceUrl
   };
-  if (!indexState.releaseRepo || !indexState.releaseBranch || !indexState.workerSourceUrl) {
+  if (!indexState.releaseRepo || !indexState.releaseTag || !indexState.workerSourceUrl) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_SOURCE_REQUIRED",
-      "Worker 更新前请先配置固定发布仓库的分支",
+      "Worker 更新前请先配置一个已发布的 Release Tag",
       400,
       {
         releaseRepo: indexState.releaseRepo,
-        releaseBranch: indexState.releaseBranch
+        releaseTag: indexState.releaseTag
       }
     );
   }
@@ -5600,7 +5669,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   } catch (error) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_FETCH_FAILED",
-      `拉取发布源 worker.js 失败：${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
+      `拉取 Release worker.js 资产失败：${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
       502,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5614,8 +5683,8 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
     throw createStructuredConfigError(
       response.status === 404 ? "WORKER_RELEASE_SOURCE_NOT_FOUND" : "WORKER_RELEASE_FETCH_FAILED",
       response.status === 404
-        ? "发布源中的 worker.js 不存在，请检查仓库、分支/标签和文件路径"
-        : `拉取发布源 worker.js 失败（HTTP ${response.status}）`,
+        ? "所选 Release 中缺少 worker.js 资产，请检查发行版文件"
+        : `拉取 Release worker.js 资产失败（HTTP ${response.status}）`,
       response.status === 404 ? 404 : 502,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5630,7 +5699,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (!isAcceptedGithubWorkerContentType(contentType)) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_CONTENT_TYPE_INVALID",
-      `发布源 worker.js 返回的内容类型无效：${contentType || "unknown"}`,
+      `Release worker.js 资产返回的内容类型无效：${contentType || "unknown"}`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5643,7 +5712,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (Number.isFinite(contentLength) && contentLength > GITHUB_RELEASE_WORKER_MAX_BYTES) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_TOO_LARGE",
-      `发布源 worker.js 体积超过限制（${contentLength} bytes）`,
+      `Release worker.js 资产体积超过限制（${contentLength} bytes）`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5658,7 +5727,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (!String(scriptContent || "").trim()) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_EMPTY",
-      "发布源 worker.js 为空，无法更新 Worker",
+      "Release worker.js 资产为空，无法更新 Worker",
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -5669,7 +5738,7 @@ async function fetchGithubReleaseWorkerScriptSource(config = {}, overrides = {})
   if (scriptBytes > GITHUB_RELEASE_WORKER_MAX_BYTES) {
     throw createStructuredConfigError(
       "WORKER_RELEASE_TOO_LARGE",
-      `发布源 worker.js 体积超过限制（${scriptBytes} bytes）`,
+      `Release worker.js 资产体积超过限制（${scriptBytes} bytes）`,
       400,
       {
         sourceUrl: indexState.workerSourceUrl,
@@ -7786,18 +7855,20 @@ function splitGithubReleaseRepoSlug(repoSlug = "") {
   };
 }
 
+function buildGithubReleaseAssetDownloadUrl(repoSlug = "", tag = "", assetName = "") {
+  const { owner, repo } = splitGithubReleaseRepoSlug(repoSlug);
+  const releaseTag = normalizeGithubReleaseRefValue(tag);
+  const normalizedAssetName = String(assetName || "").trim().replace(/^\/+/, "");
+  if (!owner || !repo || !releaseTag || !normalizedAssetName) return "";
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(normalizedAssetName)}`;
+}
+
 function buildGithubWorkerSourceUrl(repoSlug = "", ref = "") {
-  const normalizedRepoSlug = normalizeGithubReleaseRepoSlug(repoSlug);
-  const effectiveRef = normalizeGithubReleaseRefValue(ref);
-  if (!normalizedRepoSlug || !effectiveRef) return "";
-  return `https://cdn.jsdelivr.net/gh/${normalizedRepoSlug}@${encodeURIComponent(effectiveRef)}/worker.js`;
+  return buildGithubReleaseAssetDownloadUrl(repoSlug, ref, "worker.js");
 }
 
 function buildGithubFrontendIndexUrl(repoSlug = "", ref = "") {
-  const normalizedRepoSlug = normalizeGithubReleaseRepoSlug(repoSlug);
-  const effectiveRef = normalizeGithubReleaseRefValue(ref);
-  if (!normalizedRepoSlug || !effectiveRef) return "";
-  return `https://cdn.jsdelivr.net/gh/${normalizedRepoSlug}@${encodeURIComponent(effectiveRef)}/frontend/dist/index.html`;
+  return buildGithubReleaseAssetDownloadUrl(repoSlug, ref, "index.html");
 }
 
 function resolveGithubReleaseEffectiveRefType(releaseTag = "", releaseBranch = "") {
@@ -7813,7 +7884,7 @@ function buildResolvedAdminIndexState(env = null, config = {}) {
   const releaseTag = normalizeGithubReleaseRefValue(runtimeConfig.releaseTag);
   const effectiveRef = releaseTag || releaseBranch;
   const effectiveRefType = resolveGithubReleaseEffectiveRefType(releaseTag, releaseBranch);
-  const derivedIndexUrl = buildGithubFrontendIndexUrl(releaseRepo, effectiveRef);
+  const derivedIndexUrl = releaseTag ? buildGithubFrontendIndexUrl(releaseRepo, releaseTag) : "";
   const configIndexUrl = normalizeHttpUrl(runtimeConfig.indexUrl);
   const envIndexUrl = normalizeHttpUrl(env?.INDEX_URL);
   const indexUrl = derivedIndexUrl || configIndexUrl || envIndexUrl;
@@ -7827,13 +7898,13 @@ function buildResolvedAdminIndexState(env = null, config = {}) {
     effectiveRef,
     effectiveRefType,
     derivedIndexUrl,
-    workerSourceUrl: buildGithubWorkerSourceUrl(releaseRepo, effectiveRef),
+    workerSourceUrl: releaseTag ? buildGithubWorkerSourceUrl(releaseRepo, releaseTag) : "",
     configIndexUrl,
     envIndexUrl,
     indexUrl,
     persistedIndexUrl: derivedIndexUrl || configIndexUrl,
     indexUrlSource,
-    hasGithubRelease: Boolean(releaseRepo && releaseBranch),
+    hasGithubRelease: Boolean(releaseRepo && releaseTag),
     hasDerivedIndexUrl: Boolean(derivedIndexUrl),
     gateState: indexUrl ? "shell_ready" : "setup_required"
   };
@@ -7845,8 +7916,6 @@ function assertReleaseSourceConfigValid(rawConfig = {}) {
   const rawReleaseBranch = String(inputConfig.releaseBranch || "").trim();
   const rawReleaseTag = String(inputConfig.releaseTag || "").trim();
   const rawIndexUrl = String(inputConfig.indexUrl || "").trim();
-  const hasReleaseSelection = Boolean(rawReleaseBranch || rawReleaseTag);
-
   if (rawReleaseRepo && !normalizeGithubReleaseRepoSlug(rawReleaseRepo)) {
     throw createStructuredConfigError(
       "RELEASE_REPO_INVALID",
@@ -7885,17 +7954,6 @@ function assertReleaseSourceConfigValid(rawConfig = {}) {
       400,
       { field: "releaseTag", value: rawReleaseTag }
     );
-  }
-
-  if (hasReleaseSelection) {
-    if (!rawReleaseBranch) {
-      throw createStructuredConfigError(
-        "RELEASE_BRANCH_REQUIRED",
-        "配置 GitHub 发布源时必须填写 releaseBranch",
-        400,
-        { field: "releaseBranch" }
-      );
-    }
   }
 
   if (rawIndexUrl && !normalizeHttpUrl(rawIndexUrl)) {
@@ -22555,6 +22613,14 @@ const ADMIN_REMOTE_SHELL_CACHED_AT_HEADER = "X-Admin-Shell-Cached-At";
 const ADMIN_REMOTE_SHELL_SOURCE_ETAG_HEADER = "X-Admin-Shell-Source-Etag";
 const ADMIN_REMOTE_SHELL_SOURCE_LAST_MODIFIED_HEADER = "X-Admin-Shell-Source-Last-Modified";
 const ADMIN_REMOTE_SHELL_SOURCE_HASH_HEADER = "X-Admin-Shell-Source-Hash";
+const ADMIN_RELEASE_PROXY_PATH_SEGMENT = "__release";
+const ADMIN_RELEASE_VENDOR_PATH_SEGMENT = "vendor";
+const ADMIN_RELEASE_VENDOR_CACHE_KEY_ORIGIN = "https://admin-release-vendor-cache.invalid";
+const ADMIN_RELEASE_VENDOR_MANIFEST_CACHE_KEY_ORIGIN = "https://admin-release-vendor-manifest.invalid";
+const ADMIN_RELEASE_VENDOR_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const ADMIN_RELEASE_VENDOR_MAX_BYTES = 8 * 1024 * 1024;
+const ADMIN_RELEASE_VENDOR_CACHED_AT_HEADER = "X-Admin-Release-Vendor-Cached-At";
+const ADMIN_RELEASE_VENDOR_SOURCE_HASH_HEADER = "X-Admin-Release-Vendor-Source-Hash";
 const ADMIN_PRIMARY_VIEWS = Object.freeze([
   "dashboard",
   "nodes",
@@ -22879,7 +22945,7 @@ function buildAdminRemoteShellErrorContent(bootstrap = {}, shellState = {}, init
           ${loginPath ? `<a href="${escapeHtml(loginPath)}" class="admin-remote-error-btn admin-remote-error-btn-secondary">打开登录页</a>` : ""}
           ${remoteShellIndexUrl ? `<a href="${escapeHtml(remoteShellIndexUrl)}" class="admin-remote-error-btn admin-remote-error-btn-secondary" target="_blank" rel="noopener noreferrer">打开远端 index.html</a>` : ""}
         </div>
-        <p class="admin-remote-error-note">如果这里继续报错，请优先检查远端 index.html、CDN 静态资源路径和当前发布源配置。</p>
+        <p class="admin-remote-error-note">如果这里继续报错，请优先检查 Release 的 index.html、Worker vendor 代理链路，以及当前发布源配置。</p>
       </div>
     </section>
   </div>`;
@@ -22943,9 +23009,9 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     <section class="admin-gate-card">
       <div class="admin-gate-hero">
         <div class="admin-gate-kicker">Index Source Required</div>
-        <h1 class="admin-gate-title">先配置 GitHub 发布源，再进入 /admin 壳层</h1>
-        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会固定使用 <code>${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</code>，只让你选择分支与可达 Tag，并自动派生正式前端入口和 Worker 发布源。</p>
-        <p class="admin-gate-note">正式版本请优先选择 Tag；Tag 留空时表示直接使用所选分支的最新提交，只属于兼容/测试路径。这里不会执行 Worker 更新，只会把正式发布源配置写回当前系统设置。</p>
+        <h1 class="admin-gate-title">先锁定 GitHub Release，再进入 /admin 壳层</h1>
+        <p class="admin-gate-desc">你已经通过登录验证，但当前还没有可用的 <code>INDEX_URL</code>。这里会固定使用 <code>${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</code>，并只允许你选择同时包含 <code>index.html</code> 与 <code>worker.js</code> 的已发布 Release Tag。</p>
+        <p class="admin-gate-note">正式版本只认 Release Tag。这里会自动派生 Release 的 <code>INDEX_URL</code> 与 <code>WORKER_SOURCE_URL</code>，并把 <code>target_commitish</code> 回写到 <code>releaseBranch</code> 作为兼容镜像字段。</p>
       </div>
       <div class="admin-gate-body">
         <form id="admin-index-gate-form" class="admin-gate-form-grid" novalidate>
@@ -22960,16 +23026,14 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
             >${escapeHtml(FIXED_GITHUB_RELEASE_REPO)}</a>
           </label>
           <label class="admin-gate-field">
-            <span class="admin-gate-label">Release Branch</span>
-            <select id="admin-gate-release-branch" class="admin-gate-input">
-              <option value="">正在加载分支...</option>
-            </select>
-          </label>
-          <label class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">Release Tag</span>
             <select id="admin-gate-release-tag" class="admin-gate-input">
-              <option value="">使用分支最新提交</option>
+              <option value="">正在加载 Release...</option>
             </select>
+          </label>
+          <label class="admin-gate-field">
+            <span class="admin-gate-label">Target Commitish</span>
+            <input id="admin-gate-release-branch" class="admin-gate-readonly" type="text" value="${escapeHtml(String(indexState.releaseBranch || "").trim())}" readonly />
           </label>
           <label class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">INDEX_URL</span>
@@ -22981,11 +23045,11 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
           </label>
           <div class="admin-gate-field admin-gate-field-full">
             <span class="admin-gate-label">当前状态</span>
-            <div id="admin-gate-status" class="admin-gate-status" role="status" aria-live="polite">正在加载固定发布仓库的分支与 Tag 选项...</div>
+            <div id="admin-gate-status" class="admin-gate-status" role="status" aria-live="polite">正在加载固定发布仓库的 Release 选项...</div>
           </div>
           <div class="admin-gate-actions admin-gate-field-full">
             <button id="admin-gate-submit" type="submit" class="admin-gate-btn admin-gate-btn-primary">保存并进入 /admin</button>
-            <button id="admin-gate-refresh" type="button" class="admin-gate-btn admin-gate-btn-secondary">刷新分支 / Tag</button>
+            <button id="admin-gate-refresh" type="button" class="admin-gate-btn admin-gate-btn-secondary">刷新 Release</button>
             <a href="${escapeHtml(loginPath)}" class="admin-gate-btn admin-gate-btn-secondary">回到登录页</a>
           </div>
         </form>
@@ -23004,8 +23068,7 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     const gateStatus = document.getElementById("admin-gate-status");
     const gateState = {
       repo: String(ADMIN_INDEX_GATE_RUNTIME.releaseRepo || "").trim() || "${FIXED_GITHUB_RELEASE_REPO}",
-      branches: [],
-      tags: []
+      releases: []
     };
 
     function setGateStatus(message, tone) {
@@ -23025,33 +23088,50 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       return raw;
     }
 
+    function buildReleaseAssetUrl(repo, releaseTag, assetName) {
+      const normalizedRepo = String(repo || "").trim().replace(/^\\/+|\\/+$/g, "");
+      const normalizedTag = normalizeReleaseRef(releaseTag);
+      const normalizedAssetName = String(assetName || "").trim().replace(/^\\/+/, "");
+      if (!normalizedRepo || !normalizedTag || !normalizedAssetName) return "";
+      return "https://github.com/" + normalizedRepo + "/releases/download/" + encodeURIComponent(normalizedTag) + "/" + encodeURIComponent(normalizedAssetName);
+    }
+
     function buildDerivedState() {
       const releaseRepo = String(gateState.repo || "${FIXED_GITHUB_RELEASE_REPO}").trim() || "${FIXED_GITHUB_RELEASE_REPO}";
-      const releaseBranch = normalizeReleaseRef(releaseBranchInput?.value || "");
       const releaseTag = normalizeReleaseRef(releaseTagInput?.value || "");
-      const effectiveRef = releaseTag || releaseBranch;
-      const effectiveRefType = releaseTag ? "tag" : (releaseBranch ? "branch" : "");
-      const indexUrl = releaseRepo && effectiveRef
-        ? "https://cdn.jsdelivr.net/gh/" + releaseRepo + "@" + encodeURIComponent(effectiveRef) + "/frontend/dist/index.html"
+      const matchedRelease = gateState.releases.find((release) => normalizeReleaseRef(release?.tag || "") === releaseTag) || null;
+      const releaseBranch = normalizeReleaseRef(matchedRelease?.targetCommitish || "");
+      const indexUrl = releaseTag
+        ? (String(matchedRelease?.indexUrl || "").trim() || buildReleaseAssetUrl(releaseRepo, releaseTag, "index.html"))
         : "";
-      const workerSourceUrl = releaseRepo && effectiveRef
-        ? "https://cdn.jsdelivr.net/gh/" + releaseRepo + "@" + encodeURIComponent(effectiveRef) + "/worker.js"
+      const workerSourceUrl = releaseTag
+        ? (String(matchedRelease?.workerSourceUrl || "").trim() || buildReleaseAssetUrl(releaseRepo, releaseTag, "worker.js"))
         : "";
-      return { releaseRepo, releaseBranch, releaseTag, effectiveRef, effectiveRefType, indexUrl, workerSourceUrl };
+      return {
+        releaseRepo,
+        releaseBranch,
+        releaseTag,
+        effectiveRef: releaseTag,
+        effectiveRefType: releaseTag ? "tag" : "",
+        indexUrl,
+        workerSourceUrl,
+        publishedAt: String(matchedRelease?.publishedAt || "").trim()
+      };
     }
 
     function buildReleaseSelectionStatus(nextState = {}) {
-      if (!nextState.releaseBranch) {
-        return "请先选择一个分支；正式版本建议锁定 Tag。";
+      if (!nextState.releaseTag) {
+        return "请选择一个已发布且包含 index.html / worker.js 的 Release Tag。";
       }
-      if (nextState.releaseTag) {
-        return "当前已锁定 Tag " + nextState.releaseTag + "，保存后会使用同一 Tag 派生 INDEX_URL 与 Worker URL。";
+      if (nextState.releaseBranch) {
+        return "当前已锁定 Release Tag " + nextState.releaseTag + "，target_commitish 为 " + nextState.releaseBranch + "。";
       }
-      return "当前未选择 Tag，保存后会跟踪分支最新提交；这是兼容/测试路径，不视为正式版本。";
+      return "当前已锁定 Release Tag " + nextState.releaseTag + "。";
     }
 
     function syncDerivedPreview() {
       const nextState = buildDerivedState();
+      if (releaseBranchInput) releaseBranchInput.value = nextState.releaseBranch;
       if (indexUrlInput) indexUrlInput.value = nextState.indexUrl;
       if (workerSourceUrlInput) workerSourceUrlInput.value = nextState.workerSourceUrl;
       return nextState;
@@ -23061,52 +23141,34 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       const disabled = pending === true;
       if (submitButton) submitButton.disabled = disabled;
       if (refreshButton) refreshButton.disabled = disabled;
-      if (releaseBranchInput) releaseBranchInput.disabled = disabled;
       if (releaseTagInput) releaseTagInput.disabled = disabled;
     }
 
-    function fillBranchOptions(branches, selectedBranch) {
-      if (!releaseBranchInput) return;
-      const branchList = Array.isArray(branches) ? branches : [];
-      releaseBranchInput.innerHTML = branchList.length
-        ? branchList.map((branch) => {
-          const branchName = normalizeReleaseRef(branch && typeof branch === "object" ? branch.name : branch);
-          if (!branchName) return "";
-          const isDefault = branch && typeof branch === "object" && branch.isDefault === true;
-          const label = isDefault ? branchName + " (default)" : branchName;
-          return '<option value="' + branchName + '">' + label + '</option>';
-        }).join("")
-        : '<option value="">没有可用分支</option>';
-      releaseBranchInput.value = selectedBranch || "";
-    }
-
-    function fillTagOptions(tags, selectedTag) {
+    function fillReleaseOptions(releases, selectedTag) {
       if (!releaseTagInput) return;
-      const tagList = Array.isArray(tags) ? tags : [];
-      releaseTagInput.innerHTML = '<option value="">使用分支最新提交</option>' + tagList.map((tag) => {
-        const tagName = normalizeReleaseRef(tag && typeof tag === "object" ? tag.name : tag);
+      const releaseList = Array.isArray(releases) ? releases : [];
+      releaseTagInput.innerHTML = '<option value="">请选择已发布 Release</option>' + releaseList.map((release) => {
+        const tagName = normalizeReleaseRef(release && typeof release === "object" ? release.tag : release);
         if (!tagName) return "";
-        return '<option value="' + tagName + '">' + tagName + '</option>';
+        const title = String(release?.title || tagName).trim() || tagName;
+        const publishedAt = String(release?.publishedAt || "").trim();
+        const label = publishedAt ? (tagName + " · " + title + " · " + publishedAt) : (tagName + " · " + title);
+        return '<option value="' + tagName + '">' + label + '</option>';
       }).join("");
       releaseTagInput.value = selectedTag || "";
     }
 
     function applyReleaseOptions(payload) {
-      const branchOptions = Array.isArray(payload?.branches) ? payload.branches : [];
-      const tagOptions = Array.isArray(payload?.tags) ? payload.tags : [];
+      const releaseOptions = Array.isArray(payload?.releases) ? payload.releases : [];
       gateState.repo = String(payload?.repo || gateState.repo || "${FIXED_GITHUB_RELEASE_REPO}").trim() || "${FIXED_GITHUB_RELEASE_REPO}";
-      gateState.branches = branchOptions;
-      gateState.tags = tagOptions;
-      fillBranchOptions(branchOptions, normalizeReleaseRef(payload?.selectedBranch || ""));
-      fillTagOptions(tagOptions, normalizeReleaseRef(payload?.selectedTag || ""));
+      gateState.releases = releaseOptions;
+      fillReleaseOptions(releaseOptions, normalizeReleaseRef(payload?.selectedTag || ""));
       const nextState = syncDerivedPreview();
       setGateStatus(buildReleaseSelectionStatus(nextState), nextState.effectiveRefType === "tag" ? "success" : "");
     }
 
     async function fetchReleaseOptions(options = {}) {
-      const branch = normalizeReleaseRef(options.branch);
-      const hasTag = Object.prototype.hasOwnProperty.call(options, "tag");
-      const tag = hasTag ? normalizeReleaseRef(options.tag) : normalizeReleaseRef(releaseTagInput?.value || "");
+      const tag = normalizeReleaseRef(options.tag || releaseTagInput?.value || "");
       const response = await fetch(ADMIN_INDEX_GATE_RUNTIME.adminPath || "/admin", {
         method: "POST",
         credentials: "same-origin",
@@ -23116,43 +23178,31 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
         },
         body: JSON.stringify({
           action: "getGithubReleaseSourceOptions",
-          branch,
-          ...(hasTag ? { tag } : {})
+          ...(tag ? { tag } : {})
         })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const message = payload?.message || payload?.error?.message || payload?.error || ("分支 / Tag 读取失败（HTTP " + response.status + "）");
-        throw new Error(String(message || "分支 / Tag 读取失败"));
+        const message = payload?.message || payload?.error?.message || payload?.error || ("Release 读取失败（HTTP " + response.status + "）");
+        throw new Error(String(message || "Release 读取失败"));
       }
       return payload;
     }
 
     async function refreshReleaseOptions(options = {}) {
       setButtonPending(true);
-      setGateStatus("正在加载固定发布仓库的分支与 Tag 选项...", "");
+      setGateStatus("正在加载固定发布仓库的 Release 选项...", "");
       try {
         const payload = await fetchReleaseOptions(options);
         applyReleaseOptions(payload);
         return payload;
       } catch (error) {
-        setGateStatus(error?.message ? "分支 / Tag 读取失败：" + error.message : "分支 / Tag 读取失败，请稍后重试。", "error");
+        setGateStatus(error?.message ? "Release 读取失败：" + error.message : "Release 读取失败，请稍后重试。", "error");
         return null;
       } finally {
         setButtonPending(false);
       }
     }
-
-    releaseBranchInput?.addEventListener("change", async () => {
-      const selectedBranch = normalizeReleaseRef(releaseBranchInput.value || "");
-      fillTagOptions([], "");
-      setGateStatus("正在按所选分支刷新可达 Tag...", "");
-      syncDerivedPreview();
-      await refreshReleaseOptions({
-        branch: selectedBranch,
-        tag: ""
-      });
-    });
 
     releaseTagInput?.addEventListener("change", () => {
       const nextState = syncDerivedPreview();
@@ -23161,7 +23211,6 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
 
     refreshButton?.addEventListener("click", async () => {
       await refreshReleaseOptions({
-        branch: releaseBranchInput?.value || ADMIN_INDEX_GATE_RUNTIME.releaseBranch || "",
         tag: releaseTagInput?.value || ""
       });
     });
@@ -23169,13 +23218,13 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
     gateForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const nextState = syncDerivedPreview();
-      if (!nextState.releaseBranch) {
-        setGateStatus("请先选择一个分支；Tag 可以留空，但分支必须存在。", "error");
-        releaseBranchInput?.focus();
+      if (!nextState.releaseTag) {
+        setGateStatus("请选择一个已发布的 Release Tag。", "error");
+        releaseTagInput?.focus();
         return;
       }
       if (!nextState.indexUrl) {
-        setGateStatus("当前选择还不能派生出有效 INDEX_URL，请检查分支和标签。", "error");
+        setGateStatus("当前选择还不能派生出有效 INDEX_URL，请检查 Release。", "error");
         return;
       }
 
@@ -23222,11 +23271,9 @@ function buildAdminIndexSetupContent(bootstrap = {}, shellState = {}, initHealth
       }
     });
 
-    fillBranchOptions([], "");
-    fillTagOptions([], "");
+    fillReleaseOptions([], "");
     syncDerivedPreview();
     refreshReleaseOptions({
-      branch: ADMIN_INDEX_GATE_RUNTIME.releaseBranch || "",
       tag: ADMIN_INDEX_GATE_RUNTIME.releaseTag || ""
     });
   </script>`;
@@ -23348,15 +23395,20 @@ function requestMatchesAdminHtmlResponse(request, response) {
   return requestHasMatchingLastModified(request, response?.headers?.get?.("Last-Modified") || "");
 }
 
-function buildAdminNotModifiedResponseFrom(response, cacheControl = ADMIN_HTML_CACHE_CONTROL) {
-  const headers = buildAdminHtmlResponseHeaders(
-    normalizeEtagToken(response?.headers?.get?.("ETag") || ""),
-    cacheControl
-  );
+function buildConditionalNotModifiedResponseFromStoredResponse(response, cacheControl = "no-store, max-age=0") {
+  const headers = new Headers({
+    "Cache-Control": String(cacheControl || "no-store, max-age=0")
+  });
+  const etag = normalizeEtagToken(response?.headers?.get?.("ETag") || "");
   const lastModified = normalizeAdminHttpDateHeader(response?.headers?.get?.("Last-Modified") || "");
+  if (etag) headers.set("ETag", formatAdminHtmlEtag(etag));
   if (lastModified) headers.set("Last-Modified", lastModified);
-  headers.delete("Content-Type");
+  applySecurityHeaders(headers);
   return new Response(null, { status: 304, headers });
+}
+
+function buildAdminNotModifiedResponseFrom(response, cacheControl = ADMIN_HTML_CACHE_CONTROL) {
+  return buildConditionalNotModifiedResponseFromStoredResponse(response, cacheControl);
 }
 
 function buildAdminRemoteBootstrapMarkup(bootstrapJson = "{}") {
@@ -23415,7 +23467,7 @@ function applyAdminRemoteBootstrapMarkup(html = "", bootstrapJson = "{}") {
   return injectMarkupIntoHtmlDocument(sourceHtml, buildAdminRemoteBootstrapMarkup(bootstrapJson));
 }
 
-function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
+function extractAdminRemoteShellAssetDescriptors(html = "", baseUrl = "") {
   const sourceHtml = String(html || "");
   if (!sourceHtml) return [];
 
@@ -23426,7 +23478,7 @@ function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
     resolvedBaseUrl = null;
   }
 
-  const assetUrls = [];
+  const assetDescriptors = [];
   const assetMatches = sourceHtml.matchAll(/\b(?:src|href)=["']([^"'#][^"']*)["']/gi);
   for (const match of assetMatches) {
     const rawAssetUrl = String(match?.[1] || "").trim();
@@ -23436,13 +23488,111 @@ function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
       const normalizedAssetUrl = resolvedBaseUrl
         ? new URL(rawAssetUrl, resolvedBaseUrl).toString()
         : new URL(rawAssetUrl).toString();
-      assetUrls.push(normalizedAssetUrl);
+      assetDescriptors.push({
+        rawValue: rawAssetUrl,
+        normalizedUrl: normalizedAssetUrl,
+        assetKind: /\.css(?:[?#]|$)/i.test(normalizedAssetUrl) ? "css" : "script"
+      });
     } catch {
       continue;
     }
   }
 
-  return [...new Set(assetUrls)];
+  return assetDescriptors.filter((item, index, list) =>
+    list.findIndex(candidate => candidate.normalizedUrl === item.normalizedUrl) === index
+  );
+}
+
+function extractAdminRemoteShellAssetUrls(html = "", baseUrl = "") {
+  return extractAdminRemoteShellAssetDescriptors(html, baseUrl).map(item => item.normalizedUrl);
+}
+
+function escapeRegexForRoute(value = "") {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildAdminReleaseVendorAssetKey(assetUrl = "", assetKind = "") {
+  const normalizedAssetUrl = String(assetUrl || "").trim();
+  const normalizedAssetKind = String(assetKind || "").trim().toLowerCase() === "css" ? "css" : "js";
+  if (!normalizedAssetUrl) return "";
+  return `${hashStableText(normalizedAssetUrl)}.${normalizedAssetKind}`;
+}
+
+function buildAdminReleaseVendorProxyPath(adminPath = "/admin", releaseTag = "", assetKey = "") {
+  const normalizedAdminPath = sanitizeProxyPath(adminPath || "/admin").replace(/\/+$/, "") || "/admin";
+  const normalizedReleaseTag = normalizeGithubReleaseRefValue(releaseTag);
+  const normalizedAssetKey = String(assetKey || "").trim();
+  if (!normalizedReleaseTag || !normalizedAssetKey) return "";
+  return `${normalizedAdminPath}/${ADMIN_RELEASE_PROXY_PATH_SEGMENT}/${encodeURIComponent(normalizedReleaseTag)}/${ADMIN_RELEASE_VENDOR_PATH_SEGMENT}/${encodeURIComponent(normalizedAssetKey)}`;
+}
+
+function buildAdminReleaseVendorManifest(html = "", options = {}) {
+  const descriptors = extractAdminRemoteShellAssetDescriptors(html, options.baseUrl || options.sourceUrl || "");
+  const entries = descriptors
+    .map(item => ({
+      assetKey: buildAdminReleaseVendorAssetKey(item.normalizedUrl, item.assetKind),
+      assetKind: item.assetKind,
+      upstreamUrl: item.normalizedUrl
+    }))
+    .filter(item => item.assetKey && item.upstreamUrl)
+    .filter((item, index, list) => list.findIndex(candidate => candidate.assetKey === item.assetKey) === index);
+  return {
+    version: 1,
+    releaseTag: normalizeGithubReleaseRefValue(options.releaseTag),
+    sourceUrl: normalizeHttpUrl(options.sourceUrl || options.baseUrl || ""),
+    entries
+  };
+}
+
+function rewriteAdminRemoteShellAssetUrlsToProxy(html = "", manifest = {}, options = {}) {
+  const sourceHtml = String(html || "");
+  if (!sourceHtml) return sourceHtml;
+  const adminPath = String(options.adminPath || "/admin").trim() || "/admin";
+  const releaseTag = normalizeGithubReleaseRefValue(options.releaseTag);
+  const entryMap = new Map((Array.isArray(manifest?.entries) ? manifest.entries : [])
+    .map(item => [String(item?.upstreamUrl || "").trim(), String(item?.assetKey || "").trim()]));
+  if (!releaseTag || entryMap.size === 0) return sourceHtml;
+
+  let resolvedBaseUrl = null;
+  try {
+    resolvedBaseUrl = new URL(String(options.baseUrl || options.sourceUrl || "").trim());
+  } catch {
+    resolvedBaseUrl = null;
+  }
+
+  return sourceHtml.replace(/\b(?:src|href)=["']([^"'#][^"']*)["']/gi, (fullMatch, rawAssetUrl) => {
+    const rawValue = String(rawAssetUrl || "").trim();
+    if (!rawValue || /^data:/i.test(rawValue) || /^javascript:/i.test(rawValue)) return fullMatch;
+    if (!/\.(?:m?js|css)(?:[?#]|$)/i.test(rawValue)) return fullMatch;
+    try {
+      const normalizedAssetUrl = resolvedBaseUrl
+        ? new URL(rawValue, resolvedBaseUrl).toString()
+        : new URL(rawValue).toString();
+      const assetKey = entryMap.get(normalizedAssetUrl);
+      const proxyPath = buildAdminReleaseVendorProxyPath(adminPath, releaseTag, assetKey);
+      return assetKey && proxyPath
+        ? fullMatch.replace(rawValue, proxyPath)
+        : fullMatch;
+    } catch {
+      return fullMatch;
+    }
+  });
+}
+
+function normalizeAdminReleaseVendorManifestRecord(record = {}) {
+  const rawRecord = isPlainObject(record) ? record : {};
+  return {
+    version: Number(rawRecord.version) || 1,
+    releaseTag: normalizeGithubReleaseRefValue(rawRecord.releaseTag),
+    sourceUrl: normalizeHttpUrl(rawRecord.sourceUrl),
+    entries: (Array.isArray(rawRecord.entries) ? rawRecord.entries : [])
+      .map(item => ({
+        assetKey: String(item?.assetKey || "").trim(),
+        assetKind: String(item?.assetKind || "").trim().toLowerCase() === "css" ? "css" : "script",
+        upstreamUrl: normalizeHttpUrl(item?.upstreamUrl)
+      }))
+      .filter(item => item.assetKey && item.upstreamUrl)
+  };
 }
 
 function isMutableJsdelivrGithubAssetUrl(assetUrl = "") {
@@ -23465,12 +23615,26 @@ function isMutableJsdelivrGithubAssetUrl(assetUrl = "") {
 }
 
 function getAdminRemoteShellAssetPolicyViolations(html = "", baseUrl = "") {
-  const assetUrls = extractAdminRemoteShellAssetUrls(html, baseUrl);
+  const assetDescriptors = extractAdminRemoteShellAssetDescriptors(html, baseUrl);
   const violations = [];
 
-  for (const assetUrl of assetUrls) {
+  for (const descriptor of assetDescriptors) {
+    const rawAssetUrl = String(descriptor?.rawValue || "").trim();
+    const assetUrl = String(descriptor?.normalizedUrl || "").trim();
+    if (!/^(?:https?:)?\/\//i.test(rawAssetUrl)) {
+      violations.push(`远端 index.html 不允许相对或本地 bundle 资源：${rawAssetUrl}`);
+      continue;
+    }
     if (/^https?:\/\/(?:[^/]+\.)?esm\.sh\//i.test(assetUrl)) {
       violations.push(`esm.sh 资产不再允许：${assetUrl}`);
+      continue;
+    }
+    if (/^https?:\/\/raw\.githubusercontent\.com\//i.test(assetUrl)) {
+      violations.push(`raw.githubusercontent.com 资产不再允许：${assetUrl}`);
+      continue;
+    }
+    if (/^https?:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\//i.test(assetUrl)) {
+      violations.push(`浏览器直连 GitHub Release 资产不再允许：${assetUrl}`);
       continue;
     }
     if (isMutableJsdelivrGithubAssetUrl(assetUrl)) {
@@ -23544,6 +23708,192 @@ function buildAdminRemoteShellClientResponse(response, requestMethod = "GET") {
   );
 }
 
+function buildAdminReleaseVendorManifestCacheKeyRequest(releaseTag = "", sourceUrl = "") {
+  const cacheUrl = new URL(`/${encodeURIComponent(normalizeGithubReleaseRefValue(releaseTag) || "release")}`, ADMIN_RELEASE_VENDOR_MANIFEST_CACHE_KEY_ORIGIN);
+  cacheUrl.searchParams.set("source", hashStableText(String(sourceUrl || "").trim()));
+  return new Request(cacheUrl.toString(), { method: "GET" });
+}
+
+function buildAdminReleaseVendorAssetCacheKeyRequest(releaseTag = "", assetKey = "", sourceUrl = "") {
+  const cacheUrl = new URL(`/${encodeURIComponent(normalizeGithubReleaseRefValue(releaseTag) || "release")}/${encodeURIComponent(String(assetKey || "").trim())}`, ADMIN_RELEASE_VENDOR_CACHE_KEY_ORIGIN);
+  cacheUrl.searchParams.set("source", hashStableText(String(sourceUrl || "").trim()));
+  return new Request(cacheUrl.toString(), { method: "GET" });
+}
+
+function buildAdminReleaseVendorManifestResponse(manifest = {}, sourceUrl = "") {
+  const headers = new Headers({
+    "Content-Type": "application/json;charset=UTF-8",
+    "Cache-Control": ADMIN_REMOTE_SHELL_EDGE_CACHE_CONTROL
+  });
+  const normalizedSourceUrl = String(sourceUrl || manifest?.sourceUrl || "").trim();
+  headers.set(ADMIN_RELEASE_VENDOR_CACHED_AT_HEADER, String(nowMs()));
+  if (normalizedSourceUrl) {
+    headers.set(ADMIN_RELEASE_VENDOR_SOURCE_HASH_HEADER, hashStableText(normalizedSourceUrl));
+  }
+  return new Response(JSON.stringify(manifest), {
+    status: 200,
+    headers
+  });
+}
+
+function isAcceptedAdminReleaseVendorContentType(contentType = "", assetKind = "script") {
+  const normalizedContentType = String(contentType || "").trim().toLowerCase();
+  const normalizedAssetKind = String(assetKind || "").trim().toLowerCase() === "css" ? "css" : "script";
+  if (!normalizedContentType) return true;
+  if (normalizedAssetKind === "css") {
+    return normalizedContentType.includes("text/css")
+      || normalizedContentType.includes("application/css")
+      || normalizedContentType.startsWith("text/plain");
+  }
+  return normalizedContentType.includes("javascript")
+    || normalizedContentType.includes("ecmascript")
+    || normalizedContentType.startsWith("text/plain")
+    || normalizedContentType.startsWith("application/octet-stream");
+}
+
+function buildAdminReleaseVendorStoredResponse(body, options = {}) {
+  const headers = new Headers({
+    "Cache-Control": ADMIN_RELEASE_VENDOR_CACHE_CONTROL
+  });
+  const contentType = String(options.contentType || "").trim();
+  const etag = normalizeEtagToken(options.etag || "");
+  const lastModified = normalizeAdminHttpDateHeader(options.lastModified || "");
+  const sourceUrl = String(options.sourceUrl || "").trim();
+  if (contentType) headers.set("Content-Type", contentType);
+  if (etag) headers.set("ETag", formatAdminHtmlEtag(etag));
+  if (lastModified) headers.set("Last-Modified", lastModified);
+  headers.set(ADMIN_RELEASE_VENDOR_CACHED_AT_HEADER, String(nowMs()));
+  if (sourceUrl) headers.set(ADMIN_RELEASE_VENDOR_SOURCE_HASH_HEADER, hashStableText(sourceUrl));
+  return new Response(body, {
+    status: 200,
+    headers
+  });
+}
+
+function buildAdminReleaseVendorClientResponse(response, requestMethod = "GET") {
+  if (!response) return new Response("Release vendor asset unavailable", { status: 502 });
+  const headers = new Headers(response.headers || {});
+  headers.set("Cache-Control", ADMIN_RELEASE_VENDOR_CACHE_CONTROL);
+  headers.delete(ADMIN_RELEASE_VENDOR_CACHED_AT_HEADER);
+  headers.delete(ADMIN_RELEASE_VENDOR_SOURCE_HASH_HEADER);
+  applySecurityHeaders(headers);
+  return new Response(
+    requestMethod === "HEAD" ? null : response.body,
+    {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    }
+  );
+}
+
+async function readAdminReleaseVendorManifestFromCache(edgeCache, releaseTag = "", sourceUrl = "") {
+  if (!edgeCache || typeof edgeCache.match !== "function") return null;
+  const cachedResponse = await edgeCache.match(buildAdminReleaseVendorManifestCacheKeyRequest(releaseTag, sourceUrl));
+  if (!cachedResponse) return null;
+  try {
+    return normalizeAdminReleaseVendorManifestRecord(JSON.parse(await cachedResponse.text()));
+  } catch {
+    return null;
+  }
+}
+
+async function buildAdminReleaseVendorManifestFromSource(releaseTag = "", sourceUrl = "") {
+  const normalizedReleaseTag = normalizeGithubReleaseRefValue(releaseTag);
+  const normalizedSourceUrl = normalizeHttpUrl(sourceUrl);
+  if (!normalizedReleaseTag || !normalizedSourceUrl) return null;
+  const response = await fetch(normalizedSourceUrl, {
+    method: "GET"
+  });
+  if (!response.ok) {
+    throw new Error(`release index fetch failed: HTTP ${response.status}`);
+  }
+  const contentType = String(response.headers.get("Content-Type") || "").trim().toLowerCase();
+  const contentLength = Number.parseInt(String(response.headers.get("Content-Length") || ""), 10);
+  if (Number.isFinite(contentLength) && contentLength > ADMIN_REMOTE_SHELL_MAX_BYTES) {
+    throw new Error(`release index too large: ${contentLength} bytes`);
+  }
+  const remoteHtml = await response.text();
+  const remoteHtmlSize = new TextEncoder().encode(remoteHtml).length;
+  if (!remoteHtml || remoteHtmlSize > ADMIN_REMOTE_SHELL_MAX_BYTES) {
+    throw new Error(`release index payload invalid: ${remoteHtmlSize} bytes`);
+  }
+  const htmlDocumentDetected = hasAdminRemoteShellHtmlDocument(remoteHtml);
+  if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+    const allowPlainTextHtmlDocument = contentType.startsWith("text/plain") && htmlDocumentDetected;
+    if (!allowPlainTextHtmlDocument) {
+      throw new Error(`release index content-type invalid: ${contentType}`);
+    }
+  }
+  if (!htmlDocumentDetected) {
+    throw new Error("release index payload invalid: html document expected");
+  }
+  if (!hasAdminRemoteShellAppRoot(remoteHtml)) {
+    throw new Error("release index missing #app root");
+  }
+  const assetPolicyViolations = getAdminRemoteShellAssetPolicyViolations(remoteHtml, normalizedSourceUrl);
+  if (assetPolicyViolations.length > 0) {
+    throw new Error(`release index asset policy invalid: ${assetPolicyViolations.slice(0, 3).join(" | ")}`);
+  }
+  return normalizeAdminReleaseVendorManifestRecord(buildAdminReleaseVendorManifest(remoteHtml, {
+    releaseTag: normalizedReleaseTag,
+    sourceUrl: normalizedSourceUrl
+  }));
+}
+
+async function cacheAdminReleaseVendorManifest(edgeCache, manifest = {}, ctx = null) {
+  const normalizedManifest = normalizeAdminReleaseVendorManifestRecord(manifest);
+  if (!edgeCache || typeof edgeCache.put !== "function" || !normalizedManifest.releaseTag || !normalizedManifest.sourceUrl) {
+    return normalizedManifest;
+  }
+  const cacheTask = withNonCriticalFallback(
+    edgeCache.put(
+      buildAdminReleaseVendorManifestCacheKeyRequest(normalizedManifest.releaseTag, normalizedManifest.sourceUrl),
+      buildAdminReleaseVendorManifestResponse(normalizedManifest, normalizedManifest.sourceUrl)
+    ),
+    "admin.release_vendor_manifest_cache_write",
+    {
+      releaseTag: normalizedManifest.releaseTag
+    },
+    null
+  );
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(cacheTask);
+  else await cacheTask;
+  return normalizedManifest;
+}
+
+async function getOrCreateAdminReleaseVendorManifest(edgeCache, releaseTag = "", sourceUrl = "", ctx = null) {
+  const cachedManifest = await readAdminReleaseVendorManifestFromCache(edgeCache, releaseTag, sourceUrl);
+  if (cachedManifest?.entries?.length) return cachedManifest;
+  const nextManifest = await buildAdminReleaseVendorManifestFromSource(releaseTag, sourceUrl);
+  if (!nextManifest) return null;
+  await cacheAdminReleaseVendorManifest(edgeCache, nextManifest, ctx);
+  return nextManifest;
+}
+
+function resolveAdminReleaseVendorManifestEntry(manifest = {}, assetKey = "") {
+  const normalizedAssetKey = String(assetKey || "").trim();
+  if (!normalizedAssetKey) return null;
+  return (Array.isArray(manifest?.entries) ? manifest.entries : [])
+    .find(item => String(item?.assetKey || "").trim() === normalizedAssetKey) || null;
+}
+
+function resolveAdminReleaseVendorRouteMatch(pathname = "", adminPath = "/admin") {
+  const normalizedAdminPath = sanitizeProxyPath(adminPath || "/admin").replace(/\/+$/, "") || "/admin";
+  const normalizedPathname = sanitizeProxyPath(pathname || "/");
+  const pattern = new RegExp(`^${escapeRegexForRoute(normalizedAdminPath)}/${ADMIN_RELEASE_PROXY_PATH_SEGMENT}/([^/]+)/${ADMIN_RELEASE_VENDOR_PATH_SEGMENT}/([^/]+)/*$`, "i");
+  const matched = normalizedPathname.match(pattern);
+  if (!matched) return null;
+  try {
+    return {
+      releaseTag: normalizeGithubReleaseRefValue(decodeURIComponent(String(matched[1] || ""))),
+      assetKey: String(decodeURIComponent(String(matched[2] || "")) || "").trim()
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getAdminRemoteShellCachedAt(response) {
   const cachedAt = Number.parseInt(String(response?.headers?.get?.(ADMIN_REMOTE_SHELL_CACHED_AT_HEADER) || ""), 10);
   return Number.isFinite(cachedAt) && cachedAt > 0 ? cachedAt : 0;
@@ -23555,7 +23905,7 @@ function shouldRevalidateAdminRemoteShell(response) {
   return nowMs() - cachedAt >= ADMIN_REMOTE_SHELL_REVALIDATE_MS;
 }
 
-async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstrap, initHealth, previousResponse = null) {
+async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstrap, initHealth, previousResponse = null, releaseOptions = {}) {
   const requestHeaders = new Headers();
   const previousOriginEtag = normalizeEtagToken(previousResponse?.headers?.get?.(ADMIN_REMOTE_SHELL_SOURCE_ETAG_HEADER) || "");
   const previousOriginLastModified = normalizeAdminHttpDateHeader(previousResponse?.headers?.get?.(ADMIN_REMOTE_SHELL_SOURCE_LAST_MODIFIED_HEADER) || "");
@@ -23568,13 +23918,16 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
   });
   if (remoteResponse.status === 304 && previousResponse) {
     const previousHtml = await previousResponse.text();
-    return buildAdminRemoteShellStoredResponse(previousHtml, {
-      variantEtag: normalizeEtagToken(previousResponse.headers.get("ETag") || ""),
-      lastModified: remoteResponse.headers.get("Last-Modified") || previousResponse.headers.get("Last-Modified") || "",
-      originEtag: remoteResponse.headers.get("ETag") || previousOriginEtag,
-      originLastModified: remoteResponse.headers.get("Last-Modified") || previousOriginLastModified,
-      sourceUrl: remoteShellIndexUrl
-    });
+    return {
+      storedResponse: buildAdminRemoteShellStoredResponse(previousHtml, {
+        variantEtag: normalizeEtagToken(previousResponse.headers.get("ETag") || ""),
+        lastModified: remoteResponse.headers.get("Last-Modified") || previousResponse.headers.get("Last-Modified") || "",
+        originEtag: remoteResponse.headers.get("ETag") || previousOriginEtag,
+        originLastModified: remoteResponse.headers.get("Last-Modified") || previousOriginLastModified,
+        sourceUrl: remoteShellIndexUrl
+      }),
+      vendorManifest: null
+    };
   }
   if (!remoteResponse.ok) {
     throw new Error(`remote admin shell fetch failed: HTTP ${remoteResponse.status}`);
@@ -23610,34 +23963,57 @@ async function fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstra
     throw new Error(`remote admin shell asset policy invalid: ${assetPolicyViolations.slice(0, 3).join(" | ")}`);
   }
 
+  const normalizedReleaseTag = normalizeGithubReleaseRefValue(releaseOptions.releaseTag);
+  const vendorManifest = normalizedReleaseTag
+    ? normalizeAdminReleaseVendorManifestRecord(buildAdminReleaseVendorManifest(remoteHtml, {
+      releaseTag: normalizedReleaseTag,
+      sourceUrl: remoteShellIndexUrl
+    }))
+    : null;
+  const proxyRewrittenHtml = vendorManifest?.entries?.length
+    ? rewriteAdminRemoteShellAssetUrlsToProxy(remoteHtml, vendorManifest, {
+      adminPath: String(releaseOptions.adminPath || bootstrap?.adminPath || "/admin").trim() || "/admin",
+      releaseTag: normalizedReleaseTag,
+      sourceUrl: remoteShellIndexUrl
+    })
+    : remoteHtml;
   const bootstrapJson = serializeInlineJson(bootstrap);
-  const renderedHtml = applyAdminRemoteBootstrapMarkup(remoteHtml, bootstrapJson);
+  const renderedHtml = applyAdminRemoteBootstrapMarkup(proxyRewrittenHtml, bootstrapJson);
   const lastModified = normalizeAdminHttpDateHeader(remoteResponse.headers.get("Last-Modified") || "") || new Date().toUTCString();
-  return buildAdminRemoteShellStoredResponse(renderedHtml, {
-    variantEtag: buildAdminRemoteShellVariantEtag({
-      html: renderedHtml,
-      bootstrap,
-      initHealth,
-      sourceUrl: remoteShellIndexUrl,
+  return {
+    storedResponse: buildAdminRemoteShellStoredResponse(renderedHtml, {
+      variantEtag: buildAdminRemoteShellVariantEtag({
+        html: renderedHtml,
+        bootstrap,
+        initHealth,
+        sourceUrl: remoteShellIndexUrl,
+        originEtag: remoteResponse.headers.get("ETag") || "",
+        originLastModified: lastModified
+      }),
+      lastModified,
       originEtag: remoteResponse.headers.get("ETag") || "",
-      originLastModified: lastModified
+      originLastModified: lastModified,
+      sourceUrl: remoteShellIndexUrl
     }),
-    lastModified,
-    originEtag: remoteResponse.headers.get("ETag") || "",
-    originLastModified: lastModified,
-    sourceUrl: remoteShellIndexUrl
-  });
+    vendorManifest
+  };
 }
 
-async function revalidateAdminRemoteShellCache(request, edgeCache, cacheKey, remoteShellIndexUrl, bootstrap, initHealth, cachedResponse) {
+async function revalidateAdminRemoteShellCache(request, edgeCache, cacheKey, remoteShellIndexUrl, bootstrap, initHealth, cachedResponse, releaseOptions = {}, ctx = null) {
   if (!edgeCache || typeof edgeCache.put !== "function") return null;
-  const storedResponse = await fetchAdminRemoteShellStoredResponse(
+  const remoteShellPayload = await fetchAdminRemoteShellStoredResponse(
     remoteShellIndexUrl,
     bootstrap,
     initHealth,
-    cachedResponse
+    cachedResponse,
+    releaseOptions
   );
+  const storedResponse = remoteShellPayload?.storedResponse || null;
+  if (!storedResponse) return null;
   await edgeCache.put(cacheKey, storedResponse.clone());
+  if (remoteShellPayload?.vendorManifest?.entries?.length) {
+    await cacheAdminReleaseVendorManifest(edgeCache, remoteShellPayload.vendorManifest, ctx);
+  }
   return storedResponse;
 }
 
@@ -23748,7 +24124,12 @@ async function renderRemoteAdminPage(request, env, ctx, initHealth = buildInitHe
             remoteShellIndexUrl,
             bootstrap,
             initHealth,
-            cachedResponse.clone()
+            cachedResponse.clone(),
+            {
+              releaseTag: indexState.releaseTag,
+              adminPath: bootstrap.adminPath
+            },
+            ctx
           ),
           "admin.remote_shell_revalidate",
           { path: requestPath, remoteShellIndexUrl },
@@ -23778,7 +24159,14 @@ async function renderRemoteAdminPage(request, env, ctx, initHealth = buildInitHe
     }
   }
 
-  const storedResponse = await fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstrap, initHealth);
+  const remoteShellPayload = await fetchAdminRemoteShellStoredResponse(remoteShellIndexUrl, bootstrap, initHealth, null, {
+    releaseTag: indexState.releaseTag,
+    adminPath: bootstrap.adminPath
+  });
+  const storedResponse = remoteShellPayload?.storedResponse || null;
+  if (!storedResponse) {
+    throw new Error("remote admin shell payload missing");
+  }
   await patchAdminShellRuntimeStatus(env, {
     shellState,
     initHealth,
@@ -23801,12 +24189,129 @@ async function renderRemoteAdminPage(request, env, ctx, initHealth = buildInitHe
     );
     if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(cacheWriteTask);
     else await cacheWriteTask;
+    if (remoteShellPayload?.vendorManifest?.entries?.length) {
+      await cacheAdminReleaseVendorManifest(edgeCache, remoteShellPayload.vendorManifest, ctx);
+    }
   }
 
   if (requestMatchesAdminHtmlResponse(request, storedResponse)) {
     return buildAdminNotModifiedResponseFrom(storedResponse, ADMIN_REMOTE_SHELL_BROWSER_CACHE_CONTROL);
   }
   return buildAdminRemoteShellClientResponse(storedResponse, request?.method);
+}
+
+function buildAdminReleaseVendorErrorResponse(message = "Release vendor asset unavailable", status = 502) {
+  const headers = new Headers({
+    "Content-Type": "text/plain;charset=UTF-8",
+    "Cache-Control": "no-store, max-age=0"
+  });
+  applySecurityHeaders(headers);
+  return new Response(String(message || "Release vendor asset unavailable"), { status, headers });
+}
+
+async function renderAdminReleaseVendorAsset(request, env, ctx, routeMatch = null, config = {}) {
+  const releaseTag = normalizeGithubReleaseRefValue(routeMatch?.releaseTag);
+  const assetKey = String(routeMatch?.assetKey || "").trim();
+  if (!releaseTag || !assetKey) {
+    return buildAdminReleaseVendorErrorResponse("Release vendor asset not found", 404);
+  }
+
+  const edgeCache = typeof caches === "undefined" ? null : caches.default;
+  const releaseIndexUrl = buildGithubFrontendIndexUrl(FIXED_GITHUB_RELEASE_REPO, releaseTag);
+  if (!releaseIndexUrl) {
+    return buildAdminReleaseVendorErrorResponse("Release vendor asset not found", 404);
+  }
+
+  const manifest = await getOrCreateAdminReleaseVendorManifest(edgeCache, releaseTag, releaseIndexUrl, ctx);
+  const manifestEntry = resolveAdminReleaseVendorManifestEntry(manifest, assetKey);
+  if (!manifestEntry?.upstreamUrl) {
+    return buildAdminReleaseVendorErrorResponse("Release vendor asset not found", 404);
+  }
+
+  const cacheKey = buildAdminReleaseVendorAssetCacheKeyRequest(releaseTag, assetKey, manifestEntry.upstreamUrl);
+  if (edgeCache && typeof edgeCache.match === "function") {
+    const cachedResponse = await edgeCache.match(cacheKey);
+    if (cachedResponse) {
+      if (requestMatchesAdminHtmlResponse(request, cachedResponse)) {
+        return buildConditionalNotModifiedResponseFromStoredResponse(cachedResponse, ADMIN_RELEASE_VENDOR_CACHE_CONTROL);
+      }
+      return buildAdminReleaseVendorClientResponse(cachedResponse, request?.method);
+    }
+  }
+
+  let upstreamResponse = null;
+  try {
+    upstreamResponse = await fetch(manifestEntry.upstreamUrl, {
+      method: "GET",
+      headers: {
+        "Accept": manifestEntry.assetKind === "css"
+          ? "text/css, text/plain;q=0.9, */*;q=0.1"
+          : "application/javascript, text/javascript, text/plain;q=0.9, */*;q=0.1"
+      }
+    });
+  } catch (error) {
+    return buildAdminReleaseVendorErrorResponse(
+      `Release vendor asset fetch failed: ${String(error?.message || error || "unknown_error").trim() || "unknown_error"}`,
+      502
+    );
+  }
+
+  if (!upstreamResponse.ok) {
+    return buildAdminReleaseVendorErrorResponse(
+      upstreamResponse.status === 404 ? "Release vendor asset not found" : `Release vendor asset fetch failed (HTTP ${upstreamResponse.status})`,
+      upstreamResponse.status === 404 ? 404 : 502
+    );
+  }
+
+  const contentType = String(upstreamResponse.headers.get("Content-Type") || "").trim();
+  if (!isAcceptedAdminReleaseVendorContentType(contentType, manifestEntry.assetKind)) {
+    return buildAdminReleaseVendorErrorResponse(
+      `Release vendor asset content-type invalid: ${contentType || "unknown"}`,
+      502
+    );
+  }
+
+  const contentLength = Number.parseInt(String(upstreamResponse.headers.get("Content-Length") || ""), 10);
+  if (Number.isFinite(contentLength) && contentLength > ADMIN_RELEASE_VENDOR_MAX_BYTES) {
+    return buildAdminReleaseVendorErrorResponse(
+      `Release vendor asset too large: ${contentLength} bytes`,
+      502
+    );
+  }
+
+  const responseBuffer = await upstreamResponse.arrayBuffer();
+  const responseBytes = responseBuffer.byteLength;
+  if (!responseBytes || responseBytes > ADMIN_RELEASE_VENDOR_MAX_BYTES) {
+    return buildAdminReleaseVendorErrorResponse(
+      `Release vendor asset payload invalid: ${responseBytes} bytes`,
+      502
+    );
+  }
+
+  const storedResponse = buildAdminReleaseVendorStoredResponse(responseBuffer, {
+    contentType,
+    etag: upstreamResponse.headers.get("ETag") || "",
+    lastModified: upstreamResponse.headers.get("Last-Modified") || "",
+    sourceUrl: manifestEntry.upstreamUrl
+  });
+  if (edgeCache && typeof edgeCache.put === "function") {
+    const cacheWriteTask = withNonCriticalFallback(
+      edgeCache.put(cacheKey, storedResponse.clone()),
+      "admin.release_vendor_cache_write",
+      {
+        releaseTag,
+        assetKey
+      },
+      null
+    );
+    if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(cacheWriteTask);
+    else await cacheWriteTask;
+  }
+
+  if (requestMatchesAdminHtmlResponse(request, storedResponse)) {
+    return buildConditionalNotModifiedResponseFromStoredResponse(storedResponse, ADMIN_RELEASE_VENDOR_CACHE_CONTROL);
+  }
+  return buildAdminReleaseVendorClientResponse(storedResponse, request?.method);
 }
 
 async function renderAdminPage(request, env, ctx, initHealth = buildInitHealth(env), config = null) {
@@ -24532,6 +25037,13 @@ const RuntimeEntry = {
 
     if (request.method === "GET" && routeContext.normalizedPathname === "/") {
       return renderLandingPage(env, routeContext.initHealth);
+    }
+
+    const adminReleaseVendorRoute = (request.method === "GET" || request.method === "HEAD")
+      ? resolveAdminReleaseVendorRouteMatch(routeContext.normalizedPathname, routeContext.adminPath)
+      : null;
+    if (adminReleaseVendorRoute) {
+      return renderAdminReleaseVendorAsset(request, env, ctx, adminReleaseVendorRoute, runtimeConfig);
     }
 
     if ((request.method === "GET" || request.method === "HEAD")

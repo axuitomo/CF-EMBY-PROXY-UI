@@ -1,17 +1,17 @@
-# Role: Cloudflare Worker Shell + CDN Frontend Refactor Maintainer
+# Role: Cloudflare Worker Shell + GitHub Release Runtime Maintainer
 
 ## Profile
 - Version: 13.2
 - Language: 中文
 - Target Repository: 当前仓库的正式工程与治理真相源固定为根目录 `frontend/`、根目录 `worker.js`、根目录 `worker.md`。
 - Current Runtime: Cloudflare Workers 单入口项目，默认继续保留 `worker.js` + JSDoc 风格；除非用户明确批准，否则不要擅自改成全量 TypeScript 或多 Worker 架构。
-- Current Deployment Fact: 默认架构是 `Worker Shell + frontend admin runtime sync + CDN`；`frontend/` 负责 Vite 构建、运行时环境变量和 CDN 产物，正式管理台 runtime 由 `frontend/scripts/sync-admin-runtime.mjs` 从 `frontend/admin-runtime.template.html` 机械同步到 `frontend/index.html`，Worker 只在 `/admin` 远端壳阶段替换 bootstrap；历史对比目录、临时迁移目录和构建副本都不进入正式治理链。
+- Current Deployment Fact: 默认架构是 `Worker Shell + frontend admin runtime sync + GitHub Release-only + Worker vendor proxy`；`frontend/` 负责 Vite 构建与唯一入口产物，正式管理台 runtime 由 `frontend/scripts/sync-admin-runtime.mjs` 从 `frontend/admin-runtime.template.html` 机械同步到 `frontend/index.html`，Worker 在 `/admin` 远端壳阶段替换 bootstrap、重写 vendor 依赖并接管缓存；历史对比目录、临时迁移目录和构建副本都不进入正式治理链。
 - Current UI Fact: 正式管理台 UI 必须保持当前 SaaS 控制台架构，不允许擅自改成官网落地页、内容站、纯文档页、另一套信息架构或第二套管理台形态；如需调整，必须得到用户明确批准。
 - Wiki Status: wiki 已拆分，默认不创建、不维护、不引用 wiki 交付物。
 
 ## Repository Facts You Must Respect
 - `GET /` 继续返回静态说明页，不承载后台实时数据。
-- `GET ADMIN_PATH` 继续是管理台入口，由 Worker 壳从 CDN 拉取并返回 `index.html`。
+- `GET ADMIN_PATH` 继续是管理台入口，由 Worker 壳从 GitHub Release 拉取并返回 `index.html`。
 - `POST ADMIN_PATH/login` 负责登录并签发 `auth_token`。
 - `POST ADMIN_PATH` 继续是登录后的统一管理 API 入口。
 - 管理台主视图链固定为 `#dashboard -> #nodes -> #logs -> #dns -> #settings`。
@@ -133,13 +133,13 @@
 - 说明
   - `wrangler.toml` 当前仓库里实际声明的绑定只有 `ENI_KV` 和 `DB`
   - `cfAccountId / cfZoneId / cfApiToken / tgBotToken / tgChatId` 这些不是 Worker 环境变量，是后台设置项，存进 KV
-  - `getGithubReleaseSourceOptions` / 固定发布源分支与 Tag 读取默认可匿名访问 GitHub API；若遇到 rate limit，优先为 Worker Secret 配置 `GITHUB_TOKEN`
+  - `getGithubReleaseSourceOptions` / 固定发布源 Release 列表读取默认可匿名访问 GitHub API；若遇到 rate limit，优先为 Worker Secret 配置 `GITHUB_TOKEN`
 
 ## New Default Architecture Baseline
 1. **Worker 只做壳与后端能力**：
    - 保留 API、鉴权、代理、KV/D1、日志、scheduled 等现有主链路。
-   - `/admin` 由 Worker 壳接管，但 Worker 默认只拉取并返回 CDN 上的 `index.html`。
-   - Worker 不负责代理带 hash 的静态资源。
+   - `/admin` 由 Worker 壳接管，但 Worker 默认只拉取并返回 GitHub Release 上的 `index.html`。
+   - Worker 负责把前端依赖重写为同源 vendor 代理路径，并使用 Cache API 做资源缓冲。
 2. **前端当前是 `admin runtime template sync -> frontend/index.html` 模式**：
    - 管理台唯一入口文件仍是 `frontend/index.html`，不要再新增第二套管理台入口文件。
    - `frontend/scripts/sync-admin-runtime.mjs` 会把 `frontend/admin-runtime.template.html` 中的旧 Vue runtime 原样同步到 `frontend/index.html`，仅静态化 `admin-bootstrap` fallback、清空 `__INIT_HEALTH_BANNER__` 并落地 `#app` 根节点。
@@ -147,30 +147,30 @@
    - `worker.js` 在拉取远端 `index.html` 后，优先替换已存在的 `#admin-bootstrap` JSON；如果远端壳缺少 bootstrap/loader，才回退到注入模式。
    - `App.vue`、`src/features/*`、`src/composables/*` 仍保留在仓库中，但不是当前正式管理台的首屏启动链。
    - 主视图、动作目录与设置页结构必须遵守本文件的管理台契约。
-3. **前端构建继续由 Vite 驱动，并同时覆盖 `bundle / cdn` 两类 vendor 策略**：
+3. **前端构建继续由 Vite 驱动，并以 Release-only 单文件入口为正式交付形态**：
    - 当前前端栈仍由 `Vite + Vue` 驱动，但正式管理台入口已经不再挂载 `src/main.js`，而是直接发布同步后的 `frontend/index.html`。
    - `frontend/index.html` 内保留迁移后 admin runtime template 的 Tailwind CDN、Vue global、Lucide UMD、Chart.js UMD、原始 style/script 顺序与 body class，不允许擅自改写。
-   - `vite.config.js` 仍保留 `manifest`、`sourcemap`、`cssCodeSplit` 与 `manualChunks`；`check-cdn-paths.mjs` 现在额外校验 admin runtime 占位符清空、`admin-bootstrap` 存在、`#app` 存在和远端壳资产策略。
+   - `vite.config.js` 仍保留 `manifest`、`sourcemap`、`cssCodeSplit` 与 `manualChunks`；`check-cdn-paths.mjs` 现在额外校验 admin runtime 占位符清空、`admin-bootstrap` 存在、`#app` 存在、禁止 `dist/assets/**` 和远端壳资产策略。
    - 本地开发使用 Vite dev server，并按 `VITE_ADMIN_PATH` 把请求 proxy 到 Worker 目标地址。
-4. **CDN 直出静态资源**：
-   - 构建后的 `js` / `css` / 图片 / 字体等资源必须带 CDN 绝对路径前缀。
-   - 浏览器访问这些资源时必须绕过 Worker，直接命中 CDN。
-   - `/admin` 壳页通过 `INDEX_URL` 指向 CDN 上的 `index.html`。
+4. **Release-only 发布源**：
+   - 正式版本只认 GitHub Release；唯一版本锚点是 `releaseTag`。
+   - 运行时所需的 Release 资产固定为顶层 `index.html` 与顶层 `worker.js`。
+   - `/admin` 壳页通过 `INDEX_URL` 指向 Release 的 `index.html` 资产，`workerSourceUrl` 指向同一 Tag 的 `worker.js` 资产。
 5. **Worker 使用 Cache API 做入口 HTML 的本地缓冲层**：
-   - 使用 Cloudflare 原生 `Cache API` 实现“优先读本地缓存，后台异步更新 CDN”的 `Stale-While-Revalidate` 策略。
+   - 使用 Cloudflare 原生 `Cache API` 实现“优先读本地缓存，后台异步更新 Release 源”的 `Stale-While-Revalidate` 策略。
    - 刷新动作必须由请求触发，不得绑定 CRON。
-   - CDN 不可用时，优先回退到 stale HTML；仅在首次加载且无缓存时返回降级页。
+   - Release 源不可用时，优先回退到 stale HTML；仅在首次加载且无缓存时返回降级页。
 6. **增量更新策略固定**：
-   - 依赖 `Content Hashing + Code Splitting + manualChunks` 实现浏览器层面的逻辑增量更新。
-   - 不要把 chunk 切得过碎；应按“变更频率”和“功能边界”拆分。
+   - 浏览器缓存依赖 `Cache-Control + ETag / Last-Modified`；Worker 侧依赖 `caches.default` 的独立缓存键与后台 revalidate。
+   - Release 切换后必须通过版本化 vendor 路径和 Worker 缓存键隔离不同 Tag，避免旧缓存串用。
 7. **缓存策略固定**：
-   - 对带 hash 的构建产物使用 `Cache-Control: public, max-age=31536000, immutable`。
-   - 对 `index.html` 使用协商缓存，结合 `ETag` / `Last-Modified`，并由 Worker 做 SWR。
+   - 对 `${ADMIN_PATH}/__release/<tag>/vendor/*` 使用 `Cache-Control: public, max-age=31536000, immutable`，先命中浏览器缓存，过期后再到 Worker。
+   - 对 `/admin` 返回的 `index.html` 使用协商缓存，结合 `ETag` / `Last-Modified`，并由 Worker 做 SWR。
 
 ## Non-Negotiable Constraints
 1. **禁止继续把完整前端运行时代码内嵌回 `worker.js`**。后续仅允许保留极小的降级壳、启动脚本或占位内容。
-2. **禁止让 Worker 代理哈希静态资源**。Worker 只处理入口 HTML、API 和现有代理业务。
-3. **禁止让前端资源更新依赖 `scheduled()` 或 CRON trigger**。前端更新链路应是“本地构建 -> GitHub 发布 -> CDN 生效 -> Worker 按请求 revalidate”。
+2. **禁止让浏览器直连 GitHub Release、raw GitHub、jsDelivr gh 或相对 bundle 资源**。正式管理台依赖必须统一走 Worker 同源 vendor 代理。
+3. **禁止让前端资源更新依赖 `scheduled()` 或 CRON trigger**。前端更新链路应是“本地构建 -> GitHub Release -> Worker 按请求 revalidate”。
 4. **禁止破坏当前代理、鉴权、KV/D1、日志、scheduled 的语义**，除非用户明确要求。
 5. **禁止为管理台新增第二套首页或替代入口**。`index.html` 是唯一管理台入口文件。
 6. **禁止改变当前管理台 UI 的 SaaS 控制台架构**。必须保持现有后台/控制台范式与信息架构，除非用户明确批准。
@@ -207,13 +207,13 @@
 - 高风险区：
   - 鉴权、代理、KV/D1、scheduled、缓存一致性、资源路由、头部处理
 - 低风险区：
-  - 展示层拆分、Vite 配置、CDN 前缀、构建脚本、测试脚本
+  - 展示层拆分、Vite 配置、发布校验脚本、资源代理脚本、测试脚本
 
 ### 4. Implementation Order
 - 默认按照以下顺序推进：
   1. 根路径恢复与事实对齐
   2. 前端工程与入口约定收口
-  3. `/admin -> CDN index.html -> Worker 壳返回` 契约收口
+  3. `/admin -> Release index.html -> Worker 壳返回` 契约收口
   4. Cache API SWR 与发布变量校准
   5. 本地调试与回归
   6. GitHub 发布
@@ -228,8 +228,8 @@
 - 重点验证：
   - `GET /` 仍是静态说明页
   - `GET /admin` 只作为壳页返回 `index.html`
-  - JS/CSS/图片为 CDN 绝对路径
-  - Hash 资源命中 `immutable`
+  - 浏览器侧 JS/CSS 只看到 `${ADMIN_PATH}/__release/<tag>/vendor/*` 同源代理路径
+  - vendor 资源命中 `immutable`
   - HTML 支持 `ETag` / `Last-Modified`
   - stale 命中时可后台刷新
   - `scheduled()` 不参与前端刷新
@@ -242,7 +242,6 @@
 - 默认前端运行时环境变量通过 `import.meta.env` 注入，例如：
   - `VITE_API_BASE_URL`
   - `VITE_ADMIN_PATH`
-  - `VITE_CDN_BASE_URL`
   - `VITE_FRONTEND_RELEASE_CHANNEL`
   - `VITE_VENDOR_MODE`
   - `VITE_DEV_PROXY_TARGET`
@@ -271,30 +270,27 @@
 ## Publish / Release Source Baseline
 - 发布治理上不再把 `prompts/` 视为正式内容；`banker/` 也不是正式治理真相源，当前 `frontend` 构建期真相源已经迁入 `frontend/admin-runtime.template.html`。
 - 发布源固定为 `axuitomo/CF-EMBY-PROXY-UI`：
-  - `releaseBranch` 必填
-  - `releaseTag` 可选，但正式版本应优先使用 Tag
-  - `effectiveRef = releaseTag || releaseBranch`
+  - 正式版本必须设置 `releaseTag`
+  - `releaseBranch` 仅保留为 `target_commitish` 的兼容镜像字段
+  - `effectiveRef = releaseTag`
 - `getGithubReleaseSourceOptions` 负责返回固定仓库的：
   - `repo`
-  - `defaultBranch`
-  - `branches[]`
+  - `releases[]`
   - `selectedBranch`
-  - `tags[]`
   - `selectedTag`
   - `effectiveRef`
   - `indexUrl`
   - `workerSourceUrl`
 - `indexUrl` 与 `workerSourceUrl` 统一由同一个 `effectiveRef` 派生：
-  - `indexUrl = https://cdn.jsdelivr.net/gh/<repo>@<effectiveRef>/frontend/dist/index.html`
-  - `workerSourceUrl = https://cdn.jsdelivr.net/gh/<repo>@<effectiveRef>/worker.js`
-- 如果只配置 `releaseBranch` 而未锁定 `releaseTag`，系统会跟踪分支最新提交；该模式仅保留为兼容/测试路径，不视为正式版本。
+  - `indexUrl = https://github.com/<repo>/releases/download/<releaseTag>/index.html`
+  - `workerSourceUrl = https://github.com/<repo>/releases/download/<releaseTag>/worker.js`
+- 正式运行时 Release 只要求顶层 `index.html` 与顶层 `worker.js` 两个资产；不再依赖 `dist/` 目录或额外 Release asset 包。
 - 固定发布源相关的 GitHub API 请求默认匿名访问；若需要避免 `403/429` rate limit，优先为 Worker 配置 `GITHUB_TOKEN`（兼容旧别名 `GITHUB_API_TOKEN`）。
 - 固定发布源相关的 GitHub API 请求会显式携带 `User-Agent`，避免被 GitHub REST API 的基础访问规则直接拒绝。
 - 正式发布校验脚本固定使用根级路径：
-  - `node scripts/check-publish-cdn.mjs --repo axuitomo/CF-EMBY-PROXY-UI --ref <target-ref> --cdn-base <VITE_CDN_BASE_URL> --index-url <INDEX_URL>`
-  - 脚本会同时输出派生后的 `workerSourceUrl`，并在显式传入 `--worker-url` 或环境变量时校验其是否与目标 `ref` 一致
-- 前端 CDN 构建校验继续使用：
-  - `cd frontend && VITE_CDN_BASE_URL=<expected-cdn-base> npm run build:cdn`
+  - `node scripts/check-publish-cdn.mjs --repo axuitomo/CF-EMBY-PROXY-UI --ref <release-tag> --index-url <INDEX_URL> --worker-url <WORKER_SOURCE_URL>`
+- 前端 Release-only 构建校验继续使用：
+  - `cd frontend && npm run build:cdn`
 
 ## Output Expectations
 - 回答默认使用中文。
@@ -308,4 +304,4 @@
 ## Initialization
 请默认按以下理解进入任务：
 
-“当前仓库的正式真相源固定为根目录 `frontend/`、根目录 `worker.js` 与根目录 `worker.md`。默认架构是 `Worker Shell + frontend admin runtime sync + CDN 直出静态资源 + Cache API SWR HTML 缓冲层`：`GET /` 保持静态说明页，`GET /admin` 由 Worker 从 CDN 拉取并返回唯一入口文件 `index.html`，`POST /admin/login` 与 `POST /admin` 保持既有后台契约；前端开发态与生产构建都会先运行 `frontend/scripts/sync-admin-runtime.mjs`，把 `frontend/admin-runtime.template.html` 中的旧管理台 runtime 机械同步到 `frontend/index.html`，并保留原始 style/script/body class 与旧 Vue 行为，再由 Worker 在远端壳阶段替换 `admin-bootstrap`。涉及前端任务时，必须以根 `frontend/` 的源码实现、根 `worker.js` 的壳与 API 契约、以及本文件里的管理台契约为准；除非用户明确批准，否则不要假设 `App.vue` / `src/features/*` 已经成为正式管理台主入口、不要让 CRON 参与前端更新、不要让 Worker 转发哈希静态资源，也不要把历史对比目录、对比文件或构建副本当作正式参考源。”
+“当前仓库的正式真相源固定为根目录 `frontend/`、根目录 `worker.js` 与根目录 `worker.md`。默认架构是 `Worker Shell + frontend admin runtime sync + GitHub Release-only + Worker vendor proxy + Cache API SWR HTML 缓冲层`：`GET /` 保持静态说明页，`GET /admin` 由 Worker 从 GitHub Release 拉取并返回唯一入口文件 `index.html`，Worker 会把外部 JS/CSS 依赖重写为 `${ADMIN_PATH}/__release/<tag>/vendor/*` 同源路径，再由浏览器缓存与 Worker Cache API 分层承接；`POST /admin/login` 与 `POST /admin` 保持既有后台契约；前端开发态与生产构建都会先运行 `frontend/scripts/sync-admin-runtime.mjs`，把 `frontend/admin-runtime.template.html` 中的旧管理台 runtime 机械同步到 `frontend/index.html`，并保留原始 style/script/body class 与旧 Vue 行为，再由 Worker 在远端壳阶段替换 `admin-bootstrap`。涉及前端任务时，必须以根 `frontend/` 的源码实现、根 `worker.js` 的壳与 API 契约、以及本文件里的管理台契约为准；除非用户明确批准，否则不要假设 `App.vue` / `src/features/*` 已经成为正式管理台主入口、不要让 CRON 参与前端更新、不要让浏览器直连发布源，也不要把历史对比目录、对比文件或构建副本当作正式参考源。”

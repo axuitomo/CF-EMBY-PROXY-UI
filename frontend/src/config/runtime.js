@@ -14,6 +14,7 @@ function readBrowserOrigin() {
 export const runtimeConfig = Object.freeze({
   apiBaseUrl: String(import.meta.env.VITE_API_BASE_URL || '').trim(),
   adminPath: normalizeRoutePath(import.meta.env.VITE_ADMIN_PATH || '/admin'),
+  releaseIndexUrl: String(import.meta.env.VITE_RELEASE_INDEX_URL || import.meta.env.VITE_INDEX_URL || '').trim(),
   cdnBaseUrl: String(import.meta.env.VITE_CDN_BASE_URL || '').trim(),
   releaseChannel: String(import.meta.env.VITE_FRONTEND_RELEASE_CHANNEL || 'test').trim() || 'test',
   vendorMode: String(import.meta.env.VITE_VENDOR_MODE || 'bundle').trim() || 'bundle',
@@ -55,27 +56,38 @@ export function resolveAdminLoginUrl(loginPath = '', baseUrl = runtimeConfig.api
   return resolveRuntimeUrl(loginPath || resolveAdminLoginPath(runtimeConfig.adminPath), baseUrl);
 }
 
+export function resolveReleaseIndexExample() {
+  return 'https://github.com/axuitomo/CF-EMBY-PROXY-UI/releases/download/<tag>/index.html';
+}
+
 export function resolveRepoCdnExample() {
-  return 'https://cdn.jsdelivr.net/gh/axuitomo/CF-EMBY-PROXY-UI@<tag-or-commit>/frontend/dist/';
+  return resolveReleaseIndexExample();
 }
 
 export function resolveReleaseRuntimeSummary(config = runtimeConfig) {
   const runtime = config && typeof config === 'object' ? config : runtimeConfig;
+  const releaseIndexUrl = String(runtime.releaseIndexUrl || runtime.cdnBaseUrl || '').trim();
   return {
     releaseChannel: String(runtime.releaseChannel || 'test').trim() || 'test',
     vendorMode: String(runtime.vendorMode || 'bundle').trim() || 'bundle',
     adminPath: normalizeRoutePath(runtime.adminPath || runtimeConfig.adminPath),
     apiBaseUrl: resolveApiBaseUrl(runtime.apiBaseUrl || runtimeConfig.apiBaseUrl),
+    releaseIndexUrl,
     cdnBaseUrl: String(runtime.cdnBaseUrl || '').trim(),
     devProxyTarget: String(runtime.devProxyTarget || '').trim()
   };
 }
 
-export function resolveAdminShellIndexUrl(cdnBaseUrl = runtimeConfig.cdnBaseUrl) {
-  const normalizedBase = String(cdnBaseUrl || '').trim();
-  if (!normalizedBase) return '';
-  const baseUrl = normalizeRoutePath(normalizedBase).startsWith('http')
-    ? normalizedBase.replace(/\/+$/, '/')
-    : normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`;
-  return /^https?:\/\//i.test(baseUrl) ? new URL('index.html', baseUrl).toString() : `${baseUrl}index.html`;
+export function resolveAdminShellIndexUrl(releaseIndexUrl = runtimeConfig.releaseIndexUrl || runtimeConfig.cdnBaseUrl) {
+  const normalizedUrl = String(releaseIndexUrl || '').trim();
+  if (!normalizedUrl) return '';
+  if (/^https?:\/\//i.test(normalizedUrl)) {
+    return normalizedUrl;
+  }
+
+  const normalizedPath = normalizeRoutePath(normalizedUrl);
+  if (normalizedPath.endsWith('/index.html')) return normalizedPath;
+  return normalizedPath.endsWith('/')
+    ? `${normalizedPath}index.html`
+    : `${normalizedPath}/index.html`;
 }
