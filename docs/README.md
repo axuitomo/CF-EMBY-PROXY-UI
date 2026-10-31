@@ -18,6 +18,8 @@ README 只保留使用者需要的主干；细节按下面四份文档展开，�
 | --- | --- | --- |
 | [`deploy.md`](deploy.md) | 环境变量与绑定、三种部署方式逐条步骤、Cron、自定义域、Cache Rules | 首次部署或换绑定项 |
 | [`panel.md`](panel.md) | 后台页面、DNS 双模式、设置页每个分区、字段上限、节点资源上限 | 配置后台、排查设置项 |
+| [`glossary.md`](glossary.md) | 按面板字样逐条解释名词、状态词与错误码 | 看不懂后台某个词是什么意思 |
+| [`screenshots.md`](screenshots.md) | 10 张页面截图的索引：视图、主题、录制版本、图上元素、缺口清单 | 想找某个页面长什么样，或要重录视觉基线 |
 | [`proxy-internals.md`](proxy-internals.md) | 请求转发、IP 隐藏边界、资源分类缓存、认证头兼容、真实 IP 透传、请求流程图 | 需要理解代理为什么这样处理某个请求 |
 | [`storage.md`](storage.md) | KV 键位、管理 API 的 action、D1 表结构与整理预算 | 查数据落在哪、写脚本调管理 API |
 

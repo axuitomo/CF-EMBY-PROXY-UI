@@ -40,6 +40,8 @@ npm.cmd run --workspace frontend build
 
 依赖只安装一次：在仓库根目录执行 `npm.cmd ci`。`frontend` 是 npm workspace，它的依赖和根依赖一起提升到根 `node_modules/`，仓库里不应出现 `frontend/node_modules/` 里的依赖；不要在 `frontend/` 内单独 `npm install`，那会重新生成一套嵌套依赖树。Vite 的缓存默认按最近的 `package.json` 落在 `frontend/node_modules/.vite`（`.vite-temp` 同理），会凭空造出这个目录，所以 `frontend/vite.config.js` 用 `cacheDir` 把它固定到根 `node_modules/.vite`；看到 `frontend/node_modules` 就说明有人在那里装过依赖，或者 `cacheDir` 被改掉了。
 
+仓库根目录的 `.nvmrc`（`24.15.0`，与 `engines` 下限一致）和 `.npmrc`（`engine-strict=true`，`registry` 只指向官方源）决定 Node/npm 的行为：Node 版本不符时 `npm ci` 直接失败，而不是装出一套没验证过的依赖；锁文件里不允许出现镜像地址，否则 GitHub Actions 的安装会依赖镜像可达性。本机想用镜像时临时加 `--registry`，不要写回 `.npmrc`。
+
 从仓库根目录运行：
 
 ```powershell
@@ -113,6 +115,7 @@ node --test tests/*.test.mjs
 - `frontend/.env.example` 是前端 Vite 变量模板，`.env.local` 等本地文件被忽略。
 - `wrangler.toml` 中的 KV/D1 ID 当前是占位值时，不应直接部署；先配置真实 namespace/database。
 - PowerShell 如果 `npm` 命中执行策略错误，使用 `npm.cmd`；不要为了绕过策略修改仓库文件。
+- `npm.cmd run dev:worker` 起本地 Worker（`wrangler dev`，自动跑 `build:worker`，读 `.dev.vars`）；手动验收代理行为时用它，不要靠 Playwright 配置去摸命令。
 
 ## 7. 浏览器端 e2e（Playwright）
 

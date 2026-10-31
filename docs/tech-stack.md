@@ -81,15 +81,17 @@
 | 升模板里 4 个 CDN pin 的版本号 | **生产** | 改 `tests/tech-stack-pins.test.mjs` + `npm run build:frontend` + `npm run check` + `npm run test:e2e` |
 | 新增第 5 个 CDN 脚本 | **生产 + 资产策略** | 还要过 `check:cdn`（禁止 `esm.sh`、禁止可变 GitHub ref、壳 ≤ 2 MiB） |
 
+`package.json` 里还有三条 `overrides`：`workerd` 让我们的 `miniflare` 和 `wrangler` 自带的 `miniflare` 共用同一份运行时（否则树里同时有两份 workerd，单测和 e2e 跑在不同版本上）；`undici` / `sharp` 把 `miniflare@4` 锁定的 7.28.0 / 0.35.2 顶到已修 GHSA 的版本。三者都只影响本地测试运行时，不进线上字节。上游 `miniflare` 自己修好这两条依赖后，对应的 override 就应该删掉。
+
 ## 4. 已知的三处不一致，是故意的
 
 不要为了“整齐”去对齐它们，否则会把参考源的版本升级误当成线上升级。
 
 | 项 | 线上 pin | npm 侧 | 为什么保留 |
 | --- | --- | --- | --- |
-| Chart.js | 4.4.7 (UMD) | 4.5.1 | npm 那份只被 `frontend/src/lib/chart.js` 与单测引用；线上是 global `Chart`，升级要单独验证图表渲染 |
+| Chart.js | 4.4.7 (UMD) | 4.6.1 | npm 那份只被 `frontend/src/lib/chart.js` 与单测引用；线上是 global `Chart`，升级要单独验证图表渲染 |
 | Lucide | `lucide@1.8.0` (UMD) | `lucide-vue-next@1.0.0` | **不是同一个包**：线上用 UMD `lucide` 全局 + 自定义指令批量替换，参考源用 Vue 组件版 |
-| Tailwind | `@tailwindcss/browser@4.2.2`（浏览器构建） | `tailwindcss@4.2.2` + `@tailwindcss/vite` | **不是同一个包**：线上是能在浏览器里即时编译的自包含构建，参考源是构建期 CLI/插件；版本号同步但产物形态不同，见第 5 节 |
+| Tailwind | `@tailwindcss/browser@4.2.2`（浏览器构建） | `tailwindcss@4.3.3` + `@tailwindcss/vite` | **不是同一个包**：线上是能在浏览器里即时编译的自包含构建，参考源是构建期 CLI/插件；版本也不再同步（参考源 4.3.3 / 线上 pin 4.2.2），见第 5 节 |
 
 ## 5. Tailwind v3 → v4 迁移记录
 
