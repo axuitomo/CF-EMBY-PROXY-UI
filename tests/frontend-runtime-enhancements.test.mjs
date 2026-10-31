@@ -1252,7 +1252,7 @@ test("admin runtime enhancement script survives template-literal escaping", () =
   // 字符类里出现孤立的 s/d/w/b（本意是 \s \d \w \b）就是模板字符串吃掉反斜杠的痕迹。
   const suspicious = [
     ...ADMIN_RUNTIME_ENHANCEMENT_SCRIPT.matchAll(
-      /(?:return\s+|\()\/((?:[^\/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+)\/([gimsuy]*)\.test\(/g,
+      /(?:return\s+|\()\/((?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+)\/([gimsuy]*)\.test\(/g,
     ),
   ].filter(([, body]) => /\[[^\]]*(?<![\\A-Za-z])[sdwb](?![A-Za-z])/.test(body));
   assert.deepEqual(
@@ -1262,7 +1262,7 @@ test("admin runtime enhancement script survives template-literal escaping", () =
   );
   const literals = [
     ...ADMIN_RUNTIME_ENHANCEMENT_SCRIPT.matchAll(
-      /(?:return\s+|\()\/((?:[^\/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+)\/([gimsuy]*)\.test\(/g,
+      /(?:return\s+|\()\/((?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+)\/([gimsuy]*)\.test\(/g,
     ),
   ];
   assert.ok(literals.length > 0, "no regex literals found in generated script");
@@ -2244,7 +2244,8 @@ test("deploy workflow builds and publishes the frontend as Worker static assets"
   assert.match(wranglerConfig, /\[assets\][\s\S]*binding\s*=\s*"ASSETS"/);
   assert.match(wranglerConfig, /\[assets\][\s\S]*run_worker_first\s*=\s*true/);
   assert.match(wranglerConfig, /\[assets\][\s\S]*html_handling\s*=\s*"none"/);
-  assert.match(deployWorkflow, /node-version:\s*24/);
+  // Node 版本只认 .nvmrc 一处：写死 `node-version: 24` 会和 ci.yml 的 pin 分成两个真相源。
+  assert.match(deployWorkflow, /node-version-file:\s*\.nvmrc/);
   assert.match(deployWorkflow, /run:\s*npm ci/);
   assert.match(deployWorkflow, /run:\s*npm run check/);
   assert.match(deployWorkflow, /run:\s*npm run build:cdn/);

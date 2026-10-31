@@ -27,6 +27,8 @@ concurrency:
 
 jobs:
   deploy:
+    # 具名 environment 才留下部署历史、才可能挂审批规则；没有配置保护规则时是空操作。
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -37,7 +39,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies

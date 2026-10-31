@@ -1,0 +1,18 @@
+# 依赖升级走 PR：`allowScripts` 按精确版本放行安装脚本，锁文件一变，
+# tests/tech-stack-pins.test.mjs 会指出该补哪一行，不用靠人记得跑 npm outdated。
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
