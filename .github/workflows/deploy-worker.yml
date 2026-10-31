@@ -16,6 +16,10 @@ on:
       - "package-lock.json"
       - "wrangler.toml"
       - ".github/workflows/deploy-worker.yml"
+      # 部署侧从 .nvmrc 取 Node 版本、从 .npmrc 取源与 engine-strict：改这两个文件
+      # 会改变部署环境，所以也要触发。
+      - ".nvmrc"
+      - ".npmrc"
   workflow_dispatch:
 
 permissions:

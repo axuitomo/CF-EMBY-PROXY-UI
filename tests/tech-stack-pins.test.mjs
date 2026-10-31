@@ -60,6 +60,18 @@ test("allowScripts 与锁文件里的安装脚本完全对应", async () => {
   assert.deepEqual(allowed, locked.sort());
 });
 
+// overrides.workerd 的作用是让 miniflare 和 wrangler 共用 wrangler 要的那一份运行时。
+// 上面那条测试盯不到这里：workerd 被 override 钉死，miniflare 升级时锁文件里的版本不变，
+// 放行清单照样对得上，跑起来的却可能是旧 workerd。所以直接跟 wrangler 的声明对齐。
+test("overrides.workerd 与 wrangler 要求的运行时版本一致", async () => {
+  const manifest = JSON.parse(await readRepositoryFile("package.json"));
+  const lockfile = JSON.parse(await readRepositoryFile("package-lock.json"));
+  assert.equal(
+    manifest.overrides?.workerd,
+    lockfile.packages["node_modules/wrangler"]?.dependencies?.workerd,
+  );
+});
+
 // 参考源（frontend/src）的依赖故意不跟线上 pin 对齐，理由见 docs/tech-stack.md「仓库依赖的
 // 真实分层」那节：对齐会让"参考源升级"看起来像"线上升级"。但分叉不能无声扩大——npm 侧只要
 // 动了 minor，参考源就可能按线上没有的 API 写成代码，而预览正常、线上图表或组件挂掉。
