@@ -164,7 +164,6 @@ test("runtime config saves stop paying for legacy key deletes once they are gone
   // 遗留缓存用一次 list 判断，而不是固定发出 N 次 delete。
   // 快照 key 已彻底不存在（不是空数组）时，才不该再安排 delete。
   const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 20 } });
-  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "legacy-delete-skip" };
   invalidateRuntimeConfigCache();
 
   try {

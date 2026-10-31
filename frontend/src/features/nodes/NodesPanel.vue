@@ -244,7 +244,7 @@ function formatMainVideoStreamInheritLabel(optionLabel = "继承全局") {
       )
     : null;
   // 标签和备注以表单草稿为准：用户正在改的内容才是保存后的结果。
-  const merged = { ...(savedNode || {}), tags: undefined, tag: form.tag, remark: form.remark };
+  const merged = { ...savedNode, tags: undefined, tag: form.tag, remark: form.remark };
   return `${optionLabel}（${isNodeMarkedDirectSource(merged) ? "直连" : "反代"}）`;
 }
 

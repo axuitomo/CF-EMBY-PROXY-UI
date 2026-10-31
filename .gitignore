@@ -27,6 +27,8 @@ frontend/.admin-runtime-sync.json
 logs-*.json
 trace-*.json
 *.pprof
+# 临时抓取脚本与中间产物（.tmp-*.mjs 等）：会出现在仓库根目录，但不属于源码
+/.tmp-*
 
 # 管理端是单文件交付，dist 只跟踪 index.html；历史打包残留不得进仓库
 frontend/dist/.vite/

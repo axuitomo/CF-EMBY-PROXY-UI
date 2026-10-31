@@ -4,6 +4,7 @@
     "worker.js",
     "worker (*).js",
     "frontend/vendor/**",
+    ".tmp-*",
     "frontend/dist/**",
     ".worker-dist/**",
     "bundled/**",

@@ -16,29 +16,37 @@
     "check:worker-bundle": "node ./scripts/check-worker-bundle.mjs",
     "build:frontend": "npm run build --workspace frontend",
     "build:release": "npm run build:worker && npm run build:cdn --workspace frontend",
-    "lint": "oxlint .",
+    "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "check": "node ./scripts/check-project.mjs",
     "bench:stream": "node ./scripts/bench-worker-stream.mjs",
     "tail": "node --env-file-if-exists=.env ./node_modules/wrangler/bin/wrangler.js tail",
+    "dev:worker": "node --env-file-if-exists=.env ./node_modules/wrangler/bin/wrangler.js dev",
     "test:e2e": "playwright test tests/e2e/admin-smoke.spec.mjs",
     "test:e2e:motion": "playwright test tests/e2e/admin-view-motion.spec.mjs",
     "test:visual": "playwright test tests/e2e/visual.spec.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
-    "acorn": "^8.15.0",
+    "acorn": "^8.19.0",
     "acorn-walk": "^8.3.5",
-    "miniflare": "^4.20260722.1",
-    "oxfmt": "^0.72.0",
-    "oxlint": "^1.87.0",
+    "esbuild": "0.28.2",
+    "miniflare": "^4.20260730.0",
+    "oxfmt": "^0.75.0",
+    "oxlint": "^1.90.0",
     "vite": "^8.1.5",
     "wrangler": "^4.0.0"
   },
+  "overrides": {
+    "workerd": "1.20261023.1",
+    "undici": "7.30.1",
+    "sharp": "0.35.5"
+  },
   "allowScripts": {
-    "esbuild@0.28.1": true,
-    "workerd@1.20260722.1": true
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true,
+    "workerd@1.20261023.1": true
   }
 }

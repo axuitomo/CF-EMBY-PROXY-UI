@@ -509,7 +509,7 @@ function Rn(o, e) {
     })
   });
 }
-var Ul = 256 * 1024;
+var Ul = 262144;
 async function kl(o, e = {}) {
   const t = String(e.requestMethod || "GET").toUpperCase();
   if (!o || !(o.status >= 200 && o.status < 300) || t === "HEAD" || o.status === 204 || o.status === 205 || !o.body) return Object.freeze({ kind: "skip" });
@@ -654,14 +654,15 @@ function Hl(o, e = {}) {
     });
   } catch {
   }
+  const s = new Response(r, {
+    status: n.status,
+    statusText: n.statusText,
+    headers: yo(n.headers)
+  });
   return {
     kind: "valid",
     representation: ho({
-      response: new Response(r, {
-        status: n.status,
-        statusText: n.statusText,
-        headers: yo(n.headers)
-      }),
+      response: s,
       bodyText: r,
       bodyBytes: a,
       payload: t.payload
@@ -958,7 +959,7 @@ function Oe(o = "CONFIG_INVALID", e = "配置无效", t = 400, r = null) {
 function Bt(o) {
   return o ? o.name === "AbortError" ? !0 : String(o.message || "").toLowerCase().includes("abort") : !1;
 }
-var fi = 4 * 1024 * 1024, cn = 64 * 1024, mi = Object.freeze({
+var fi = 4194304, cn = 65536, mi = Object.freeze({
   "Referrer-Policy": "origin-when-cross-origin",
   "Strict-Transport-Security": "max-age=15552000; preload",
   "X-Frame-Options": "SAMEORIGIN",
@@ -1001,7 +1002,7 @@ function Xl(o) {
   };
 }
 var Yl = Object.freeze({
-  JwtExpiry: 3600 * 24 * 30,
+  JwtExpiry: 2592e3,
   LoginLockDuration: 900,
   MaxLoginAttempts: 5
 }), Pt = Object.freeze({
@@ -1010,7 +1011,7 @@ var Yl = Object.freeze({
   CryptoKeyCacheTTL: 86400,
   CryptoKeyCacheMax: 100,
   NodeCacheMax: 512,
-  PlaybackRouteHotCacheTtlMs: 86400 * 1e3,
+  PlaybackRouteHotCacheTtlMs: 864e5,
   PlaybackRouteHotCacheMax: 256,
   NodesRevisionCacheTtlMs: 1e3,
   NodesReadConcurrency: 12,
@@ -1018,15 +1019,15 @@ var Yl = Object.freeze({
   PingCacheMinutes: 10,
   PlaybackInfoCacheTtlSec: 60,
   PlaybackInfoCacheMax: 64,
-  PlaybackInfoCacheEntryMaxBytes: 256 * 1024,
-  PlaybackInfoCacheTotalMaxBytes: 4 * 1024 * 1024,
+  PlaybackInfoCacheEntryMaxBytes: 262144,
+  PlaybackInfoCacheTotalMaxBytes: 4194304,
   VideoProgressForwardIntervalSec: 3,
   VideoProgressForwardSessionMax: 128,
-  VideoProgressSnapshotMaxBytes: 32 * 1024,
+  VideoProgressSnapshotMaxBytes: 32768,
   RateLimitCacheMax: 4096,
-  D1SchemaReadyTtlMs: 600 * 1e3,
-  OpsStatusReadCacheTtlMs: 15 * 1e3,
-  AdminShellStatusStableWriteIntervalMs: 300 * 1e3,
+  D1SchemaReadyTtlMs: 6e5,
+  OpsStatusReadCacheTtlMs: 15e3,
+  AdminShellStatusStableWriteIntervalMs: 3e5,
   CleanupBudgetMs: 1,
   CleanupChunkSize: 64,
   CleanupMinIntervalMs: 1e3
@@ -1050,9 +1051,9 @@ var Yl = Object.freeze({
   LogKeywordMaxWindowDays: 3,
   LogSearchMode: "fts",
   LogWriteMode: "info",
-  LogVacuumMinIntervalMs: 10080 * 60 * 1e3,
-  LogFtsRebuildMinIntervalMs: 10080 * 60 * 1e3,
-  KvTidyIntervalMs: 3600 * 1e3,
+  LogVacuumMinIntervalMs: 6048e5,
+  LogFtsRebuildMinIntervalMs: 6048e5,
+  KvTidyIntervalMs: 36e5,
   TgAlertDroppedBatchThreshold: 0,
   TgAlertFlushRetryThreshold: 0,
   TgAlertCooldownMinutes: 30,
@@ -1066,8 +1067,8 @@ var Yl = Object.freeze({
   LogDedupeMax: 2048,
   LogDedupeTrimTarget: 1024
 }), Zl = Object.freeze({
-  ScheduledLeaseMinMs: 30 * 1e3,
-  ScheduledLeaseMs: 300 * 1e3,
+  ScheduledLeaseMinMs: 3e4,
+  ScheduledLeaseMs: 3e5,
   ScheduleUtcOffsetMinutes: 480,
   TgDailyReportSummaryEnabled: !1,
   TgDailyReportKvEnabled: !1,
@@ -1089,10 +1090,10 @@ var Yl = Object.freeze({
   UpstreamRetryAttempts: 0,
   ProxyStreamIdleTimeoutMs: 15e3,
   ProxyPlaylistIdleTimeoutMs: 12e3,
-  BufferedRetryBodyMaxBytes: 256 * 1024,
+  BufferedRetryBodyMaxBytes: 262144,
   PrewarmCacheTtl: 120,
   MetadataPrewarmTimeoutMs: 3e3,
-  PrewarmPrefetchBytes: 4 * 1024 * 1024,
+  PrewarmPrefetchBytes: 4194304,
   DefaultPlaybackInfoMode: "passthrough",
   DefaultRealClientIpMode: "forward",
   DefaultMediaAuthMode: "auto"
@@ -1103,7 +1104,7 @@ var Yl = Object.freeze({
   DnsIpProbeConcurrency: 4,
   DnsIpWorkspaceSyncProbeLimit: 2,
   DnsIpSourceConcurrency: 4,
-  DnsIpSourceFetchMaxBytes: 2 * 1024 * 1024,
+  DnsIpSourceFetchMaxBytes: 2097152,
   DnsIpSourceIpLimit: 5
 }), tu = Object.freeze({
   CfQuotaPlanCacheMinutes: 60,
@@ -1183,7 +1184,7 @@ function st(o = /* @__PURE__ */ new Date(), e = H.Defaults.ScheduleUtcOffsetMinu
   return Ca(o, e);
 }
 function it(o = /* @__PURE__ */ new Date(), e = H.Defaults.ScheduleUtcOffsetMinutes, t = "") {
-  const r = Ca(o, e), a = ma(t || r.clockTime, r.clockTime), n = Dr(a), s = Date.UTC(r.shiftedDate.getUTCFullYear(), r.shiftedDate.getUTCMonth(), r.shiftedDate.getUTCDate()) - r.utcOffsetMinutes * 60 * 1e3, i = s + 1440 * 60 * 1e3 - 1, c = s + Math.max(0, n) * 60 * 1e3;
+  const r = Ca(o, e), a = ma(t || r.clockTime, r.clockTime), n = Dr(a), s = Date.UTC(r.shiftedDate.getUTCFullYear(), r.shiftedDate.getUTCMonth(), r.shiftedDate.getUTCDate()) - r.utcOffsetMinutes * 60 * 1e3, i = s + 864e5 - 1, c = s + Math.max(0, n) * 60 * 1e3;
   return {
     ...r,
     normalizedClockTime: a,
@@ -1953,7 +1954,7 @@ function Wa(o) {
 }
 function Fa(o = [], e = H.Defaults.DnsIpSourceFetchMaxBytes) {
   return ce(re({
-    maxBytes: fe(e, H.Defaults.DnsIpSourceFetchMaxBytes, 1024, 8 * 1024 * 1024),
+    maxBytes: fe(e, H.Defaults.DnsIpSourceFetchMaxBytes, 1024, 8388608),
     enabledSources: (Array.isArray(o) ? o : []).map((t, r) => It(t, r)).filter((t) => t.enabled === !0 && sr(t)).map((t) => ({
       id: String(t.id || ""),
       name: String(t.name || ""),
@@ -2248,7 +2249,7 @@ function No(o = "") {
     "User-Agent": Gu(o)
   };
 }
-var Vu = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", Do = Ge.HedgeProbeTimeoutMs, Pi = Ge.HedgeProbeParallelism, xi = Ge.HedgeWaitTimeoutMs, Oi = Ge.HedgeLockTtlMs, oa = Ge.HedgePreferredTtlSec, vi = Ge.HedgeFailureCooldownSec, Fi = Ge.HedgeWakeJitterMs, Ui = Ge.BufferedRetryBodyMaxBytes, ju = Ge.MetadataPrewarmTimeoutMs, qu = Ge.PrewarmCacheTtl, Xu = Pt.PlaybackInfoCacheTtlSec, Io = Pt.PlaybackInfoCacheEntryMaxBytes, Yu = Pt.PlaybackInfoCacheTotalMaxBytes, ki = Pt.VideoProgressForwardIntervalSec, Ju = Pt.VideoProgressSnapshotMaxBytes, Hi = Pt.CacheTtlImagesDays, Qu = Pt.PlaybackRouteHotCacheTtlMs, ir = Pt.PlaybackRouteHotCacheMax, Zu = 3e4, ed = 256, $i = 12 * 1024 * 1024, td = $i - 64 * 1024, rd = 2e6, qt = 19e5, ls = 50, Bi = 512 * 1024, ad = 4, Mo = 8 * 1024 * 1024, wn = 256 * 1024, Gn = 32, us = 64, ds = 64 * 1024, fs = 128, ms = 8 * 1024, Rr = 4 * 1024, nd = Object.freeze([
+var Vu = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", Do = Ge.HedgeProbeTimeoutMs, Pi = Ge.HedgeProbeParallelism, xi = Ge.HedgeWaitTimeoutMs, Oi = Ge.HedgeLockTtlMs, oa = Ge.HedgePreferredTtlSec, vi = Ge.HedgeFailureCooldownSec, Fi = Ge.HedgeWakeJitterMs, Ui = Ge.BufferedRetryBodyMaxBytes, ju = Ge.MetadataPrewarmTimeoutMs, qu = Ge.PrewarmCacheTtl, Xu = Pt.PlaybackInfoCacheTtlSec, Io = Pt.PlaybackInfoCacheEntryMaxBytes, Yu = Pt.PlaybackInfoCacheTotalMaxBytes, ki = Pt.VideoProgressForwardIntervalSec, Ju = Pt.VideoProgressSnapshotMaxBytes, Hi = Pt.CacheTtlImagesDays, Qu = Pt.PlaybackRouteHotCacheTtlMs, ir = Pt.PlaybackRouteHotCacheMax, Zu = 3e4, ed = 256, $i = 12582912, td = $i - 65536, rd = 2e6, qt = 19e5, ls = 50, Bi = 524288, ad = 4, Mo = 8388608, wn = 262144, Gn = 32, us = 64, ds = 65536, fs = 128, ms = 8192, Rr = 4096, nd = Object.freeze([
   "displayName",
   "remark",
   "tag",
@@ -2257,7 +2258,7 @@ var Vu = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
   "secret",
   "hostPrefixCnameTarget",
   "hedgeProbePath"
-]), ps = 500, xa = 1e4, xr = 25e3, Oa = 1e4, od = 1e4, Ln = 1e4, sd = 600 * 1e3, id = 120 * 1e3, nt = 2, va = 2;
+]), ps = 500, xa = 1e4, xr = 25e3, Oa = 1e4, od = 1e4, Ln = 1e4, sd = 6e5, id = 12e4, nt = 2, va = 2;
 function Nn(o = "") {
   const e = String(o || "").trim().toUpperCase();
   return e.includes("INT") ? "INTEGER" : e.includes("CHAR") || e.includes("CLOB") || e.includes("TEXT") ? "TEXT" : e.includes("REAL") || e.includes("FLOA") || e.includes("DOUB") ? "REAL" : !e || e.includes("BLOB") ? "BLOB" : "NUMERIC";
@@ -2572,7 +2573,7 @@ function bd(o = {}, e = {}) {
     }
     return J;
   }
-  const g = "__ADMIN_BOOTSTRAP_JSON__", h = "__INIT_HEALTH_BANNER__", y = "__ADMIN_APP_ROOT__", _ = "", S = "https://admin-shell-cache.invalid", E = "private, no-cache, max-age=0", b = "public, max-age=31536000, immutable", T = 300 * 1e3, C = 2 * 1024 * 1024, N = "bootstrap-tailwind-assets-v3-active-index", P = "X-Admin-Shell-Cached-At", R = "X-Admin-Shell-Source-Etag", L = "X-Admin-Shell-Source-Last-Modified", A = "X-Admin-Shell-Source-Hash", D = "__release", v = "vendor", w = "__warm", x = "https://admin-release-vendor-cache.invalid", M = "https://admin-release-vendor-manifest.invalid", O = "public, max-age=31536000, immutable", z = "no-store, max-age=0", X = 8 * 1024 * 1024, U = 3, F = "X-Admin-Release-Vendor-Cached-At", I = "X-Admin-Release-Vendor-Source-Hash", k = Object.freeze([
+  const g = "__ADMIN_BOOTSTRAP_JSON__", h = "__INIT_HEALTH_BANNER__", y = "__ADMIN_APP_ROOT__", _ = "", S = "https://admin-shell-cache.invalid", E = "private, no-cache, max-age=0", b = "public, max-age=31536000, immutable", T = 3e5, C = 2097152, N = "bootstrap-tailwind-assets-v3-active-index", P = "X-Admin-Shell-Cached-At", R = "X-Admin-Shell-Source-Etag", L = "X-Admin-Shell-Source-Last-Modified", A = "X-Admin-Shell-Source-Hash", D = "__release", v = "vendor", w = "__warm", x = "https://admin-release-vendor-cache.invalid", M = "https://admin-release-vendor-manifest.invalid", O = "public, max-age=31536000, immutable", z = "no-store, max-age=0", X = 8388608, U = 3, F = "X-Admin-Release-Vendor-Cached-At", I = "X-Admin-Release-Vendor-Source-Hash", k = Object.freeze([
     "dashboard",
     "nodes",
     "logs",
@@ -4618,7 +4619,7 @@ function Da(o = {}) {
 function Yd(o = {}) {
   return o.DB || o.D1 || o.PROXY_LOGS || null;
 }
-var Jd = 16 * 1024;
+var Jd = 16384;
 async function ht(o, e) {
   const t = new TextEncoder(), r = Date.now();
   let a = ne.CryptoKeyCache.get(o);
@@ -5241,7 +5242,7 @@ var mf = [
     scheduledLeaseMs: {
       fallback: H.Defaults.ScheduledLeaseMs,
       min: H.Defaults.ScheduledLeaseMinMs,
-      max: 900 * 1e3
+      max: 9e5
     },
     uiRadiusPx: {
       fallback: H.Defaults.UiRadiusPx,
@@ -6175,7 +6176,7 @@ function Ya(o) {
   ], r = Math.floor(Math.log(o) / Math.log(e));
   return parseFloat((o / Math.pow(e, r)).toFixed(2)) + " " + t[r];
 }
-var Cc = 1024 * 1024 * 1024, xf = 500 * 1024 * 1024, Of = 10 * 1024 * 1024 * 1024, Bo = Object.freeze({
+var Cc = 1073741824, xf = 524288e3, Of = 10737418240, Bo = Object.freeze({
   planClass: "free",
   planLabel: "FREE",
   periodLabel: "今日",
@@ -6310,7 +6311,7 @@ function Cs(o = 0, e = $()) {
   const t = Math.max(0, Number(o) || 0), r = Math.max(t, Number(e) || $());
   if (t <= 0) return "";
   const a = Math.max(0, r - t);
-  return a < 60 * 1e3 ? "缓存年龄：不到 1 分钟" : a < 3600 * 1e3 ? `缓存年龄：${Math.max(1, Math.round(a / (60 * 1e3)))} 分钟` : `缓存年龄：${Math.max(1, Math.round(a / (3600 * 1e3)))} 小时`;
+  return a < 6e4 ? "缓存年龄：不到 1 分钟" : a < 36e5 ? `缓存年龄：${Math.max(1, Math.round(a / 6e4))} 分钟` : `缓存年龄：${Math.max(1, Math.round(a / 36e5))} 小时`;
 }
 function Tr({ key: o = "", label: e = "", used: t = 0, limit: r = 0, kind: a = "count" } = {}) {
   const n = Math.max(0, Number(t) || 0), s = Math.max(0, Number(r) || 0), i = s > 0 ? n / s * 100 : 0, c = _a(i);
@@ -7608,7 +7609,7 @@ function lm(o = {}, e = {}) {
     }
   };
 }
-var $c = 600 * 1e3, um = $c;
+var $c = 6e5, um = $c;
 function ot(o = "", e = "manual") {
   const t = String(e || "manual").trim().toLowerCase() === "scheduled" ? "scheduled" : "manual", r = String(o || "").trim().toLowerCase();
   return t !== "manual" ? "smart" : r === "full" ? "full" : "smart";
@@ -7682,7 +7683,7 @@ function Os(o) {
   const e = String(o?.message || o || "").trim() || "Worker 脚本更新失败", t = Number(o?.status) || Number(/cf_api_http_(\d+)/i.exec(e)?.[1] || 0), r = String(o?.code || "").trim().toUpperCase();
   return r === "WORKER_SCRIPT_UPDATE_FORBIDDEN" && String(o?.message || "").trim() ? o.message : r === "WORKER_PLACEMENT_SCRIPT_DISCOVERY_FORBIDDEN" ? String(o?.message || "").replace("Cloudflare Worker 放置读取失败", "Cloudflare Worker 脚本定位失败").trim() : r === "WORKER_PLACEMENT_SCRIPT_UNRESOLVED" || r === "WORKER_PLACEMENT_HOST_INVALID" || r === "WORKER_PLACEMENT_CONFIG_REQUIRED" ? e : t === 401 ? "Cloudflare Worker 和 HTML 更新失败：API Token 无效" : t === 403 ? zc("更新") : t === 404 ? "Cloudflare Worker 和 HTML 更新失败：未找到目标 Worker 脚本" : e;
 }
-var ym = 3 * 1024 * 1024;
+var ym = 3145728;
 function Sm(o = {}, e = {}) {
   const { kernel: t } = o, { buildAdminLocalIndexUploadRecord: r } = o;
   return {
@@ -8103,7 +8104,7 @@ function Am(o, e = "GET") {
   return o === 303 && t !== "GET" && t !== "HEAD" || (o === 301 || o === 302) && t === "POST" ? "GET" : t;
 }
 function Cm(o = {}, e = {}) {
-  const t = Ji(fa(o, "protocolStrategy") ? o?.protocolStrategy : vo(o)), r = Number.isFinite(Number(e.hourUtc8)) ? Number(e.hourUtc8) : (/* @__PURE__ */ (/* @__PURE__ */ new Date()).getUTCHours() + 8) % 24, a = r >= 20 && r < 24;
+  const t = Ji(fa(o, "protocolStrategy") ? o?.protocolStrategy : vo(o)), r = Number.isFinite(Number(e.hourUtc8)) ? Number(e.hourUtc8) : ((/* @__PURE__ */ new Date()).getUTCHours() + 8) % 24, a = r >= 20 && r < 24;
   return t === "aggressive" ? {
     strategy: t,
     enableH2: !0,
@@ -9144,7 +9145,7 @@ var km = Object.freeze([{
   id: "cloudflare",
   label: "Cloudflare",
   endpoint: "https://cloudflare-dns.com/dns-query"
-}]), Vc = 30 * 1e3, Hm = Vc, $m = "emby-proxy-ui-dns-probe/1.0", Bm = 2400 * 1e3, Km = 35 * 1e3, zm = "dns_ip_pool_fetch_lock:", Wm = "sys:dns_ip_pool_fetch_lock:v1:";
+}]), Vc = 3e4, Hm = Vc, $m = "emby-proxy-ui-dns-probe/1.0", Bm = 24e5, Km = 35e3, zm = "dns_ip_pool_fetch_lock:", Wm = "sys:dns_ip_pool_fetch_lock:v1:";
 function Gm(o = {}, e = [], t = {}) {
   const r = /* @__PURE__ */ new Set(), a = [];
   for (const s of Array.isArray(e) ? e : []) {
@@ -9783,7 +9784,7 @@ function ip(o = {}, e = {}) {
       try {
         if (!u) return G("D1_NOT_CONFIGURED", "请先绑定 D1 / PROXY_LOGS 数据库");
         u && await t.ensureDnsIpWorkspaceSchema(u);
-        const p = fe(c?.maxBytes, H.Defaults.DnsIpSourceFetchMaxBytes, 1024, 8 * 1024 * 1024), g = await t.getDnsIpPoolSources({
+        const p = fe(c?.maxBytes, H.Defaults.DnsIpSourceFetchMaxBytes, 1024, 8388608), g = await t.getDnsIpPoolSources({
           kv: d,
           db: u
         }), h = Fa(g, p), y = u && h ? await t.getDnsIpPoolFetchCacheEntry(u, h) : null;
@@ -10450,7 +10451,7 @@ async function Nr(o, e = null) {
   });
   return t.NodeIndexMutationChain = r.catch(() => null), await r;
 }
-var hp = "cf_dashboard_cache:", jo = "sys:cf_dash_cache", yp = 1800 * 1e3, Ks = 1440 * 60 * 1e3, Sp = "sys:cf_daily_traffic", $a = 7, _p = 1080 * 60 * 60, bp = $a;
+var hp = "cf_dashboard_cache:", jo = "sys:cf_dash_cache", yp = 18e5, Ks = 864e5, Sp = "sys:cf_daily_traffic", $a = 7, _p = 3888e3, bp = $a;
 function ao(o, e = "") {
   return `${hp}${encodeURIComponent(String(o || "default").trim() || "default")}:${encodeURIComponent(String(e || "current").trim() || "current")}`;
 }
@@ -10572,7 +10573,7 @@ function Jc(o = "", e = 0, t = 0, r = 0, a = 0) {
   };
 }
 function tn(o = {}) {
-  const e = Ue(o.utcOffsetMinutes), t = Math.max(0, Number(o.nowMs) || $()), r = it(new Date(t), e).startTs - 8640 * 60 * 1e3, a = Array.from({ length: 7 }, (n, s) => {
+  const e = Ue(o.utcOffsetMinutes), t = Math.max(0, Number(o.nowMs) || $()), r = it(new Date(t), e).startTs - 5184e5, a = Array.from({ length: 7 }, (n, s) => {
     const i = st(r + s * 24 * 60 * 60 * 1e3, e);
     return {
       key: i.dateKey,
@@ -11979,12 +11980,13 @@ function Sg(o = {}, e = {}) {
       else m.optimizeDb === !0 && (y.optimizeStatus = "deferred_budget");
       y.budget.durationMs = Math.max(0, $() - b), y.budget.durationMs >= xr && !y.budget.exhaustedBy && (y.budget.exhaustedBy = "time_limit"), await p("patchLogStatus");
       const P = await t.patchLogStatus(e, i, g, d, y, m, n);
-      if (y.status !== "partial_failure" && y.status !== "failed") if (y.hasMore)
-        y.status = "success", y.reason = "maintenance_budget_exhausted";
-      else if (u === "scheduled") {
-        const R = m.rebuildLogsFtsDeferred === !0 || m.optimizeDbDeferred === !0;
-        _ ? y.status = "success" : (y.status = "skipped", y.reason = R ? "maintenance_deferred" : "no_expired_data");
-      } else y.status = "success";
+      if (y.status !== "partial_failure" && y.status !== "failed")
+        if (y.hasMore)
+          y.status = "success", y.reason = "maintenance_budget_exhausted";
+        else if (u === "scheduled") {
+          const R = m.rebuildLogsFtsDeferred === !0 || m.optimizeDbDeferred === !0;
+          _ ? y.status = "success" : (y.status = "skipped", y.reason = R ? "maintenance_deferred" : "no_expired_data");
+        } else y.status = "success";
       return y.finishedAt = P, e.buildTidyResult(d, y, "d1");
     },
     async tidyD1Data(a, n = {}) {
@@ -12825,7 +12827,7 @@ var Tg = class {
   async #p(o, e, t) {
     const r = this.service.getDB(e), a = this.service.getKV(e);
     if (!a && !r) return;
-    const n = { db: r }, s = await we(e), i = Ue(s?.scheduleUtcOffsetMinutes), c = o?.scheduledTime !== void 0 ? new Date(o.scheduledTime) : /* @__PURE__ */ new Date(), l = ns(c, i), d = (C = /* @__PURE__ */ new Date()) => ns(C, i), u = fe(s?.scheduledLeaseMs, H.Defaults.ScheduledLeaseMs, H.Defaults.ScheduledLeaseMinMs, 900 * 1e3), f = `${$()}-${Math.random().toString(36).slice(2, 10)}`, m = this.#l(f), p = async (C) => {
+    const n = { db: r }, s = await we(e), i = Ue(s?.scheduleUtcOffsetMinutes), c = o?.scheduledTime !== void 0 ? new Date(o.scheduledTime) : /* @__PURE__ */ new Date(), l = ns(c, i), d = (C = /* @__PURE__ */ new Date()) => ns(C, i), u = fe(s?.scheduledLeaseMs, H.Defaults.ScheduledLeaseMs, H.Defaults.ScheduledLeaseMinMs, 9e5), f = `${$()}-${Math.random().toString(36).slice(2, 10)}`, m = this.#l(f), p = async (C) => {
       const N = String(C || "db_unavailable").trim() || "db_unavailable";
       await m(this.service.patchOpsStatus(e, this.#u(l, N, "d1")), "patch_skipped_status", {
         reason: N,
@@ -16748,7 +16750,7 @@ function sh(o = {}, e = {}) {
       };
     },
     getPlaybackProgressRelayTerminalTtlMs(t = 0) {
-      return Math.max(600 * 1e3, Math.max(1, Number(t) || 0) * 20);
+      return Math.max(6e5, Math.max(1, Number(t) || 0) * 20);
     },
     isPlaybackProgressRelayTerminal(t, r = $()) {
       return !t || String(t.terminalState || "").trim().toLowerCase() !== "stopped" ? !1 : Number(t.terminalTombstoneUntil || 0) > r;
@@ -17748,7 +17750,7 @@ function mh(o = {}, e = {}) {
       dd.forEach((f) => l.delete(f)), r.status === 101 && r.headers.has("Connection") && l.set("Connection", r.headers.get("Connection")), l.set("Access-Control-Allow-Origin", s), n && n["Access-Control-Expose-Headers"] && l.set("Access-Control-Expose-Headers", n["Access-Control-Expose-Headers"]), n && n["Access-Control-Allow-Methods"] && l.set("Access-Control-Allow-Methods", n["Access-Control-Allow-Methods"]);
       const d = a.headers.get("Access-Control-Request-Headers");
       d ? (l.set("Access-Control-Allow-Headers", d), Hr(l, "Access-Control-Request-Headers")) : n && n["Access-Control-Allow-Headers"] && l.set("Access-Control-Allow-Headers", n["Access-Control-Allow-Headers"]), s !== "*" && Hr(l, "Origin"), (!c.enableH3 || c.forceH1) && l.delete("Alt-Svc");
-      const u = fe(c.imageCacheMaxAge, Hi * 86400, 0, 365 * 86400);
+      const u = fe(c.imageCacheMaxAge, Hi * 86400, 0, 31536e3);
       if (r.status >= 400 || r.status === 206 || i.isManifest || i.isBigStream || i.isSmartStrmMedia) l.set("Cache-Control", "no-store");
       else if (c.proxiedExternalRedirect) l.set("Cache-Control", "no-store");
       else if (i.isImage || i.isStaticFile || i.isSubtitle) {
@@ -19033,7 +19035,7 @@ function bh(o = {}, e = {}) {
         summary: "D1 写入热点尚未启用",
         detail: "请先在账号设置中填写 Cloudflare 账号 ID、API 令牌与 D1 Database ID。"
       });
-      const u = it(new Date(n), s).startTs - 8640 * 60 * 1e3, f = await jf({
+      const u = it(new Date(n), s).startTs - 5184e5, f = await jf({
         accountId: i,
         apiToken: c,
         databaseId: l,
@@ -19089,7 +19091,7 @@ function bh(o = {}, e = {}) {
         cfAnalyticsError: "请在账号设置中填写并保存 Cloudflare Zone ID 与 API 令牌",
         trafficSourceText: "本月视频流量：未配置 Cloudflare，无法获取 CF Zone 总流量"
       });
-      const d = 1440 * 60 * 1e3, u = Ue(a.scheduleUtcOffsetMinutes), f = r?.kv || e.getKV(t), m = n - $a * d, p = [];
+      const d = 864e5, u = Ue(a.scheduleUtcOffsetMinutes), f = r?.kv || e.getKV(t), m = n - $a * d, p = [];
       for (let T = s.startTs; T <= s.endTs; T += d) p.push({
         startTs: T,
         endTs: Math.min(s.endTs, T + d - 1),
@@ -19151,7 +19153,7 @@ function bh(o = {}, e = {}) {
         storedCount: 0,
         errors: []
       };
-      const c = Math.max(0, Number(r?.nowMs) || $()), l = Ue(a.scheduleUtcOffsetMinutes), d = it(new Date(c), l), u = 1440 * 60 * 1e3, f = c - $a * u;
+      const c = Math.max(0, Number(r?.nowMs) || $()), l = Ue(a.scheduleUtcOffsetMinutes), d = it(new Date(c), l), u = 864e5, f = c - $a * u;
       let m = 0;
       const p = [];
       for (let g = 1; g <= bp; g += 1) {
@@ -19482,7 +19484,7 @@ function Eh(o = {}, e = {}) {
             cacheMeta: { generatedAt: _.generatedAt }
           }, "live", {
             cachedAt: u,
-            expiresAt: u + 3600 * 1e3,
+            expiresAt: u + 36e5,
             updatedAt: u,
             generatedAt: _.generatedAt,
             warning: ""
@@ -19504,7 +19506,7 @@ function Eh(o = {}, e = {}) {
         });
         return aa(y, "live", {
           cachedAt: u,
-          expiresAt: u + 3600 * 1e3,
+          expiresAt: u + 36e5,
           updatedAt: u,
           generatedAt: y?.stats?.generatedAt || ""
         });
@@ -19708,10 +19710,10 @@ function Th(o = {}, e = {}) {
       };
     },
     getD1ContractHash() {
-      const t = e.getD1CurrentSchemaContract();
+      const t = e.getD1CurrentSchemaContract(), r = Object.keys(t.columns).sort().map((a) => [a, e.buildD1CreateTableSql(a)]);
       return ce(re({
         version: nt,
-        createTables: Object.keys(t.columns).sort().map((r) => [r, e.buildD1CreateTableSql(r)]),
+        createTables: r,
         columns: t.columns,
         columnAffinities: t.columnAffinities,
         primaryKeys: t.primaryKeys,
@@ -20418,7 +20420,9 @@ function Ah(o = {}, e = {}) {
       };
     },
     async getD1SchemaFingerprint(t) {
-      return t ? ce(re((await t.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'trigger') ORDER BY type, name").all())?.results || [])) : "";
+      if (!t) return "";
+      const r = (await t.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'trigger') ORDER BY type, name").all())?.results || [];
+      return ce(re(r));
     },
     async getD1SchemaStatus(t, r = {}) {
       if (!t) return {
@@ -23106,7 +23110,7 @@ function Hh(o, e) {
   for (const a of r) for (const [n, s] of Object.entries(a)) o[n] = s;
   return o;
 }
-var $h = "video.emos.best", Bh = "emos", vn = "https://medb.lat/media/list/index?page_size=1", Kh = 60 * 1e3, zh = 5e3;
+var $h = "video.emos.best", Bh = "emos", vn = "https://medb.lat/media/list/index?page_size=1", Kh = 6e4, zh = 5e3;
 function Wh(o) {
   const e = B(o?.items?.[0]?.counts) ? o.items[0].counts : B(o?.counts) ? o.counts : null;
   return e ? {

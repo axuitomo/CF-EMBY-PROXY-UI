@@ -8261,7 +8261,7 @@ test("managed stream errors still log under error-only mode", async () => {
     },
     abort(reason) {
       this.abortReason = reason;
-      for (const listener of [...listeners]) listener(reason);
+      for (const listener of Array.from(listeners)) listener(reason);
     },
     dispose() {},
   };

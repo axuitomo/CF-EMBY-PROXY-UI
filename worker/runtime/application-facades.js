@@ -12104,7 +12104,7 @@ function resolveProtocolRuntimeProfile(config = {}, options = {}) {
   );
   const hourUtc8 = Number.isFinite(Number(options.hourUtc8))
     ? Number(options.hourUtc8)
-    : /* @__PURE__ */ (new Date().getUTCHours() + 8) % 24;
+    : (new Date().getUTCHours() + 8) % 24;
   const isPeakHour = hourUtc8 >= 20 && hourUtc8 < 24;
   if (strategy === "aggressive")
     return {
@@ -17059,13 +17059,6 @@ function matchPrivateMediaAuthHeaderName(normalized = "") {
   if (!normalized || MEDIA_REDIRECT_SAFE_HEADER_NAMES.has(normalized) || normalized === "cookie")
     return false;
   return PRIVATE_MEDIA_AUTH_NAME_PATTERN.test(normalized);
-}
-function isPotentialPrivateMediaAuthHeaderName(name = "") {
-  return matchPrivateMediaAuthHeaderName(
-    String(name || "")
-      .trim()
-      .toLowerCase(),
-  );
 }
 function isPotentialPrivateMediaAuthCookieName(name = "") {
   const normalized = String(name || "")

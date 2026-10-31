@@ -17,7 +17,11 @@ const requiredChecks = [
   {
     name: "Oxlint",
     command: process.execPath,
-    args: [path.join(repositoryRoot, "node_modules", "oxlint", "bin", "oxlint"), "."],
+    args: [
+      path.join(repositoryRoot, "node_modules", "oxlint", "bin", "oxlint"),
+      "--deny-warnings",
+      ".",
+    ],
     cwd: repositoryRoot,
   },
   {
