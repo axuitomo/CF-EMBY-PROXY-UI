@@ -21,7 +21,7 @@ jobs:
         steps:
             - name: Checkout target repo
               # 这里从 v4 升级到了 v6
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
               with:
                 token: ${{ secrets.GITHUB_TOKEN }}
 
