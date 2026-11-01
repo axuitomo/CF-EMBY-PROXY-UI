@@ -4873,6 +4873,12 @@ body.bg-slate-50,body.antialiased{background:rgb(var(--ui-c-n-50)) !important;co
 #view-settings button:disabled,
 #view-settings .settings-secondary-btn:disabled,
 #view-settings .set-tab:disabled{opacity:.65 !important;pointer-events:none}
+/* 优选 IP 工作台工具栏用 overflow-x-auto 防窄屏换行，但它同时是导出下拉的裁切父级与外层滚动区之间
+   唯一的中转层：弹层高 120px，容器只有 38px，三个导出格式会被整块裁掉、一个都点不到。
+   这里去掉中转层的裁切并允许换行；更外层 #content-area 仍保持滚动，窄屏只是正常纵向变高。 */
+#view-dns .flex.items-center.gap-2.overflow-x-auto{overflow:visible;flex-wrap:wrap;row-gap:.5rem}
+/* 工具栏是 IP 池卡片的最后一行，往下弹会顶出视口（1280×900 下弹层底边落在 987px），改为向上弹。 */
+#view-dns details>.absolute{top:auto;bottom:calc(100% + .25rem);right:0;left:auto;margin-top:0;z-index:30}
 @media (max-width:767px){#view-nodes [data-admin-node-toolbar-row="1"],#view-nodes [data-admin-node-toolbar-actions="1"]{grid-template-columns:minmax(0,1fr)}#view-nodes [data-admin-node-toolbar-row="1"]>*{width:100%}#view-settings .settings-view-layout{display:flex;flex-direction:column}#view-settings .settings-worker-html-update-card [data-admin-worker-html-grid="1"]{grid-template-columns:minmax(0,1fr)}#view-settings .settings-worker-html-update-card [data-admin-worker-html-actions="1"]{align-items:stretch;flex-direction:column}#view-settings .settings-worker-html-update-card [data-admin-worker-html-actions="1"] button{width:100%}}
 @media (min-width:768px) and (max-width:1535px){#view-nodes [data-admin-node-toolbar-actions="1"]{grid-template-columns:repeat(4,minmax(0,1fr));width:100%}#view-nodes [data-admin-node-toolbar-actions="1"]>*{width:100%}}
 @media (min-width:1536px){#view-nodes [data-admin-node-toolbar="1"]{grid-template-columns:minmax(0,1fr) max-content}#view-nodes [data-admin-node-toolbar-actions="1"]{justify-content:end}}
@@ -8190,28 +8196,16 @@ html[data-theme-switching] *::after{transition:none !important}
   // 优选 IP 工作台删除后残留：getDnsIpWorkspace 会把浏览器本地池并进 sharedPoolItems 返回
   // （为给本地 IP 补探活结果），客户端又把这份合列表当成「共享快照」存进
   // dnsIpSourceSharedPoolItems。于是删掉本地池条目时，服务端 fetch 缓存里根本没有这个 IP，
-  // deletedIps 是空的，那份影子副本就留在共享列表里，只有刷新页面才消失。
-  // 这里按本地池的实际删除结果，把同名影子副本一并清掉（两侧都有的 IP 已被接口删掉，重复清理无害）。
+  // deletedIps 是空的，那份影子副本就留在共享列表里。删完再强制拉一次工作台接口，
+  // 列表跟着服务端重算，不用等手动刷新或重开页面。
   function patchDnsIpPoolDeleteMethods(app) {
     if (!app || patchedDnsIpPoolDeleteApp === app) return;
     if (typeof app.deleteSelectedDnsIpPoolItems !== 'function') return;
     patchedDnsIpPoolDeleteApp = app;
     const originalDelete = app.deleteSelectedDnsIpPoolItems.bind(app);
-    const readLocalPoolKeys = (target) => new Set(
-      (Array.isArray(target?.dnsIpLocalPoolItems) ? target.dnsIpLocalPoolItems : [])
-        .map((item) => String(item?.ip || '').trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const poolItemKey = (item) => String(item?.ip || '').trim().toLowerCase();
-    app.deleteSelectedDnsIpPoolItems = async function deleteSelectedDnsIpPoolItemsWithoutStaleSharedCopies(...args) {
-      const localKeysBefore = readLocalPoolKeys(this);
+    app.deleteSelectedDnsIpPoolItems = async function deleteSelectedDnsIpPoolItemsThenReloadWorkspace(...args) {
       const result = await originalDelete(...args);
-      const localKeysAfter = readLocalPoolKeys(this);
-      const removedLocalKeys = new Set([...localKeysBefore].filter((key) => !localKeysAfter.has(key)));
-      if (!removedLocalKeys.size) return result;
-      const sharedItems = Array.isArray(this.dnsIpSourceSharedPoolItems) ? this.dnsIpSourceSharedPoolItems : [];
-      const keptSharedItems = sharedItems.filter((item) => !removedLocalKeys.has(poolItemKey(item)));
-      if (keptSharedItems.length !== sharedItems.length) this.setDnsIpSourceSharedPoolItems(keptSharedItems);
+      await app.refreshDnsIpWorkspace?.(true);
       return result;
     };
   }
