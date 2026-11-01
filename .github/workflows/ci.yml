@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # 与 engines 下限一致；.npmrc 的 engine-strict 会在这里真正生效
           node-version-file: .nvmrc
