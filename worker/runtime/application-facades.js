@@ -427,7 +427,9 @@ var CACHE_DEFAULTS = Object.freeze({
   NodeCacheMax: 512,
   PlaybackRouteHotCacheTtlMs: 86400 * 1e3,
   PlaybackRouteHotCacheMax: 256,
-  NodesRevisionCacheTtlMs: 1e3,
+  // 只决定跨 colo 的节点变更可见延迟；同 isolate 写入走 generation 立即失效。
+  // 1s 时每个有流量的 isolate 恒定 1 次 KV 读/秒（86,400 次/天，免费版额度 100,000/天）。
+  NodesRevisionCacheTtlMs: 10 * 1e3,
   NodesReadConcurrency: 12,
   CacheTtlImagesDays: 30,
   PingCacheMinutes: 10,

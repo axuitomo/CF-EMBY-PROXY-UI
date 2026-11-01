@@ -1015,7 +1015,7 @@ var Zl = Object.freeze({
   NodeCacheMax: 512,
   PlaybackRouteHotCacheTtlMs: 864e5,
   PlaybackRouteHotCacheMax: 256,
-  NodesRevisionCacheTtlMs: 1e3,
+  NodesRevisionCacheTtlMs: 1e4,
   NodesReadConcurrency: 12,
   CacheTtlImagesDays: 30,
   PingCacheMinutes: 10,

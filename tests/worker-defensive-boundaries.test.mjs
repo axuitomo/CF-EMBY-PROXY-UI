@@ -6639,6 +6639,39 @@ test("node revision refresh coalesces and hot node reads stay in memory", async 
   invalidateNodesRevisionCache();
 });
 
+test("nodes revision cache holds for its TTL instead of re-reading KV every second", async () => {
+  // TTL 是 KV 读次数的唯一来源：1s 时每个有流量的 isolate 恒定 1 次读/秒。
+  assert.ok(
+    Config.Defaults.NodesRevisionCacheTtlMs >= 10 * 1000,
+    "NodesRevisionCacheTtlMs must stay widened; 1s re-reads KV on every second of traffic",
+  );
+  let reads = 0;
+  const kv = {
+    async get() {
+      reads += 1;
+      return { revision: `nodes-r${reads}` };
+    },
+  };
+  invalidateNodesRevisionCache(kv);
+  const state = getNodeBindingCacheState(kv);
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    assert.equal(await kernel.getNodesRevision(kv), "nodes-r1");
+    clock += Config.Defaults.NodesRevisionCacheTtlMs - 1;
+    assert.equal(await kernel.getNodesRevision(kv), "nodes-r1");
+    assert.equal(reads, 1);
+    clock += 1;
+    assert.equal(await kernel.getNodesRevision(kv), "nodes-r2");
+    assert.equal(reads, 2);
+  } finally {
+    Date.now = realNow;
+    state.SingleFlightTasks.clear();
+    invalidateNodesRevisionCache(kv);
+  }
+});
+
 test("oversized legacy nodes remain readable but bypass node and playback hot caches", async () => {
   const oversizedNode = {
     target: "https://origin.test",
