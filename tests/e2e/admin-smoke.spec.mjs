@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { expect, test } from "@playwright/test";
 import { loginAndWaitForAdminBoot } from "./support.mjs";
 
@@ -82,3 +83,71 @@ test("CDN 不可达时管理台仍能从同源 vendor 启动", async ({ page }) 
   expect(paintedPixels).toBeGreaterThan(1000);
   expect(runtimeErrors).toEqual([]);
 });
+
+// 优选 IP 工作台的「导出」是 <details> 里的绝对定位弹层，而它的父级工具栏用 overflow-x-auto
+// 防窄屏换行。滚动容器会整块裁掉绝对定位子元素（弹层 120px，容器 38px），三个导出格式一个都点不到，
+// 只有真实浏览器算得出这个几何，字符串断言看不出来。
+for (const width of [1440, 1024, 390]) {
+  test(`优选 IP 工作台导出菜单在 ${width}px 下可点`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await loginAndWaitForAdminBoot(page);
+    // 窄屏主导航是抽屉，直接用 hash 切视图。
+    await page.evaluate(() => {
+      location.hash = "#dns";
+    });
+    await expect(page.locator("#view-dns")).toBeVisible();
+    const dismiss = page.getByRole("button", { name: "知道了" });
+    if (await dismiss.isVisible().catch(() => false)) await dismiss.click();
+    // 工作台只在 A 模式下渲染（CNAME 模式显示历史卡片）。
+    await page.evaluate(() =>
+      [...document.querySelectorAll("#view-dns button")]
+        .find((button) => button.textContent.trim() === "A模式")
+        ?.click(),
+    );
+    await expect(page.locator("#view-dns details > summary")).toBeVisible({ timeout: 15000 });
+
+    await page.locator("#view-dns details").scrollIntoViewIfNeeded();
+    await page.locator("#view-dns details > summary").click();
+    await page.waitForTimeout(300);
+
+    const menu = await page.evaluate(() => {
+      const surface = document.querySelector("#view-dns details > div");
+      const box = surface.getBoundingClientRect();
+      return {
+        inViewport: box.top >= 0 && box.bottom <= innerHeight,
+        right: Math.round(box.right),
+        docWidth: document.documentElement.clientWidth,
+        toolbarScrolls: (() => {
+          const toolbar = document.querySelector("#view-dns details").parentElement;
+          return toolbar.scrollWidth > toolbar.clientWidth + 1;
+        })(),
+        options: [...surface.querySelectorAll("button")].map((button) => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+          return {
+            text: button.innerText.replace(/\s+/g, " ").trim(),
+            visible: rect.top >= 0 && rect.bottom <= innerHeight,
+            hittable: !!hit && (hit === button || button.contains(hit)),
+          };
+        }),
+      };
+    });
+
+    expect(menu.options.map((option) => option.text)).toEqual([
+      "导出 TXT .txt",
+      "导出 JSON .json",
+      "导出 CSV .csv",
+    ]);
+    for (const option of menu.options) {
+      assert.equal(option.hittable, true, `${width}px: ${option.text} 被遮挡`);
+      assert.equal(option.visible, true, `${width}px: ${option.text} 超出视口`);
+    }
+    assert.equal(menu.inViewport, true);
+    assert.ok(
+      menu.right <= menu.docWidth,
+      `${width}px: 弹层右侧溢出 ${menu.right} > ${menu.docWidth}`,
+    );
+    // 弹层不能被工具栏的横向滚动裁掉：容器仍可横滚时，弹层就是不可见的。
+    assert.equal(menu.toolbarScrolls, false);
+  });
+}

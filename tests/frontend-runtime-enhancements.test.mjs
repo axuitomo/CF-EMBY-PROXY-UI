@@ -1922,39 +1922,33 @@ test("credential fields link out to the official page that issues them", async (
   assert.match(enhancementSource, /\[data-admin-credential-link\] svg\{width:\.875rem/);
 });
 
-test("deleting a local pool IP also drops its stale shared-snapshot copy", async () => {
+test("deleting pool IPs reloads the workspace right after the delete", async () => {
   const { patchDnsIpPoolDeleteMethods } = loadEnhancementTestHooks();
+  const calls = [];
   const app = {
-    dnsIpLocalPoolItems: [{ ip: "203.0.113.9" }, { ip: "1.1.1.1" }],
-    // 工作台接口会把本地池并进 sharedPoolItems 返回，客户端把它当共享快照存了下来。
-    dnsIpSourceSharedPoolItems: [{ ip: "203.0.113.9" }, { ip: "8.8.8.8" }],
-    syncedSharedItems: 0,
     async deleteSelectedDnsIpPoolItems() {
-      this.dnsIpLocalPoolItems = this.dnsIpLocalPoolItems.filter(
-        (item) => item.ip !== "203.0.113.9",
-      );
+      calls.push("delete");
+      return { ok: true };
     },
-    setDnsIpSourceSharedPoolItems(items) {
-      this.dnsIpSourceSharedPoolItems = items;
-      this.syncedSharedItems += 1;
+    async refreshDnsIpWorkspace(forceRefresh) {
+      calls.push(`refresh:${forceRefresh}`);
+      return null;
     },
   };
   patchDnsIpPoolDeleteMethods(app);
-  await app.deleteSelectedDnsIpPoolItems();
-  assert.deepEqual(
-    app.dnsIpSourceSharedPoolItems.map((item) => item.ip),
-    ["8.8.8.8"],
-  );
-  assert.equal(app.syncedSharedItems, 1);
+  const result = await app.deleteSelectedDnsIpPoolItems();
+  assert.deepEqual(result, { ok: true });
+  // 删完必须强制刷新一次，普通刷新会走服务端缓存、看不到刚删的结果。
+  assert.deepEqual(calls, ["delete", "refresh:true"]);
 
-  // 重复 patch 不叠包装；没有本地池条目被删时不再重写共享列表。
+  // 重复 patch 不叠包装；缺少刷新方法时删除照常返回。
   patchDnsIpPoolDeleteMethods(app);
   await app.deleteSelectedDnsIpPoolItems();
-  assert.equal(app.syncedSharedItems, 1);
-  assert.deepEqual(
-    app.dnsIpLocalPoolItems.map((item) => item.ip),
-    ["1.1.1.1"],
-  );
+  assert.deepEqual(calls, ["delete", "refresh:true", "delete", "refresh:true"]);
+
+  const withoutRefresh = { async deleteSelectedDnsIpPoolItems() {} };
+  patchDnsIpPoolDeleteMethods(withoutRefresh);
+  await withoutRefresh.deleteSelectedDnsIpPoolItems();
 });
 
 test("D1 schema dialog reports only the current schema contract", () => {
