@@ -3711,6 +3711,119 @@ test("TMDB empty search results retry with the original title", async () => {
   );
 });
 
+test("TMDB empty-result fallback never buffers a body over the size cap", async () => {
+  const calls = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method });
+        return new Response(JSON.stringify({ TotalRecordCount: 1, Items: [{ Name: "Hit" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+    async () => {
+      const buildExecution = () => ({
+        tmdbConversion: { fallbackTitle: "Blade Runner" },
+        requestMethod: "GET",
+        upstreamTimeoutMs: 0,
+      });
+      const finalUrl = new URL(
+        "https://origin.test/emby/Items?SearchTerm=%E9%93%B6%E7%BF%BC%E6%9D%80%E6%89%8B&IncludeItemTypes=Movie",
+      );
+      const buildFetchOptions = async () => ({ method: "GET" });
+      const empty = { TotalRecordCount: 0, Items: [] };
+
+      // 1) 声明长度就超上限：连流都不读。
+      const declaredExecution = buildExecution();
+      const declaredState = {
+        response: new Response(JSON.stringify(empty), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Content-Length": "999999" },
+        }),
+        finalUrl,
+      };
+      assert.equal(
+        await proxyService.applyTmdbEmptyResultFallback(
+          declaredExecution,
+          declaredState,
+          buildFetchOptions,
+        ),
+        declaredState,
+      );
+      assert.equal(declaredExecution.tmdbConversion.fallbackUsed, void 0);
+      assert.equal(calls.length, 0, "超上限时不应发起兜底查询");
+
+      // 2) 没有 content-length，但流超过上限：读到上限就放弃，不把整份缓冲下来。
+      const streamedExecution = buildExecution();
+      const streamedState = {
+        response: new Response(
+          new ReadableStream({
+            start(controller) {
+              for (let index = 0; index < 8; index += 1) {
+                controller.enqueue(new Uint8Array(64 * 1024).fill(0x20));
+              }
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+        finalUrl,
+      };
+      assert.equal(
+        await proxyService.applyTmdbEmptyResultFallback(
+          streamedExecution,
+          streamedState,
+          buildFetchOptions,
+        ),
+        streamedState,
+      );
+      assert.equal(streamedExecution.tmdbConversion.fallbackUsed, void 0);
+      assert.equal(calls.length, 0, "超上限时不应发起兜底查询");
+    },
+  );
+});
+
+test("concurrent TMDB lookups for one id share a single request", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  let release = () => {};
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        await gate;
+        return new Response(JSON.stringify({ title: "Blade Runner", release_date: "1982-06-25" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const buildUrl = () =>
+        new URL("https://worker.test/Items?AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie");
+      const credentials = { TMDB_API_READ_TOKEN: "read-token" };
+      // 冷缓存下同一 id 的一批请求同时到达：缓存写入在 await 之后，没有单飞就会各打一次。
+      const pending = [
+        convertTmdbRequestFromUrl(buildUrl(), credentials),
+        convertTmdbRequestFromUrl(buildUrl(), credentials),
+        convertTmdbRequestFromUrl(buildUrl(), credentials),
+      ];
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+      release();
+      const converted = await Promise.all(pending);
+      assert.equal(fetchCount, 1, "同一个 id 的并发查询应合并成一次 TMDB 请求");
+      for (const url of converted) {
+        assert.equal(url.searchParams.get("SearchTerm"), "Blade Runner");
+        assert.equal(url.searchParams.get("Years"), "1982");
+      }
+    },
+  );
+});
+
 test("TMDB language falls back to zh-CN when the configured value is invalid", async () => {
   isolateState.TmdbLookupCache.clear();
   const requested = [];

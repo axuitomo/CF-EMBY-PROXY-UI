@@ -157,7 +157,7 @@ test("config save enhancement adds an idempotency token", async () => {
 });
 
 test("node save injects the TMDB aggregation flag into the save payload", async () => {
-  // 节点保存载荷是模板里的固定字段表，开关只能靠包一层 apiCall 送进去。
+  // 节点保存载荷是模板里的固定字段表，开关只能靠补一次 apiCall 送进去。
   const checkbox = { checked: true };
   const { patchTmdbNodeMethods } = loadEnhancementTestHooks({
     querySelector(selector) {
@@ -175,10 +175,14 @@ test("node save injects the TMDB aggregation flag into the save payload", async 
       return { form: {}, hydratedNode: node };
     },
     async saveNode() {
-      return await this.apiCall("save", { name: "alpha", headers: {} });
+      // 模板里的节点保存载荷一定带 originalName（真实字段表的第一项）。
+      return await this.apiCall("save", { originalName: "", name: "alpha", headers: {} });
     },
   };
   patchTmdbNodeMethods(app);
+  // 补丁只装一次：重复调用不叠包装。
+  patchTmdbNodeMethods(app);
+  const patchedApiCall = app.apiCall;
 
   const state = app.buildNodeModalFormState({ tmdbAggregationEnabled: true });
   assert.equal(state.form.tmdbAggregationEnabled, true);
@@ -188,8 +192,19 @@ test("node save injects the TMDB aggregation flag into the save payload", async 
   assert.equal(requests[0].action, "save");
   assert.equal(requests[0].payload.tmdbAggregationEnabled, true);
   assert.equal(requests[0].payload.name, "alpha", "原有字段不能被覆盖");
-  // 包装只作用于这次保存，保存结束后 apiCall 要还原。
-  assert.equal(app.apiCall.name, "apiCall");
+
+  // 别的 action、以及不带 originalName 的 save（非节点载荷）都要原样透传。
+  await app.apiCall("saveConfig", { config: { tgChatId: "1" } });
+  await app.apiCall("save", { something: "else" });
+  assert.equal(requests[1].payload.tmdbAggregationEnabled, undefined);
+  assert.equal(requests[2].payload.tmdbAggregationEnabled, undefined);
+
+  // 补丁在保存之后依然在，不再换入换出（并发保存不会互相还原）。
+  assert.equal(app.apiCall, patchedApiCall);
+  checkbox.checked = false;
+  app.nodeModalForm.tmdbAggregationEnabled = false;
+  await app.saveNode();
+  assert.equal(requests[3].payload.tmdbAggregationEnabled, false);
 });
 
 // 模板是压缩产物，无法整体执行。按「方法签名 → 下一个方法签名」切片，

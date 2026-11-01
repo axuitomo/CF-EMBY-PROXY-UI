@@ -115,7 +115,7 @@
 | Chart.js | 4.4.7 (UMD) | 4.6.1 | npm 那份只被 `frontend/src/lib/chart.js` 与单测引用；线上是 global `Chart`，升级要单独验证图表渲染 |
 | Lucide | `lucide@1.8.0` (UMD) | `lucide-vue-next@1.0.0` | **不是同一个包**：线上用 UMD `lucide` 全局 + 自定义指令批量替换，参考源用 Vue 组件版 |
 
-Tailwind 原本是第三处不一致（线上浏览器构建 vs 参考源 CLI/插件），现在两边已经并到 `tailwindcss@4.2.2`：CSS 改成构建期预编译后，编译器版本直接决定线上字节，所以它归生产侧（见 §1.2）。
+Tailwind 原本是第三处不一致（线上浏览器构建 vs 参考源 CLI/插件），现在两边已经并到 `tailwindcss@4.2.2`：CSS 改成构建期预编译后，编译器版本直接决定线上字节，所以它归生产侧（见 §1.2）。`frontend/src/style.css` 也随之删掉了 `@import "tailwindcss"`——参考源没有构建入口，留着这个 import 只会让人以为它还会被编译；文件里的 `@theme` 块现在只是设计令牌的记录。
 
 ## 5. Tailwind v3 → v4 迁移记录
 

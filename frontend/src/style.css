@@ -1,5 +1,6 @@
-@import "tailwindcss";
-
+/* 参考源不参与构建：线上样式由 frontend/scripts/build-admin-tailwind.mjs 预编译进壳，
+   所以这里不再 `@import "tailwindcss"`（没有该 import 时下面的 `@theme` 块不会被解析，
+   仅作设计令牌记录）。 */
 @theme {
   --font-sans: "IBM Plex Sans", "Inter", "Segoe UI", sans-serif;
   --color-ink-950: #08111f;

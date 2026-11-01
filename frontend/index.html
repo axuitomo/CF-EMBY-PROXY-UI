@@ -8007,37 +8007,30 @@ html[data-theme-switching] *::after{transition:none !important}
     return label ? '继承全局（' + label + '）' : '继承全局';
   }
 
-  // 节点「TMDB 聚合」开关：节点保存载荷是固定字段表，这里补一个字段并按需改写 apiCall。
+  // 节点「TMDB 聚合」开关：节点保存载荷是模板里的固定字段表，没有可改的组装函数，
+  // 所以给 apiCall 打一次性补丁：只给节点保存那一次调用补上字段，其余原样透传。
   function patchTmdbNodeMethods(app) {
     if (!app || tmdbPatchedApp === app) return;
     const originalBuildNodeModalFormState = app.buildNodeModalFormState;
-    const originalSaveNode = app.saveNode;
-    if (typeof originalBuildNodeModalFormState !== 'function' || typeof originalSaveNode !== 'function') return;
+    const originalApiCall = app.apiCall;
+    if (typeof originalBuildNodeModalFormState !== 'function' || typeof originalApiCall !== 'function') return;
     app.buildNodeModalFormState = function (...args) {
       const state = originalBuildNodeModalFormState.apply(this, args);
       const source = state?.hydratedNode || args[0] || {};
       if (state?.form) state.form.tmdbAggregationEnabled = source?.tmdbAggregationEnabled === true;
       return state;
     };
-    app.saveNode = async function (...args) {
-      const enabled =
-        document.querySelector('[data-admin-node-tmdb-aggregation="1"] input')?.checked === true ||
-        this?.nodeModalForm?.tmdbAggregationEnabled === true;
-      if (this?.nodeModalForm) this.nodeModalForm.tmdbAggregationEnabled = enabled;
-      const originalApiCall = this.apiCall;
-      const wrappedApiCall = function (action, payload, ...rest) {
-        const nextPayload =
-          action === 'save' && payload && typeof payload === 'object'
-            ? { ...payload, tmdbAggregationEnabled: enabled }
-            : payload;
-        return originalApiCall.call(this, action, nextPayload, ...rest);
-      };
-      this.apiCall = wrappedApiCall;
-      try {
-        return await originalSaveNode.apply(this, args);
-      } finally {
-        if (this.apiCall === wrappedApiCall) this.apiCall = originalApiCall;
+    // 一次性替换，而不是每次保存前后换入换出：两个保存重叠时，后者的 finally 会还原掉
+    // 前者的包装，于是那次保存悄悄丢掉开关。'originalName' 只有节点保存载荷才带。
+    app.apiCall = function (action, payload, ...rest) {
+      if (action === 'save' && payload && typeof payload === 'object' && 'originalName' in payload) {
+        const enabled =
+          document.querySelector('[data-admin-node-tmdb-aggregation="1"] input')?.checked === true ||
+          this?.nodeModalForm?.tmdbAggregationEnabled === true;
+        if (this?.nodeModalForm) this.nodeModalForm.tmdbAggregationEnabled = enabled;
+        return originalApiCall.call(this, action, { ...payload, tmdbAggregationEnabled: enabled }, ...rest);
       }
+      return originalApiCall.call(this, action, payload, ...rest);
     };
     tmdbPatchedApp = app;
   }

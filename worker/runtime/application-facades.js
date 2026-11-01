@@ -24236,14 +24236,20 @@ function defineProxyUpstreamDeliveryMethods(dependencies = {}, kernel = {}) {
         if (Number.isFinite(total)) return total;
         return Array.isArray(parsed?.Items) ? parsed.Items.length : null;
       };
-      let firstTotal = null;
-      try {
-        const text = await response.clone().text();
-        if (text.length > TMDB_FALLBACK_BODY_MAX_BYTES) return upstreamState;
-        firstTotal = readTotal(JSON.parse(text));
-      } catch {
-        return upstreamState;
-      }
+      // 兜底只是锦上添花：声明长度就超上限、或流到上限还没读完都直接放弃，
+      // 不值得为它把一份大响应整体缓冲进内存（原实现先读完整份再比长度）。
+      const readBoundedTotal = async (target) => {
+        const declared = Number(target.headers?.get?.("content-length"));
+        if (Number.isFinite(declared) && declared > TMDB_FALLBACK_BODY_MAX_BYTES) return null;
+        const body = await readResponseTextWithLimit(target, TMDB_FALLBACK_BODY_MAX_BYTES);
+        if (body.exceeded) return null;
+        try {
+          return readTotal(JSON.parse(body.text));
+        } catch {
+          return null;
+        }
+      };
+      const firstTotal = await readBoundedTotal(response.clone());
       if (firstTotal !== 0) return upstreamState;
       const retryUrl = new URL(upstreamState.finalUrl.toString());
       retryUrl.searchParams.set("SearchTerm", fallbackTitle);
@@ -24259,12 +24265,7 @@ function defineProxyUpstreamDeliveryMethods(dependencies = {}, kernel = {}) {
       }
       const retryResponse = retry?.response;
       if (!retryResponse?.ok) return upstreamState;
-      try {
-        const retryText = await retryResponse.clone().text();
-        if (!(Number(readTotal(JSON.parse(retryText))) > 0)) return upstreamState;
-      } catch {
-        return upstreamState;
-      }
+      if (!(Number(await readBoundedTotal(retryResponse.clone())) > 0)) return upstreamState;
       conversion.fallbackUsed = true;
       try {
         response.body?.cancel?.();
@@ -26532,47 +26533,52 @@ async function resolveTmdbConversion(requestUrl, env = {}, config = {}) {
       failed: true,
       expiresAt: nowMs() + TMDB_LOOKUP_FAILURE_TTL_MS,
     });
-  const tmdbUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbMatch[1]}`);
-  tmdbUrl.searchParams.set("language", language);
-  if (apiKey && !readToken) tmdbUrl.searchParams.set("api_key", apiKey);
-  const headers = new Headers({ accept: "application/json" });
-  if (readToken) headers.set("Authorization", `Bearer ${readToken}`);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort("tmdb_timeout"), 5e3);
-  try {
-    const response = await fetch(tmdbUrl, { headers, signal: controller.signal });
-    if (!response.ok) {
-      console.warn(`TMDB ${mediaType} lookup failed: ${response.status}`);
+  // 并发命中同一个（语言, 类型, id）时只打一次 TMDB：缓存写入发生在 await 之后，
+  // 没有单飞保护时一批同时到达的请求会各打一次，还各自扛满 5 秒超时。
+  const entry = await runSingleFlight(buildSingleFlightKey(["tmdb", cacheKey]), async () => {
+    const tmdbUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbMatch[1]}`);
+    tmdbUrl.searchParams.set("language", language);
+    if (apiKey && !readToken) tmdbUrl.searchParams.set("api_key", apiKey);
+    const headers = new Headers({ accept: "application/json" });
+    if (readToken) headers.set("Authorization", `Bearer ${readToken}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort("tmdb_timeout"), 5e3);
+    try {
+      const response = await fetch(tmdbUrl, { headers, signal: controller.signal });
+      if (!response.ok) {
+        console.warn(`TMDB ${mediaType} lookup failed: ${response.status}`);
+        rememberLookupFailure();
+        return null;
+      }
+      const payload = await response.json();
+      const title = String(isMovie ? payload?.title || "" : payload?.name || "").trim();
+      const originalTitle = String(
+        isMovie ? payload?.original_title || "" : payload?.original_name || "",
+      ).trim();
+      const year = String(
+        isMovie ? payload?.release_date || "" : payload?.first_air_date || "",
+      ).slice(0, 4);
+      if (!title) {
+        rememberLookupFailure();
+        return null;
+      }
+      const resolved = {
+        title,
+        year,
+        fallbackTitle: originalTitle && originalTitle !== title ? originalTitle : "",
+        expiresAt: nowMs() + TMDB_LOOKUP_CACHE_TTL_MS,
+      };
+      writeTmdbIsolateCache(cacheKey, resolved);
+      return resolved;
+    } catch (error) {
+      console.warn("TMDB request conversion failed:", error?.message || error);
       rememberLookupFailure();
       return null;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    const payload = await response.json();
-    const title = String(isMovie ? payload?.title || "" : payload?.name || "").trim();
-    const originalTitle = String(
-      isMovie ? payload?.original_title || "" : payload?.original_name || "",
-    ).trim();
-    const year = String(
-      isMovie ? payload?.release_date || "" : payload?.first_air_date || "",
-    ).slice(0, 4);
-    if (!title) {
-      rememberLookupFailure();
-      return null;
-    }
-    const entry = {
-      title,
-      year,
-      fallbackTitle: originalTitle && originalTitle !== title ? originalTitle : "",
-      expiresAt: nowMs() + TMDB_LOOKUP_CACHE_TTL_MS,
-    };
-    writeTmdbIsolateCache(cacheKey, entry);
-    return buildResult(entry, "miss");
-  } catch (error) {
-    console.warn("TMDB request conversion failed:", error?.message || error);
-    rememberLookupFailure();
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  });
+  return entry ? buildResult(entry, "miss") : null;
 }
 async function convertTmdbRequestFromUrl(requestUrl, env = {}, config = {}) {
   const resolved = await resolveTmdbConversion(requestUrl, env, config);
