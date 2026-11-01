@@ -4,9 +4,23 @@
 
 当前版本号由 `worker/core/build-info.js` 的 `APP_VERSION` 决定，`npm run check` 会校验本文件包含对应版本小节。
 
+## V20.2（2026-11-01）
+
+- **管理端样式改为构建期预编译**：`@tailwindcss/browser`（271 KB 的浏览器内 JIT 编译器）退场，模板里的 `<style type="text/tailwindcss">` 由新增的 `frontend/scripts/build-admin-tailwind.mjs` 在构建期用 `tailwindcss@4.2.2` 编译成静态 CSS 内联进壳，运行时要拉的 CDN 脚本从 4 个减到 3 个。同机实测首屏 DCL 337–349 ms → 249–257 ms，首屏总传输 gzip 260 KB → 200 KB，切换 5 个视图不再触发约 75 次重新编译（累计 77–85 ms）。代价是 CSS 随壳走、不再单独缓存：壳 902 KB → 1031 KB（gzip +16 KB），每次壳更新多传约 14 KB。维护约束是会被用到的类名必须在模板或增强脚本里字面出现——运行时拼出来的类名（`"bg-" + hue`）会静默漏扫，需改成字面量或在候选集里显式补。
+- **节点「TMDB 聚合」只加回本节点改写**：节点弹窗「高级设置」新增开关 `tmdbAggregationEnabled`，默认关闭；读取节点时不再把它强制清成 `false`，保存时缺字段沿用旧值。开启后该节点的 GET/HEAD 请求若带 `AnyProviderIdEquals=tmdb.<id>`，Worker 先请求 TMDB 换出标题与年份，把请求改写成 `SearchTerm` + `Years` 再回源；`IncludeItemTypes` 是集或季时不改写，没有凭据或查询失败时原样透传。成功结果按「语言 + 电影/剧 + ID」缓存 24 小时，失败与空结果缓存 60 秒，两类合计上限 4096 条；标题为空时用 `original_title` 补查一次。凭据取后台「账号设置」的 `tmdbApiReadToken` / `tmdbApiV3Key`，两项整组生效并覆盖环境变量 `TMDB_API_READ_TOKEN` / `TMDB_API_KEY`，被遮蔽时每个 isolate 记一次 `tmdb.credentials_override`。`TMDB_LANGUAGE` 与 `tmdbLanguage` 恢复生效。V19.9 的跨节点扇出、版本合并、todb 凭证与 `todbvs` 改写没有回来，`aggregationMode` 也不存在，因此只有一档行为、一个开关。 账号设置里 V20 删掉的三段 TMDB 输入框（Read Token / API Key / 语言）一并补回，仍由增强脚本注入，值照旧写进 `sys:theme` 并由保存载荷的字段表带出。
+- **TMDB 改写的三处收紧**：空结果兜底不再先读完整个 body 再比上限，改成先看 `content-length`、再用流式读取按上限截断，超限即 cancel，一份大 JSON 列表不会整份 clone + 解析一次再丢掉；同一组「语言 + 类型 + ID」的冷缓存查询改为单飞（复用仓库既有 `SingleFlightTasks`），同时到达的一批请求只打一次 TMDB，不再各自扛 5 秒超时；节点保存把 TMDB 开关送进载荷的方式从「每次保存前后换入换出 `apiCall`」改成一次性补丁，只有 `action === 'save'` 且载荷带 `originalName` 时才补字段，并发保存不再互相还原包装。
+- **账号设置新增凭据连通性测试**：Cloudflare API 令牌与 TMDB 凭据旁各有一个「测试」按钮，对应新增的 `testCloudflareApiToken` / `testTmdbCredential` 两个 action。按钮直接拿输入框里当前的值问一次，结果回写到按钮旁一行（Cloudflare 回 `active` 之类的状态，TMDB 回查到的标题、语言与凭据类型），填错不用等到节点列表变空才发现；失败时显示错误消息与原因前缀，请求期间按钮置灰。
+- **凭据字段旁增加跳转图标**：Telegram Bot Token、TMDB 聚合凭据、Cloudflare 账号 / Zone / API 令牌 / KV 命名空间 / D1 数据库各带一枚内联 SVG 外链图标，`target="_blank"` + `rel="noopener noreferrer"`，`title` 与 `aria-label` 直接写目标地址；图标由增强脚本注入（TMDB 面板标题上的那枚写在注入标记里），`frontend/src` 的 Vue 面板按同一组地址补齐。
+- **优选 IP 工作台删除后不再残留**：工作台接口会把浏览器本地池并进 `sharedPoolItems` 返回（为给本地 IP 补探活结果），客户端把这份合列表同时当成「共享快照」存进 `dnsIpSourceSharedPoolItems`。删掉本地池条目时服务端 fetch 缓存里并没有这个 IP，`deletedIps` 为空，那份影子副本就留在共享列表里，只有刷新页面才消失。现在删除会按本地池的实际删除结果清掉同名影子副本；本地与共享两侧都有的 IP 仍由接口清共享快照，重名清理不会重复。
+- **节点「高级设置」不再贴着分隔线**：内容区内边距从 `0 1rem 1rem` 改成 `.75rem 1.25rem 1.25rem`，顶部留出 12px、左右由 16px 放宽到 20px，展开后的第一行标签不再压在 `border-top` 上，整块内缩节奏与「线路列表」卡片对齐。
+- **节点修订缓存放到 10 秒**：`NodesRevisionCacheTtlMs` 从 1s 放宽到 10s。它只决定跨 colo 的节点变更可见延迟，同 isolate 的写入仍走 generation 立即失效；1s 的代价是每个有流量的 isolate 恒定 1 次 KV 读/秒（86,400 次/天，免费版额度 100,000/天）。
+- **工程门禁**：新增 `.github/workflows/ci.yml`，在 `pull_request` 阶段就跑 `npm ci` + `npm run check`（此前只有 push 到 `main` 后的部署流水线会拦一次）；新增 `.github/dependabot.yml`，npm 周更把 minor + patch 合成一组、github-actions 单独一条。Node 版本只认 `.nvmrc` 一处（部署 workflow 从写死 `node-version: 24` 改为 `node-version-file: .nvmrc`），`.npmrc`（`engine-strict` + 只指向官方源）与 `.nvmrc`（24.15.0）落仓库，Node 不符时 `npm ci` 直接失败；部署 job 挂上 `environment: production` 以保留部署历史。lint 改为 `oxlint --deny-warnings`，警告不再算通过，顺带清掉无人调用的 `isPotentialPrivateMediaAuthHeaderName`、一处无效的 `/* @__PURE__ */` 与测试里的未使用变量。
+- **`npm run check` 新增三条断言**：安装脚本放行清单必须与锁文件里 `hasInstallScript` 的包逐一对应（`strict-allow-scripts` 默认关闭，版本对不上时 npm 会静默跳过脚本，此后在检查里失败而不是等 miniflare 启动才炸）；参考源依赖的 minor 被冻结（patch 随便升，改 minor 先回 `docs/tech-stack.md` 确认线上 pin 要不要跟）；`overrides.workerd` 必须等于 wrangler 声明的 workerd（否则 miniflare 升级时锁文件里的运行时版本不变，放行清单照样对得上，跑起来的却是旧运行时）。
+- **依赖**：参考源 chart.js 4.5.1 → 4.6.1、tailwindcss 与 `@tailwindcss/vite` 4.2.2 → 4.3.3、`@vitejs/plugin-vue` 6.0.6 → 6.0.10；工具链 acorn 8.15 → 8.19、miniflare 4.20260722.1 → 4.20260730.0、oxfmt 0.72 → 0.75、oxlint 1.87 → 1.90。新增三条 `overrides`（workerd 1.20261023.1、undici 7.30.1、sharp 0.35.5）让本地测试运行时只有一份并顶掉已修的 GHSA 版本，三者都不进线上字节。模板里的生产 pin 未动。
+- **文档**：新增 `docs/glossary.md`，按 `/admin` 页面顺序逐条解释页面上出现的字样——这个词长什么样、点下去发生什么、背后存哪个键、默认值多少（如 JWT 有效天数默认 30 天、定时任务租约 30000~900000 ms、HTML 上传 2 MiB 上限），末节是术语 ↔ 代码名与错误码对照；新增 `docs/screenshots.md`，给 10 张视觉基线建索引（视图、明暗、文件、大小、版本徽标、录制时间）并写明缺口清单与重录命令，同时点明这套图横跨 V19.9–V20.1、是防样式漂移的比对底片而非当前 UI 的权威参考。
+
 ## V20.1（2026-10-28）
 
-- **节点「TMDB 聚合」只加回本节点改写**：节点弹窗「高级设置」新增开关 `tmdbAggregationEnabled`，默认关闭；读取节点时不再把它强制清成 `false`，保存时缺字段沿用旧值。开启后该节点的 GET/HEAD 请求若带 `AnyProviderIdEquals=tmdb.<id>`，Worker 先请求 TMDB 换出标题与年份，把请求改写成 `SearchTerm` + `Years` 再回源；`IncludeItemTypes` 是集或季时不改写，没有凭据或查询失败时原样透传。成功结果按「语言 + 电影/剧 + ID」缓存 24 小时，失败与空结果缓存 60 秒，两类合计上限 4096 条。凭据取后台「账号设置」的 `tmdbApiReadToken` / `tmdbApiV3Key`，两项整组生效并覆盖环境变量 `TMDB_API_READ_TOKEN` / `TMDB_API_KEY`，被遮蔽时每个 isolate 记一次 `tmdb.credentials_override`。`TMDB_LANGUAGE` 与 `tmdbLanguage` 恢复生效。V19.9 的跨节点扇出、版本合并、todb 凭证与 `todbvs` 改写没有回来，`aggregationMode` 也不存在，因此只有一档行为、一个开关。 账号设置里 V20 删掉的三段 TMDB 输入框（Read Token / API Key / 语言）一并补回，仍由增强脚本注入，值照旧写进 `sys:theme` 并由保存载荷的字段表带出。
 - **受管流空闲超时只覆盖等上游读**：阈值此前从 `controller.enqueue()` 之后重新起表，分片读出来躺在队列里等客户端取的那段时间也被算成「上游没给数据」，慢链路或客户端暂停超过 12 / 15 秒就会 abort 上游并记成 504。现在计时收敛到 `reader.read()`，只有真正等上游数据时才计时，上游停止发送的超时行为不变。
 - **Range 续传**：跨 target 重试丢弃客户端 `If-Range`（换镜像后校验器不可比，上游会回 200 全量、播放器拿不到期望的 206 偏移），同 target 重试仍保留；206 响应一律 `no-store`，不再按 `public, max-age` 被按其它偏移复用；直连 Range 的 HEAD 探测结果按会话缓存 30 秒（上限 256 条），同一会话的数百个分段请求不再各付一次 HEAD。
 - **元数据缓存**：`Content-Encoding` 非 `identity` 的响应不再落盘（命中路径不会与客户端重新协商编码，回放 gzip / br 字节给不带该头的播放器就是解不开的 m3u8 / 字幕）；所有不写缓存的出口统一 `cancel()` 掉 clone 分支，不再随响应体积线性增长内存。
@@ -15,8 +29,6 @@
 - **视图切换动效**：整页 `translateY` 淡入改为不位移的 `viewFade`（时长与曲线走 `--transition-duration-ui` / `--ease-out-expo` 令牌），`#content-area` 加 `scrollbar-gutter: stable`，切换视图时内容区不再横向重排 ±15px、动画期间静止内容漂移归零。
 - **Worker 和 HTML 更新只看类型不看文件名**：Worker 脚本任意 `.js` 名、管理台 HTML 任意 `.html` 名都接受，未命名时分别落成 `worker.js` / `index.html`；`worker.js` 的 module / service-worker 语法仍按内容判定。同时放开首次启动的「上传 index.html」门（改名为「上传管理台 HTML」）、独立 HTML 上传与完整备份导入（备份改为只认 revision，不再要求条目叫 `index.html`），体积上限（3 MiB / 2 MiB）不变。
 - **工程**：新增 `tests/e2e/admin-view-motion.spec.mjs`（`npm run test:e2e:motion`），用 `layout-shift`、`long-animation-frame`、rAF 帧间隔与逐帧位置采样给动效上门禁；新增 `scripts/bench-worker-stream.mjs` 流式路径四项 A/B 基准（仅同机百分比参考，不进 `npm run check`）；视觉基线因 `scrollbar-gutter` 重录一次。
-- **优选 IP 工作台删除后不再残留**：工作台接口会把浏览器本地池并进 `sharedPoolItems` 返回（为给本地 IP 补探活结果），客户端把这份合列表同时当成「共享快照」存进 `dnsIpSourceSharedPoolItems`。删掉本地池条目时服务端 fetch 缓存里并没有这个 IP，`deletedIps` 为空，那份影子副本就留在共享列表里，只有刷新页面才消失。现在删除会按本地池的实际删除结果清掉同名影子副本；本地与共享两侧都有的 IP 仍由接口清共享快照，重名清理不会重复。
-- **凭据字段旁增加跳转图标**：Telegram Bot Token、TMDB 聚合凭据、Cloudflare 账号 / Zone / API 令牌 / KV 命名空间 / D1 数据库各带一枚内联 SVG 外链图标，`target="_blank"` + `rel="noopener noreferrer"`，`title` 与 `aria-label` 直接写目标地址；图标由增强脚本注入（TMDB 面板标题上的那枚写在注入标记里），`frontend/src` 的 Vue 面板按同一组地址补齐。
 
 ## V20.0（2026-10-25）
 

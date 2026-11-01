@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-V20.1-2563eb">
+  <img alt="version" src="https://img.shields.io/badge/version-V20.2-2563eb">
   <img alt="platform" src="https://img.shields.io/badge/platform-Cloudflare%20Workers-orange">
   <img alt="storage" src="https://img.shields.io/badge/storage-KV%20%2B%20D1-green">
   <img alt="ui" src="https://img.shields.io/badge/panel-SaaS%20UI-purple">
@@ -17,7 +17,7 @@ CF-EMBY-PROXY-UI 用一台 Cloudflare Worker 给多台 Emby / Jellyfin 服务器
 - 配置与节点存在 KV（`ENI_KV`），日志与统计存在 D1（`DB`，可选）
 - 大视频流尽量不经过 Worker 内存，交给 Cloudflare 数据面转发
 
-> 当前 **V20.1** 是 V20.0 减法发布后的稳定性收尾，改动集中在播放链路与管理端手感：客户端暂停或慢链路不再被误判成上游 504，Range 续传与 206 响应不再写入缓存，无扩展名音频流与视频共用同一套重试和协议回退；管理端视图切换不再引起内容区横向重排，保存设置遇到版本冲突会自动重试，「Worker 和 HTML 更新」不再要求脚本必须叫 `worker.js`。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
+> 当前 **V20.2** 把管理端样式从浏览器内 JIT 改成构建期预编译：运行时要拉的 CDN 脚本从 4 个减到 3 个，首屏 DCL 少约 90 ms、首屏总传输 gzip 少 60 KB，切换视图不再触发重新编译。用户可见的功能变动集中在账号设置与节点：节点级「TMDB 聚合」只在本节点开关打开时改写请求，TMDB 凭据与 Cloudflare 令牌旁补回输入框、官方签发页图标和一键连通性测试，TMDB 空结果兜底与并发查询也一并收紧。Worker 侧的节点修订缓存从 1 秒放宽到 10 秒，把每个有流量的 isolate 恒定 1 次/秒的 KV 读压下来。工程侧把同一套门禁提到 PR 阶段并接入 Dependabot，安装脚本放行清单、参考源 minor 版本与 overrides 里的运行时版本都进了 `npm run check`。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ![CF-EMBY-PROXY-UI 管理后台截图](https://web.axuitomo.qzz.io/api/p/img/github/PixPin_2026-08-03_14-00-35.png?download=true&sign=TltPfTfUurzkQ5FsY4rpQ1Wd%2Bwu1Oji3rC%2FVo2NbV%2BM%3D%3A0)
 
