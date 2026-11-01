@@ -98,6 +98,7 @@ var cacheState = {
   MetadataPrewarmTasks: /* @__PURE__ */ new Map(),
   // 键自带会话鉴权，故按插入顺序淘汰 + 读时校验 TTL，不并入清理周期（同 MedbItemsCountsCache）。
   EntryDirectRangeProbeCache: /* @__PURE__ */ new Map(),
+  TmdbLookupCache: /* @__PURE__ */ new Map(),
   MedbItemsCountsCache: /* @__PURE__ */ new Map(),
   DashboardMonthlyTrafficCache: /* @__PURE__ */ new Map(),
   SingleFlightTasks: /* @__PURE__ */ new Map(),
@@ -145,6 +146,7 @@ var runtimeState = {
   OpsStatusWriteChain: Promise.resolve(),
   NodeIndexMutationChain: Promise.resolve(),
   InitCheckWarnedFingerprints: /* @__PURE__ */ new Set(),
+  TmdbCredentialOverrideWarned: false,
 };
 for (const key of ["CleanupState"])
   Object.defineProperty(runtimeState, key, {
@@ -5480,7 +5482,7 @@ function defineAdminShellDelivery(dependencies = {}, shell = {}) {
     const assetKey = String(routeMatch?.assetKey || "").trim();
     if (!releaseTag || !assetKey)
       return buildAdminReleaseVendorErrorResponse("Release vendor asset not found", 404);
-    // 内置壳：4 个首屏脚本就在 ASSETS 的 vendor/ 里，直接从部署产物读，
+    // 内置壳：首屏的 CDN 脚本就在 ASSETS 的 vendor/ 里，直接从部署产物读，
     // 不经过 KV 上传记录、manifest 拉取与 edge 缓存。
     if (releaseTag === shell.ADMIN_BUNDLED_INDEX_ASSET_REVISION)
       return renderBundledAdminReleaseVendorAsset(request, env, assetKey);
@@ -11850,6 +11852,69 @@ function defineConfigActions(dependencies = {}, actions = {}) {
         revisions,
         generatedAt: /* @__PURE__ */ new Date().toISOString(),
       });
+    },
+    // 面板上的「测试」用未保存的输入值直连 TMDB：凭证填错时能立刻看到，而不是等到列表空。
+    async testTmdbCredential(data) {
+      const pick = (value) => (value === void 0 || value === null ? "" : String(value).trim());
+      const readToken = pick(data?.readToken);
+      const apiKey = pick(data?.apiKey);
+      const language = normalizeTmdbLanguage(data?.language);
+      if (!readToken && !apiKey)
+        return jsonError("MISSING_PARAMS", "请先填写 TMDB API Read Token 或 API Key（v3）");
+      const probeUrl = new URL("https://api.themoviedb.org/3/movie/78");
+      probeUrl.searchParams.set("language", language);
+      if (apiKey && !readToken) probeUrl.searchParams.set("api_key", apiKey);
+      const headers = new Headers({ accept: "application/json" });
+      if (readToken) headers.set("Authorization", `Bearer ${readToken}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort("tmdb_probe_timeout"), 8e3);
+      try {
+        const response = await fetch(probeUrl, { headers, signal: controller.signal });
+        if (!response.ok)
+          return jsonError(
+            "TMDB_REJECTED",
+            response.status === 401
+              ? "TMDB 拒绝了这组凭据（HTTP 401），请检查 Token / Key"
+              : `TMDB 返回 HTTP ${response.status}`,
+            502,
+          );
+        const payload = await response.json();
+        return jsonResponse({
+          success: true,
+          title: String(payload?.title || "").trim(),
+          language,
+          credentialKind: readToken ? "read_token" : "api_key",
+        });
+      } catch (error) {
+        return jsonError(
+          "NETWORK_ERROR",
+          String(error?.message || error || "tmdb_probe_failed"),
+          502,
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    },
+    // Cloudflare 令牌只校验自身状态，不碰账号/Zone：面板里最容易填错的就是这一段。
+    async testCloudflareApiToken(data) {
+      const apiToken = String(data?.apiToken ?? "").trim();
+      if (!apiToken) return jsonError("MISSING_PARAMS", "请先填写 Cloudflare API 令牌");
+      try {
+        const payload = await fetchCloudflareApiJson(
+          "https://api.cloudflare.com/client/v4/user/tokens/verify",
+          apiToken,
+        );
+        const status = String(payload?.result?.status || "").trim();
+        if (status !== "active")
+          return jsonError("CF_TOKEN_INACTIVE", `令牌状态为 ${status || "unknown"}，无法使用`, 400);
+        return jsonResponse({ success: true, status });
+      } catch (error) {
+        return jsonError(
+          "NETWORK_ERROR",
+          String(error?.message || error || "cf_token_probe_failed"),
+          502,
+        );
+      }
     },
   };
 }
@@ -21025,11 +21090,9 @@ function defineNodeMutationMethods(dependencies = {}, kernel = {}) {
         n.displayName = "";
         changed = true;
       }
-      // TMDB 查询转换已移除：字段保留为兼容占位，读取时一律清空并写回，旧节点不会留下 true。
-      if (n.tmdbAggregationEnabled !== false) {
-        n.tmdbAggregationEnabled = false;
-        changed = true;
-      }
+      const tmdbAggregationEnabled = n.tmdbAggregationEnabled === true;
+      if (n.tmdbAggregationEnabled !== tmdbAggregationEnabled) changed = true;
+      n.tmdbAggregationEnabled = tmdbAggregationEnabled;
       const normalizedEntryMode = normalizeNodeEntryMode(n.entryMode);
       if (String(n.entryMode || "") !== normalizedEntryMode) changed = true;
       n.entryMode = normalizedEntryMode;
@@ -21212,8 +21275,10 @@ function defineNodeMutationMethods(dependencies = {}, kernel = {}) {
           rawNode?.displayName !== void 0
             ? String(rawNode.displayName || "").trim()
             : existingNode.displayName || "",
-        // 兼容字段：写入恒为 false，且不再从 existingNode 继承历史 true。
-        tmdbAggregationEnabled: false,
+        tmdbAggregationEnabled:
+          rawNode?.tmdbAggregationEnabled !== void 0
+            ? rawNode.tmdbAggregationEnabled === true
+            : existingNode.tmdbAggregationEnabled === true,
         playbackInfoMode:
           rawNode?.playbackInfoMode !== void 0
             ? normalizeNodePlaybackInfoMode(rawNode.playbackInfoMode)
@@ -24155,6 +24220,57 @@ function defineProxyUpstreamDeliveryMethods(dependencies = {}, kernel = {}) {
         redirectTrace,
       };
     },
+    // TMDB 标题搜索命中 0 条时用 TMDB 的原始标题再问一次同一个节点：
+    // 本地化标题与库内名不一致是这类改写最常见的落空原因，兜底只在下游确实为空时发生。
+    async applyTmdbEmptyResultFallback(execution, upstreamState, buildFetchOptions) {
+      const conversion = execution?.tmdbConversion;
+      const fallbackTitle = String(conversion?.fallbackTitle || "").trim();
+      if (!fallbackTitle) return upstreamState;
+      const response = upstreamState?.response;
+      if (!response || Number(response.status) !== 200) return upstreamState;
+      const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase();
+      if (!contentType.includes("json")) return upstreamState;
+      if (!(upstreamState.finalUrl instanceof URL)) return upstreamState;
+      const readTotal = (parsed) => {
+        const total = Number(parsed?.TotalRecordCount);
+        if (Number.isFinite(total)) return total;
+        return Array.isArray(parsed?.Items) ? parsed.Items.length : null;
+      };
+      let firstTotal = null;
+      try {
+        const text = await response.clone().text();
+        if (text.length > TMDB_FALLBACK_BODY_MAX_BYTES) return upstreamState;
+        firstTotal = readTotal(JSON.parse(text));
+      } catch {
+        return upstreamState;
+      }
+      if (firstTotal !== 0) return upstreamState;
+      const retryUrl = new URL(upstreamState.finalUrl.toString());
+      retryUrl.searchParams.set("SearchTerm", fallbackTitle);
+      let retry = null;
+      try {
+        retry = await kernel.performFetchWithTimeout(retryUrl, buildFetchOptions, {
+          method: execution.requestMethod,
+          timeoutMs: execution.upstreamTimeoutMs,
+        });
+      } catch (error) {
+        console.warn("TMDB fallback search failed:", error?.message || error);
+        return upstreamState;
+      }
+      const retryResponse = retry?.response;
+      if (!retryResponse?.ok) return upstreamState;
+      try {
+        const retryText = await retryResponse.clone().text();
+        if (!(Number(readTotal(JSON.parse(retryText))) > 0)) return upstreamState;
+      } catch {
+        return upstreamState;
+      }
+      conversion.fallbackUsed = true;
+      try {
+        response.body?.cancel?.();
+      } catch {}
+      return { ...upstreamState, response: retryResponse, finalUrl: retryUrl };
+    },
     async buildSuccessResponse(execution, buildFetchOptions, upstreamState, transport = null) {
       let finalUpstreamState = await kernel.guardApiResponseMime(execution, upstreamState);
       if (execution?.requestTraits?.isPlaybackInfoRequest === true) {
@@ -24180,6 +24296,11 @@ function defineProxyUpstreamDeliveryMethods(dependencies = {}, kernel = {}) {
         redirectTerminalMode !== "web_proxy_disabled" &&
         Number(finalUpstreamState.response.status) === 404;
       if (shouldPlaybackFallbackRedirect) execution.playbackFallback = "relative_307";
+      finalUpstreamState = await kernel.applyTmdbEmptyResultFallback(
+        execution,
+        finalUpstreamState,
+        buildFetchOptions,
+      );
       const isDirectAccessLog = kernel.shouldLogDirectAccess(execution, {
         directRedirectUrl: finalUpstreamState.directRedirectUrl,
       });
@@ -25191,6 +25312,13 @@ function defineProxyDiagnosticMethods(dependencies = {}, kernel = {}) {
         upstreamHost: String(
           options.upstreamHost || options.upstreamUrlHost || options.finalUrl?.hostname || "",
         ).trim(),
+        tmdbConversion: execution?.tmdbConversion
+          ? {
+              mediaType: String(execution.tmdbConversion.mediaType || "").trim() || null,
+              cache: String(execution.tmdbConversion.cache || "").trim() || null,
+              fallback: execution.tmdbConversion.fallbackUsed === true ? "original_title" : null,
+            }
+          : null,
         upstreamStatus,
       };
     },
@@ -26315,6 +26443,141 @@ function defineProxyObservabilityMethods(dependencies = {}, kernel = {}) {
   };
 }
 //#endregion
+// TMDB 查询转换：把 AnyProviderIdEquals=tmdb.<id> 换成 TMDB 的标题 + 年份查询。
+var TMDB_LOOKUP_CACHE_MAX = 4096;
+var TMDB_LOOKUP_CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+var TMDB_LOOKUP_FAILURE_TTL_MS = 60 * 1e3;
+var TMDB_LANGUAGE_PATTERN = /^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/;
+// 空结果兜底只解析列表响应：超过这个体积就不读，省得为兜底把大响应整体缓冲一遍。
+var TMDB_FALLBACK_BODY_MAX_BYTES = 256 * 1024;
+function normalizeTmdbLanguage(raw) {
+  const text = String(raw || "").trim();
+  return TMDB_LANGUAGE_PATTERN.test(text) ? text : "zh-CN";
+}
+function buildTmdbConvertedRequestUrl(requestUrl, title, year) {
+  const nextUrl = new URL(requestUrl.toString());
+  nextUrl.searchParams.delete("AnyProviderIdEquals");
+  nextUrl.searchParams.set("SearchTerm", title);
+  if (/^\d{4}$/.test(year)) nextUrl.searchParams.set("Years", year);
+  else nextUrl.searchParams.delete("Years");
+  return nextUrl;
+}
+function readTmdbIsolateCache(cacheKey, now) {
+  const cached = cacheState.TmdbLookupCache.get(cacheKey);
+  if (!cached) return null;
+  if (Number(cached.expiresAt) > now) return cached;
+  cacheState.TmdbLookupCache.delete(cacheKey);
+  return null;
+}
+function writeTmdbIsolateCache(cacheKey, entry) {
+  setBoundedMapEntry(cacheState.TmdbLookupCache, cacheKey, entry, TMDB_LOOKUP_CACHE_MAX);
+}
+async function resolveTmdbConversion(requestUrl, env = {}, config = {}) {
+  const providerId = requestUrl?.searchParams?.get?.("AnyProviderIdEquals");
+  const tmdbMatch = providerId?.match(/tmdb\.(\d+)/i);
+  if (!tmdbMatch) return null;
+  const configReadToken = String(config?.tmdbApiReadToken || "").trim();
+  const configApiKey = String(config?.tmdbApiV3Key || "").trim();
+  const envReadToken = String(env?.TMDB_API_READ_TOKEN || "").trim();
+  const envApiKey = String(env?.TMDB_API_KEY || "").trim();
+  const useConfigCredentials = Boolean(configReadToken || configApiKey);
+  const readToken = useConfigCredentials ? configReadToken : envReadToken;
+  const apiKey = useConfigCredentials ? configApiKey : envApiKey;
+  if (!readToken && !apiKey) return null;
+  // 账号设置凭证是整组生效的：只在面板填了任意一项，env 凭证就被整体忽略。
+  // 每个 isolate 只显式记录一次，避免 env 凭证静默失效而无人察觉，也避免逐请求刷屏。
+  if (
+    useConfigCredentials &&
+    (envReadToken || envApiKey) &&
+    runtimeState.TmdbCredentialOverrideWarned !== true
+  ) {
+    runtimeState.TmdbCredentialOverrideWarned = true;
+    logRuntimeFailure(
+      "tmdb.credentials_override",
+      "account settings TMDB credentials override TMDB_* environment variables",
+      {
+        configReadToken: configReadToken ? "set" : "unset",
+        configApiKey: configApiKey ? "set" : "unset",
+        envReadToken: envReadToken ? "set" : "unset",
+        envApiKey: envApiKey ? "set" : "unset",
+      },
+    );
+  }
+  const itemTypes = String(requestUrl.searchParams.get("IncludeItemTypes") || "").toLowerCase();
+  if (itemTypes.includes("episode") || itemTypes.includes("season")) return null;
+  // TMDB 的 movie id 与 tv id 是两套独立命名空间：类型无法唯一确定时不能猜，
+  // 否则会拿另一部作品的标题改写请求，返回无关结果。
+  const hasMovie = itemTypes.includes("movie");
+  const hasSeries = itemTypes.includes("series");
+  if (hasMovie === hasSeries) return null;
+  const isMovie = hasMovie;
+  const mediaType = isMovie ? "movie" : "tv";
+  const language = normalizeTmdbLanguage(config?.tmdbLanguage || env?.TMDB_LANGUAGE || "zh-CN");
+  const cacheKey = `${language}:${mediaType}:${tmdbMatch[1]}`;
+  const buildResult = (entry, cache) => ({
+    url: buildTmdbConvertedRequestUrl(requestUrl, entry.title, entry.year),
+    meta: {
+      mediaType,
+      cache,
+      fallbackTitle: String(entry.fallbackTitle || "").trim(),
+    },
+  });
+  const isolated = readTmdbIsolateCache(cacheKey, nowMs());
+  if (isolated) {
+    if (isolated.failed === true) return null;
+    return buildResult(isolated, "hit");
+  }
+  const rememberLookupFailure = () =>
+    writeTmdbIsolateCache(cacheKey, {
+      failed: true,
+      expiresAt: nowMs() + TMDB_LOOKUP_FAILURE_TTL_MS,
+    });
+  const tmdbUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbMatch[1]}`);
+  tmdbUrl.searchParams.set("language", language);
+  if (apiKey && !readToken) tmdbUrl.searchParams.set("api_key", apiKey);
+  const headers = new Headers({ accept: "application/json" });
+  if (readToken) headers.set("Authorization", `Bearer ${readToken}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort("tmdb_timeout"), 5e3);
+  try {
+    const response = await fetch(tmdbUrl, { headers, signal: controller.signal });
+    if (!response.ok) {
+      console.warn(`TMDB ${mediaType} lookup failed: ${response.status}`);
+      rememberLookupFailure();
+      return null;
+    }
+    const payload = await response.json();
+    const title = String(isMovie ? payload?.title || "" : payload?.name || "").trim();
+    const originalTitle = String(
+      isMovie ? payload?.original_title || "" : payload?.original_name || "",
+    ).trim();
+    const year = String(
+      isMovie ? payload?.release_date || "" : payload?.first_air_date || "",
+    ).slice(0, 4);
+    if (!title) {
+      rememberLookupFailure();
+      return null;
+    }
+    const entry = {
+      title,
+      year,
+      fallbackTitle: originalTitle && originalTitle !== title ? originalTitle : "",
+      expiresAt: nowMs() + TMDB_LOOKUP_CACHE_TTL_MS,
+    };
+    writeTmdbIsolateCache(cacheKey, entry);
+    return buildResult(entry, "miss");
+  } catch (error) {
+    console.warn("TMDB request conversion failed:", error?.message || error);
+    rememberLookupFailure();
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+async function convertTmdbRequestFromUrl(requestUrl, env = {}, config = {}) {
+  const resolved = await resolveTmdbConversion(requestUrl, env, config);
+  return resolved?.url || null;
+}
 //#region worker/features/proxy/playback/execution-cache-methods.js
 function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
   const { CacheManager } = dependencies;
@@ -26418,6 +26681,17 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
       }
       if (playbackAbsoluteFallbackEligible)
         requestUrl.searchParams.delete(PLAYBACK_ABSOLUTE_FALLBACK_QUERY_PARAM);
+      let tmdbConversion = null;
+      if (
+        node.tmdbAggregationEnabled === true &&
+        (requestMethod === "GET" || requestMethod === "HEAD")
+      ) {
+        const converted = await resolveTmdbConversion(requestUrl, env, currentConfig);
+        if (converted) {
+          requestUrl = converted.url;
+          tmdbConversion = converted.meta;
+        }
+      }
       const nodeDirectSource = isNodeVideoStreamDirectEnabled(node, currentConfig, name);
       const baseRequestTraits = kernel.classifyRequest(
         request,
@@ -26677,6 +26951,7 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
         metadataCache,
         metadataCacheIdentityPartition,
         metadataCachePolicyRevision,
+        tmdbConversion,
         redirectTrace: null,
       };
     },
@@ -35549,7 +35824,7 @@ function defineNodeIndexMethods(dependencies = {}, kernel = {}) {
         tags: normalizeNodeTags(rawNode.tags, rawNode.tag),
         tagColor: String(rawNode.tagColor ?? ""),
         remark: String(rawNode.remark ?? ""),
-        tmdbAggregationEnabled: false,
+        tmdbAggregationEnabled: rawNode.tmdbAggregationEnabled === true,
         lines: normalizedLines.map((line) => ({
           id: String(line.id || "").trim(),
           name: String(line.name || "").trim(),
@@ -37942,6 +38217,7 @@ export {
   buildWorkerMetadataCachePolicyRevision,
   buildWorkerMetadataPrewarmIdentityPartition,
   cacheState,
+  convertTmdbRequestFromUrl,
   defineAnalyticsCacheMethods,
   defineDatabaseStatusMethods,
   defineKvTidyMethods,

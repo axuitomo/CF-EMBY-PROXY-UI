@@ -126,20 +126,6 @@
         "x"
       ],
       "iconCount": 65
-    },
-    {
-      "key": "tailwind",
-      "packageName": "@tailwindcss/browser",
-      "version": "4.2.2",
-      "upstreamUrl": "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.2/dist/index.global.js",
-      "assetKey": "12kb1li.js",
-      "strategy": "copy",
-      "treeShaken": false,
-      "note": "浏览器内 JIT 编译器，产物就是编译器本体，没有可摇的图标/组件粒度",
-      "upstreamBytes": 271265,
-      "bytes": 271265,
-      "gzipBytes": 70988,
-      "upstreamGzipBytes": 70988
     }
   ]
 }

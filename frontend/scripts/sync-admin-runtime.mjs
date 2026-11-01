@@ -8,6 +8,7 @@ import {
   ADMIN_RUNTIME_ENHANCEMENT_SCRIPT,
   ADMIN_RUNTIME_ENHANCEMENT_STYLE,
 } from "./admin-runtime-enhancements.mjs";
+import { applyAdminTailwindPrecompile } from "./build-admin-tailwind.mjs";
 import { findAdminModuleScriptTags, inspectRuntimeAssets } from "./check-cdn-paths.mjs";
 import { APP_VERSION } from "../../worker/core/build-info.js";
 
@@ -77,7 +78,7 @@ function validateSourceTemplate(templateHtml = "") {
   }
 }
 
-function materializeFrontendIndex(templateHtml = "") {
+async function materializeFrontendIndex(templateHtml = "") {
   validateSourceTemplate(templateHtml);
 
   const output = String(templateHtml || "")
@@ -108,8 +109,14 @@ function materializeFrontendIndex(templateHtml = "") {
   }
 
   const composed = composeAdminRuntimeEnhancements(output);
-  assertNoModuleScriptEntry(composed, "frontend/index.html");
-  return composed;
+  // Tailwind 预编译放在增强层之后：候选集要覆盖增强脚本注入的 class，所以扫描对象是
+  // 组合后的壳（编译产物只替换主题块本身，不移动层叠位置）。
+  const tailwind = await applyAdminTailwindPrecompile(composed);
+  assertNoModuleScriptEntry(tailwind.html, "frontend/index.html");
+  console.log(
+    `[sync:admin-runtime] 预编译 Tailwind CSS ${Buffer.byteLength(tailwind.css, "utf8")} B（候选 ${tailwind.candidateCount} 个）`,
+  );
+  return tailwind.html;
 }
 
 function replaceRequired(source, search, replacement, label) {
@@ -268,7 +275,7 @@ async function readText(filePath) {
 
 async function main() {
   const sourceHtml = await readText(sourceHtmlPath);
-  const nextIndexHtml = materializeFrontendIndex(sourceHtml);
+  const nextIndexHtml = await materializeFrontendIndex(sourceHtml);
   const metadata = {
     source: "frontend/admin-runtime.template.html",
     enhancements: "frontend/scripts/admin-runtime-enhancements.mjs",

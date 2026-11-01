@@ -1,6 +1,5 @@
 import { fileURLToPath, URL } from "node:url";
 
-import tailwindcss from "@tailwindcss/vite";
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, loadEnv } from "vite";
 
@@ -91,7 +90,9 @@ export default defineConfig(({ mode }) => {
     // 依赖已提升到根 node_modules：缓存默认跟着最近的 package.json 落在 frontend/node_modules，
     // 会把“仓库里不该有 frontend/node_modules”这条事实破坏掉，所以显式指到根目录。
     cacheDir: fileURLToPath(new URL("../node_modules/.vite", import.meta.url)),
-    plugins: [vue(), tailwindcss()],
+    // 线上壳的 Tailwind 由 frontend/scripts/build-admin-tailwind.mjs 在构建期编译成静态 CSS
+    // 并内联进 index.html；这个配置只服务 frontend/src 参考源，不再需要 @tailwindcss/vite。
+    plugins: [vue()],
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),

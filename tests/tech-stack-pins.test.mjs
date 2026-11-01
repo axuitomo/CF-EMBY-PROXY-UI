@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// 管理端是单文件交付：这 4 个 CDN URL 就是线上前端真正的生产依赖。
+// 管理端是单文件交付：这 3 个 CDN URL 就是线上前端真正的生产依赖。
+// Tailwind 已改为构建期预编译进壳（见 frontend/scripts/build-admin-tailwind.mjs），不再有浏览器端编译器。
 // 改这里等于改用户浏览器里跑的代码，必须同时改 docs/tech-stack.md 并跑 `npm run test:e2e`。
 const EXPECTED_VENDOR_PINS = [
   "https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js",
   "https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js",
   "https://cdn.jsdelivr.net/npm/vue@3.5.32/dist/vue.runtime.global.prod.js",
-  "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.2/dist/index.global.js",
 ];
 
 const PINNED_HTML_FILES = [
@@ -31,7 +31,7 @@ function collectExternalScriptSources(html) {
 }
 
 for (const relativePath of PINNED_HTML_FILES) {
-  test(`${relativePath} 只引用预期版本的 4 个 CDN 脚本`, async () => {
+  test(`${relativePath} 只引用预期版本的 3 个 CDN 脚本`, async () => {
     const html = await readRepositoryFile(relativePath);
     assert.deepEqual(collectExternalScriptSources(html), [...EXPECTED_VENDOR_PINS].sort());
   });
@@ -80,7 +80,9 @@ const REFERENCE_DEP_MINORS = {
   vue: "3.5",
   "chart.js": "4.6",
   "lucide-vue-next": "1.0",
-  tailwindcss: "4.3",
+  // Tailwind 例外：构建期预编译器必须和线上 pin 同版本，否则预编译产物和旧 JIT 产物不是同一套
+  // 工具生成。所以这里跟着线上 pin 走 4.2，而不是参考源原来的 4.3。
+  tailwindcss: "4.2",
 };
 
 function declaredMinor(range) {

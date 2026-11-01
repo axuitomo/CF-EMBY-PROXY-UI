@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | [`architecture.md`](architecture.md) | 当前目录分层、Worker 请求流与运行时总览图、管理端投递链、KV/D1 边界与设置项↔绑定/键映射、版本号来源、前端功能域 | 需要理解“改哪里”或追踪一次请求 |
 | [`development.md`](development.md) | 源码/生成物关系、常用命令、测试门禁、环境变量和变更流程 | 需要编辑、构建、测试或发布 |
-| [`tech-stack.md`](tech-stack.md) | 线上 4 个 CDN pin、npm 依赖的三层角色、更新决策表、已知的故意不一致、Tailwind v3→v4 迁移记录、Playwright e2e | 不确定“该更新什么”、准备动 CDN 依赖或改管理端模板 |
+| [`tech-stack.md`](tech-stack.md) | 线上 3 个 CDN pin 与构建期预编译的 CSS、npm 依赖的三层角色、更新决策表、已知的故意不一致、Tailwind v3→v4 迁移记录、Playwright e2e | 不确定“该更新什么”、准备动 CDN 依赖或改管理端模板 |
 
 ## 用户与部署文档
 

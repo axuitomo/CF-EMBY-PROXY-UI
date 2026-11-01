@@ -12,10 +12,6 @@
     "lucide@1.8.0": {
       "integrity": "sha512-JjV/QnadgFLj1Pyu9IKl0lknrolFEzo04B64QcYLLeRzZl/iEHpdbSrRRKbyXcv45SZNv+WGjIUCT33e7xHO6Q==",
       "tarball": ".cache/admin-vendor/tarballs/lucide-1.8.0.tgz"
-    },
-    "@tailwindcss/browser@4.2.2": {
-      "integrity": "sha512-JVdJBWWtvKxliBI9CtpOrqxgk8aijUWGsn0STxcOcXAYsUFAbOxN5PwawOJ+v0PoQfPcOK9eZoj9LTwvBV0Vmw==",
-      "tarball": ".cache/admin-vendor/tarballs/-tailwindcss-browser-4.2.2.tgz"
     }
   }
 }

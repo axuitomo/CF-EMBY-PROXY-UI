@@ -22,6 +22,7 @@ import {
   fetchDnsIpItemsFromUrlSource,
   createTargetRecord,
   createWorkerApplication,
+  convertTmdbRequestFromUrl,
   defineAnalyticsCacheMethods,
   defineDatabaseStatusMethods,
   defineNodeRepositoryMethods,
@@ -54,7 +55,6 @@ import { PlaybackInfoCacheStore } from "../worker/runtime/proxy/playback/cache.j
 import { hashStableText } from "../worker/core/hashing.js";
 // 与 frontend/scripts/build-admin-vendor.mjs 的 pins 一致：vendor 产物文件名 = hashStableText(upstreamUrl)。
 const BUNDLED_VENDOR_PINS = [
-  "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.2/dist/index.global.js",
   "https://cdn.jsdelivr.net/npm/vue@3.5.32/dist/vue.runtime.global.prod.js",
   "https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js",
   "https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js",
@@ -1823,7 +1823,7 @@ test("manual setup renders GET and HEAD as no-store with the recovery reason", a
 
 test("bundled frontend assets render when no uploaded admin index is configured", async () => {
   const assetRequests = [];
-  // 真实内置壳的头里有 4 个 CDN pin；这里放同样的 4 个 URL，验证改写与投递。
+  // 真实内置壳的头里有 3 个 CDN pin；这里放同样的 3 个 URL，验证改写与投递。
   const bundledHtml = adminShellDocument({
     head: `<title>Bundled UI</title>${BUNDLED_VENDOR_PINS.map((url) => `<script src="${url}"></script>`).join("")}`,
     body: '<div id="app" data-source="bundled"></div>',
@@ -1870,7 +1870,7 @@ test("bundled frontend assets render when no uploaded admin index is configured"
   assert.equal(headResponse.status, 200);
   assert.equal(await headResponse.text(), "");
 
-  // 内置壳的 4 个首屏脚本必须改写成 bundled revision 的同源 vendor 路径，
+  // 内置壳的 3 个首屏脚本必须改写成 bundled revision 的同源 vendor 路径，
   // 否则浏览器连不上 cdn.jsdelivr.net 时 Vue 直接缺失，整页白屏。
   const bundledRevision = adminShell.ADMIN_BUNDLED_INDEX_ASSET_REVISION;
   const vendorPrefix = `/console/__release/${bundledRevision}/vendor/`;
@@ -3354,6 +3354,705 @@ test("proxy request state ignores query tokens that are unsafe for request heade
   assert.equal(transport.newHeaders.has("Authorization"), false);
 });
 
+test("TMDB provider id search converts to a title and year request", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init = {}) => {
+        fetched.push({ url: String(url), headers: new Headers(init.headers) });
+        return new Response(JSON.stringify({ title: "Blade Runner", release_date: "1982-06-25" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/node/secret/Items?AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie&Recursive=true",
+      );
+      const converted = await convertTmdbRequestFromUrl(source, {
+        TMDB_API_READ_TOKEN: "read-token",
+      });
+      assert.ok(converted instanceof URL, "expected a converted URL");
+      assert.equal(converted.searchParams.has("AnyProviderIdEquals"), false);
+      assert.equal(converted.searchParams.get("SearchTerm"), "Blade Runner");
+      assert.equal(converted.searchParams.get("Years"), "1982");
+      assert.equal(converted.searchParams.get("IncludeItemTypes"), "Movie");
+      assert.equal(fetched.length, 1);
+      assert.equal(fetched[0].url, "https://api.themoviedb.org/3/movie/78?language=zh-CN");
+      assert.equal(fetched[0].headers.get("Authorization"), "Bearer read-token");
+    },
+  );
+});
+
+test("TMDB provider id search uses the api key and only converts provider URLs", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url) => {
+        fetched.push(String(url));
+        return new Response(JSON.stringify({ name: "Some Show", first_air_date: "2008-01-20" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const seriesUrl = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.1396&IncludeItemTypes=Series",
+      );
+      const converted = await convertTmdbRequestFromUrl(seriesUrl, { TMDB_API_KEY: "env-api-key" });
+      assert.equal(converted.searchParams.get("SearchTerm"), "Some Show");
+      assert.equal(converted.searchParams.get("Years"), "2008");
+      assert.equal(
+        fetched[0],
+        "https://api.themoviedb.org/3/tv/1396?language=zh-CN&api_key=env-api-key",
+      );
+
+      const plainUrl = new URL("https://worker.test/Items?IncludeItemTypes=Movie");
+      assert.equal(
+        await convertTmdbRequestFromUrl(plainUrl, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+    },
+  );
+  assert.equal(fetched.length, 1);
+});
+
+test("TMDB provider id search keeps the original URL when the lookup is rejected", async () => {
+  isolateState.TmdbLookupCache.clear();
+  await withWorkerGlobals(
+    {
+      fetch: async () => new Response("blocked", { status: 429 }),
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie",
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+    },
+  );
+});
+
+test("TMDB provider id search does not guess the media type when it is ambiguous", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response(JSON.stringify({ title: "Wrong Title", release_date: "1999-01-01" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      // movie id 与 tv id 是两套命名空间：混合类型时猜错会返回另一部作品。
+      const mixed = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie,Series",
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(mixed, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+      const untyped = new URL("https://worker.test/Items?AnyProviderIdEquals=tmdb.78");
+      assert.equal(
+        await convertTmdbRequestFromUrl(untyped, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+    },
+  );
+  assert.equal(fetchCount, 0);
+});
+
+test("TMDB conversions show up in the access log detail", () => {
+  const detail = proxyService.buildStructuredLogDetail(
+    {
+      requestTraits: {},
+      requestUrl: new URL("https://worker.test/alpha/Items"),
+      tmdbConversion: { mediaType: "tv", cache: "hit", fallbackUsed: true },
+    },
+    { statusCode: 200 },
+    {},
+  );
+  assert.deepEqual(detail.tmdbConversion, {
+    mediaType: "tv",
+    cache: "hit",
+    fallback: "original_title",
+  });
+  const empty = proxyService.buildStructuredLogDetail(
+    { requestTraits: {}, requestUrl: new URL("https://worker.test/alpha/Items") },
+    { statusCode: 200 },
+    {},
+  );
+  assert.equal(empty.tmdbConversion, null);
+});
+
+test("node TMDB aggregation rewrites proxied requests only when the node switch is on", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const requested = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url) => {
+        requested.push(String(url));
+        return new Response(
+          JSON.stringify({
+            title: "Blade Runner",
+            release_date: "1982-06-25",
+            original_title: "Blade Runner",
+          }),
+          { status: 200 },
+        );
+      },
+    },
+    async () => {
+      const runtimeConfig = { rateLimitRpm: 0, tmdbApiReadToken: "config-token" };
+      const env = {};
+      const build = (query, method = "GET") =>
+        new Request(`https://worker.test/alpha/Items?${query}`, { method });
+
+      const onExecution = await proxyService.prepareExecutionContext(
+        build("AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie&Recursive=true"),
+        { target: "https://origin.test", tmdbAggregationEnabled: true },
+        "/Items",
+        "alpha",
+        "",
+        env,
+        { waitUntil() {} },
+        { runtimeConfig },
+      );
+      assert.equal(onExecution.requestUrl.searchParams.get("SearchTerm"), "Blade Runner");
+      assert.equal(onExecution.requestUrl.searchParams.has("AnyProviderIdEquals"), false);
+      assert.deepEqual(onExecution.tmdbConversion, {
+        mediaType: "movie",
+        cache: "miss",
+        fallbackTitle: "",
+      });
+
+      const offExecution = await proxyService.prepareExecutionContext(
+        build("AnyProviderIdEquals=tmdb.79&IncludeItemTypes=Movie"),
+        { target: "https://origin.test" },
+        "/Items",
+        "alpha",
+        "",
+        env,
+        { waitUntil() {} },
+        { runtimeConfig },
+      );
+      assert.equal(offExecution.requestUrl.searchParams.get("AnyProviderIdEquals"), "tmdb.79");
+      assert.equal(offExecution.tmdbConversion, null);
+
+      const postExecution = await proxyService.prepareExecutionContext(
+        build("AnyProviderIdEquals=tmdb.80&IncludeItemTypes=Movie", "POST"),
+        { target: "https://origin.test", tmdbAggregationEnabled: true },
+        "/Items",
+        "alpha",
+        "",
+        env,
+        { waitUntil() {} },
+        { runtimeConfig },
+      );
+      assert.equal(postExecution.tmdbConversion, null);
+    },
+  );
+  assert.equal(requested.length, 1, "只有开启开关的 GET 请求会查 TMDB");
+});
+
+test("TMDB lookup honours its own timeout instead of stalling the request", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const timers = [];
+  await withWorkerGlobals(
+    {
+      fetch: (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason));
+        }),
+      setTimeout: (handler) => {
+        timers.push(handler);
+        return timers.length;
+      },
+      clearTimeout: () => {},
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.321&IncludeItemTypes=Movie",
+      );
+      const pending = convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" });
+      for (let i = 0; i < 20 && timers.length === 0; i += 1) await Promise.resolve();
+      assert.equal(timers.length, 1, "查询必须在自己的定时器里超时");
+      timers[0]();
+      assert.equal(await pending, null);
+    },
+  );
+  const failedEntry = [...isolateState.TmdbLookupCache.values()][0];
+  assert.equal(failedEntry?.failed, true, "超时也要写短期负缓存");
+});
+
+test("TMDB failures are short-cached and retried after the negative TTL", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let now = 1_700_000_000_000;
+  let fetchCount = 0;
+  class FakeDate extends Date {
+    static now() {
+      return now;
+    }
+  }
+  await withWorkerGlobals(
+    {
+      Date: FakeDate,
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response("blocked", { status: 429 });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.404&IncludeItemTypes=Movie",
+      );
+      const credentials = { TMDB_API_READ_TOKEN: "read-token" };
+      assert.equal(await convertTmdbRequestFromUrl(source, credentials), null);
+      assert.equal(await convertTmdbRequestFromUrl(source, credentials), null);
+      assert.equal(fetchCount, 1, "负缓存期内不再打 TMDB");
+      now += 61_000;
+      assert.equal(await convertTmdbRequestFromUrl(source, credentials), null);
+      assert.equal(fetchCount, 2, "负缓存过期后应重试");
+    },
+  );
+});
+
+test("TMDB lookup cache stays bounded", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const expiresAt = Date.now() + 60_000;
+  for (let index = 0; index < 4100; index += 1) {
+    isolateState.TmdbLookupCache.set(`seed:${index}`, { title: "seed", year: "", expiresAt });
+  }
+  await withWorkerGlobals(
+    {
+      fetch: async () =>
+        new Response(JSON.stringify({ title: "Blade Runner", release_date: "1982-06-25" }), {
+          status: 200,
+        }),
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.55&IncludeItemTypes=Movie",
+      );
+      assert.ok(await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" }));
+    },
+  );
+  assert.equal(isolateState.TmdbLookupCache.size, 4096);
+  assert.equal(isolateState.TmdbLookupCache.has("seed:0"), false);
+});
+
+test("TMDB empty search results retry with the original title", async () => {
+  const calls = [];
+  const retryBodies = [
+    { TotalRecordCount: 1, Items: [{ Name: "Hit" }] },
+    { TotalRecordCount: 0, Items: [] },
+  ];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method });
+        const body = retryBodies.shift() || { TotalRecordCount: 0, Items: [] };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+    async () => {
+      const buildState = () => ({
+        response: new Response(JSON.stringify({ TotalRecordCount: 0, Items: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+        finalUrl: new URL(
+          "https://origin.test/emby/Items?SearchTerm=%E9%93%B6%E7%BF%BC%E6%9D%80%E6%89%8B&Years=1982&IncludeItemTypes=Movie",
+        ),
+      });
+      const buildFetchOptions = async () => ({ method: "GET" });
+      const execution = {
+        tmdbConversion: { fallbackTitle: "Blade Runner" },
+        requestMethod: "GET",
+        upstreamTimeoutMs: 0,
+      };
+      const state = buildState();
+      const next = await proxyService.applyTmdbEmptyResultFallback(
+        execution,
+        state,
+        buildFetchOptions,
+      );
+      assert.equal(execution.tmdbConversion.fallbackUsed, true);
+      assert.notEqual(next.response, state.response);
+      assert.equal(next.finalUrl.searchParams.get("SearchTerm"), "Blade Runner");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, next.finalUrl.toString());
+
+      // 兜底也空：保留第一次的响应，不把空结果再换一遍。
+      const retryEmptyExecution = {
+        tmdbConversion: { fallbackTitle: "Blade Runner" },
+        requestMethod: "GET",
+        upstreamTimeoutMs: 0,
+      };
+      const emptyState = buildState();
+      const emptyNext = await proxyService.applyTmdbEmptyResultFallback(
+        retryEmptyExecution,
+        emptyState,
+        buildFetchOptions,
+      );
+      assert.equal(emptyNext, emptyState);
+      assert.equal(retryEmptyExecution.tmdbConversion.fallbackUsed, void 0);
+    },
+  );
+});
+
+test("TMDB language falls back to zh-CN when the configured value is invalid", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const requested = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url) => {
+        requested.push(String(url));
+        return new Response(JSON.stringify({ title: `Title ${requested.length}` }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const invalid = await convertTmdbRequestFromUrl(
+        new URL("https://worker.test/Items?AnyProviderIdEquals=tmdb.11&IncludeItemTypes=Movie"),
+        { TMDB_API_READ_TOKEN: "read-token" },
+        { tmdbLanguage: "中文" },
+      );
+      assert.ok(invalid);
+      assert.equal(new URL(requested[0]).searchParams.get("language"), "zh-CN");
+
+      const explicit = await convertTmdbRequestFromUrl(
+        new URL("https://worker.test/Items?AnyProviderIdEquals=tmdb.12&IncludeItemTypes=Movie"),
+        { TMDB_API_READ_TOKEN: "read-token" },
+        { tmdbLanguage: "en-US" },
+      );
+      assert.ok(explicit);
+      assert.equal(new URL(requested[1]).searchParams.get("language"), "en-US");
+    },
+  );
+});
+
+test("credential probes report TMDB and Cloudflare rejections", async () => {
+  const probes = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init = {}) => {
+        const target = String(url);
+        probes.push({ target, headers: new Headers(init.headers) });
+        if (target.includes("api.themoviedb.org"))
+          return new Response("denied", { status: 401, headers: { "Content-Type": "text/plain" } });
+        return new Response(JSON.stringify({ success: true, result: { status: "active" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+    async () => {
+      const missing = await adminActions.testTmdbCredential({});
+      assert.equal(missing.status, 400);
+
+      const rejected = await adminActions.testTmdbCredential({ readToken: "bad-token" });
+      assert.equal(rejected.status, 502);
+      const rejectedBody = await rejected.json();
+      assert.equal(rejectedBody.error.code, "TMDB_REJECTED");
+      assert.equal(probes[0].headers.get("Authorization"), "Bearer bad-token");
+
+      const keyed = await adminActions.testTmdbCredential({
+        apiKey: "v3-key",
+        language: "en-US",
+      });
+      assert.equal(keyed.status, 502);
+      const keyedUrl = new URL(probes[1].target);
+      assert.equal(keyedUrl.searchParams.get("api_key"), "v3-key");
+      assert.equal(keyedUrl.searchParams.get("language"), "en-US");
+      assert.equal(probes[1].headers.has("Authorization"), false);
+
+      const cfMissing = await adminActions.testCloudflareApiToken({});
+      assert.equal(cfMissing.status, 400);
+
+      const cfOk = await adminActions.testCloudflareApiToken({ apiToken: "cf-token" });
+      assert.equal(cfOk.status, 200);
+      const cfBody = await cfOk.json();
+      assert.equal(cfBody.success, true);
+      assert.equal(cfBody.status, "active");
+      assert.ok(probes[2].target.endsWith("/client/v4/user/tokens/verify"));
+    },
+  );
+});
+
+test("TMDB provider id search does nothing without a configured credential", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response("{}", { status: 200 });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.78&IncludeItemTypes=Movie",
+      );
+      assert.equal(await convertTmdbRequestFromUrl(source, {}), null);
+    },
+  );
+  assert.equal(fetchCount, 0);
+});
+
+test("TMDB provider id search memoizes a successful lookup", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response(JSON.stringify({ title: "Cached Movie", release_date: "1999-01-01" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.501&IncludeItemTypes=Movie",
+      );
+      const first = await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" });
+      const second = await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" });
+      assert.equal(first.searchParams.get("SearchTerm"), "Cached Movie");
+      assert.equal(first.searchParams.get("Years"), "1999");
+      assert.equal(second.searchParams.get("SearchTerm"), "Cached Movie");
+      assert.equal(fetchCount, 1);
+    },
+  );
+});
+
+test("TMDB provider id search prefers runtime config credentials over env", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init = {}) => {
+        fetched.push({ url: String(url), headers: new Headers(init.headers) });
+        return new Response(JSON.stringify({ title: "Config Movie", release_date: "2001-02-03" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.603&IncludeItemTypes=Movie",
+      );
+      const converted = await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "env-token" },
+        { tmdbApiReadToken: "config-token" },
+      );
+      assert.equal(converted.searchParams.get("SearchTerm"), "Config Movie");
+      assert.equal(fetched.length, 1);
+      assert.equal(fetched[0].headers.get("Authorization"), "Bearer config-token");
+      assert.equal(fetched[0].url, "https://api.themoviedb.org/3/movie/603?language=zh-CN");
+    },
+  );
+});
+
+test("TMDB provider id search treats config credentials as a group over env", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init = {}) => {
+        fetched.push({ url: String(url), headers: new Headers(init.headers) });
+        return new Response(JSON.stringify({ title: "Group Movie", release_date: "1990-05-06" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.701&IncludeItemTypes=Movie",
+      );
+      const converted = await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "env-token" },
+        { tmdbApiV3Key: "config-v3-key" },
+      );
+      assert.equal(converted.searchParams.get("SearchTerm"), "Group Movie");
+      assert.equal(fetched.length, 1);
+      assert.equal(
+        fetched[0].url,
+        "https://api.themoviedb.org/3/movie/701?language=zh-CN&api_key=config-v3-key",
+      );
+      assert.equal(fetched[0].headers.get("Authorization"), null);
+    },
+  );
+});
+
+test("TMDB lookup warns once when account-settings credentials shadow env credentials", async () => {
+  isolateState.TmdbLookupCache.clear();
+  isolateState.TmdbCredentialOverrideWarned = false;
+  const warnings = [];
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response(JSON.stringify({ title: "Shadowed" }), { status: 200 });
+      },
+      console: { ...console, warn: (...args) => warnings.push(args) },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.905&IncludeItemTypes=Movie",
+      );
+      const converted = await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "env-token" },
+        { tmdbApiV3Key: "config-v3-key" },
+      );
+      assert.equal(converted.searchParams.get("SearchTerm"), "Shadowed");
+      await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "env-token" },
+        { tmdbApiV3Key: "config-v3-key" },
+      );
+    },
+  );
+  assert.equal(fetchCount, 1, "the repeated lookup must be served from cache");
+  assert.equal(warnings.length, 1, "the shadowed env credential must be reported exactly once");
+  assert.match(String(warnings[0][0]), /tmdb\.credentials_override/);
+});
+
+test("TMDB provider id search falls back to env credentials when config is empty", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init = {}) => {
+        fetched.push({ url: String(url), headers: new Headers(init.headers) });
+        return new Response(JSON.stringify({ title: "Env Movie", release_date: "1991-07-08" }), {
+          status: 200,
+        });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.702&IncludeItemTypes=Movie",
+      );
+      const converted = await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "env-token" },
+        { tmdbApiReadToken: "", tmdbApiV3Key: "" },
+      );
+      assert.equal(converted.searchParams.get("SearchTerm"), "Env Movie");
+      assert.equal(fetched[0].headers.get("Authorization"), "Bearer env-token");
+    },
+  );
+});
+
+test("TMDB provider id search short-caches a rejected lookup", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response("gone", { status: 404 });
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.703&IncludeItemTypes=Movie",
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(source, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+      assert.equal(fetchCount, 1);
+    },
+  );
+});
+
+test("TMDB provider id search honors a configured metadata language", async () => {
+  isolateState.TmdbLookupCache.clear();
+  const fetched = [];
+  await withWorkerGlobals(
+    {
+      fetch: async (url) => {
+        fetched.push(String(url));
+        return new Response(
+          JSON.stringify({ title: "English Movie", release_date: "1988-01-01" }),
+          { status: 200 },
+        );
+      },
+    },
+    async () => {
+      const source = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.801&IncludeItemTypes=Movie",
+      );
+      await convertTmdbRequestFromUrl(
+        source,
+        { TMDB_API_READ_TOKEN: "read-token", TMDB_LANGUAGE: "fr-FR" },
+        { tmdbLanguage: "en-US" },
+      );
+      assert.equal(fetched[0], "https://api.themoviedb.org/3/movie/801?language=en-US");
+      // the language is part of the cache key, so switching language triggers a fresh lookup
+      const source2 = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.801&IncludeItemTypes=Movie",
+      );
+      await convertTmdbRequestFromUrl(source2, {
+        TMDB_API_READ_TOKEN: "read-token",
+        TMDB_LANGUAGE: "fr-FR",
+      });
+      assert.equal(fetched[1], "https://api.themoviedb.org/3/movie/801?language=fr-FR");
+    },
+  );
+});
+
+test("TMDB provider id search skips episode and season lookups", async () => {
+  isolateState.TmdbLookupCache.clear();
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response("{}", { status: 200 });
+      },
+    },
+    async () => {
+      const episodeUrl = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.901&IncludeItemTypes=Episode",
+      );
+      const seasonUrl = new URL(
+        "https://worker.test/Items?AnyProviderIdEquals=tmdb.902&IncludeItemTypes=Season",
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(episodeUrl, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+      assert.equal(
+        await convertTmdbRequestFromUrl(seasonUrl, { TMDB_API_READ_TOKEN: "read-token" }),
+        null,
+      );
+      assert.equal(fetchCount, 0);
+    },
+  );
+});
+
 test("medb list counts replace the emos node /emby/Items/Counts response", async () => {
   isolateState.MedbItemsCountsCache.clear();
   const fetched = [];
@@ -3446,25 +4145,28 @@ test("medb counts stay out of unrelated nodes, paths, and methods", async () => 
   assert.equal(fetchCount, 0);
 });
 
-test("node normalization keeps tmdbAggregationEnabled as a cleared compatibility field", () => {
-  // TMDB 查询转换已移除。字段名与类型仍保留，避免旧 KV / 旧备份读取时报错或丢字段，
-  // 但任何输入（包括历史 true）都必须被清空成 false，不能留下一个「看起来开着」的开关。
-  for (const input of [true, "yes", 1, false, undefined]) {
-    const normalized = kernel.normalizeNode("alpha", {
+test("node normalization keeps the TMDB aggregation flag as a strict boolean", () => {
+  const enabled = kernel.normalizeNode("alpha", {
+    target: "https://origin.test",
+    tmdbAggregationEnabled: true,
+  }).data;
+  assert.equal(enabled.tmdbAggregationEnabled, true);
+  for (const input of ["yes", 1, false, undefined]) {
+    const coerced = kernel.normalizeNode("alpha", {
       target: "https://origin.test",
       tmdbAggregationEnabled: input,
     }).data;
     assert.equal(
-      normalized.tmdbAggregationEnabled,
+      coerced.tmdbAggregationEnabled,
       false,
-      `输入 ${JSON.stringify(input)} 必须被清空`,
+      `输入 ${JSON.stringify(input)} 必须落成 false`,
     );
   }
   const summary = kernel.normalizeNodeSummaryPayload("alpha", {
     target: "https://origin.test",
     tmdbAggregationEnabled: true,
   });
-  assert.equal(summary.tmdbAggregationEnabled, false);
+  assert.equal(summary.tmdbAggregationEnabled, true);
   assert.equal("tmdbAggregationEnabled" in summary, true, "兼容字段不能被删掉");
 });
 

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 // 管理端 vendor 摇树构建。
 //
-// 线上壳（frontend/dist/index.html）里 4 个绝对 URL 是"生产 pin"：Worker 在投递时把它们
+// 线上壳（frontend/dist/index.html）里 3 个绝对 URL 是"生产 pin"：Worker 在投递时把它们
 // 改写成 /ADMIN_PATH/__release/<rev>/vendor/<assetKey>，再由 Worker 同源代理。这个脚本负责
 // 把代理的**内容**换成本地摇树后的产物，文件名就是 Worker 计算的 assetKey，因此不需要改
 // 模板、不需要改 pins 测试，也不需要浏览器再碰 CDN。
+//
+// 第 4 个样式依赖（Tailwind）不再走这条链路：它在构建期被编译成静态 CSS 内联进壳，
+// 浏览器侧没有可下载的编译器产物了，见 frontend/scripts/build-admin-tailwind.mjs。
 //
 // 摇树结论（详见 docs/tech-stack.md §1.1）：
 //   lucide  397 KB → ~12 KB   只保留壳里真实用到的图标（含别名）
 //   chart.js 206 KB → ~169 KB 只注册 line 图用到的 controller/element/scale/plugin
 //   vue     105 KB → 105 KB   runtime-only global build，无树可摇（只做同源搬运）
-//   tailwind 271 KB → 271 KB  浏览器内 JIT 编译器，摇不动（只做同源搬运）
 //
 // 用法：
 //   node frontend/scripts/build-admin-vendor.mjs            # 构建（缺缓存时联网）
@@ -38,7 +40,7 @@ const lockPath = path.join(frontendDirectory, "vendor.lock.json");
 
 const REGISTRY_ORIGIN = "https://registry.npmjs.org";
 
-// 与 tests/tech-stack-pins.test.mjs 里的 4 个 pin 一一对应；upstreamUrl 必须逐字一致，
+// 与 tests/tech-stack-pins.test.mjs 里的 3 个 pin 一一对应；upstreamUrl 必须逐字一致，
 // 因为 Worker 的 assetKey 是对这个 URL 做 hashStableText 得到的。
 export const ADMIN_VENDOR_PINS = Object.freeze([
   {
@@ -68,15 +70,6 @@ export const ADMIN_VENDOR_PINS = Object.freeze([
     distPath: "dist/umd/lucide.min.js",
     strategy: "lucide-subset",
     note: "只保留壳里出现过的图标名（含 lucide 的废弃别名）",
-  },
-  {
-    key: "tailwind",
-    packageName: "@tailwindcss/browser",
-    version: "4.2.2",
-    upstreamUrl: "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.2/dist/index.global.js",
-    distPath: "dist/index.global.js",
-    strategy: "copy",
-    note: "浏览器内 JIT 编译器，产物就是编译器本体，没有可摇的图标/组件粒度",
   },
 ]);
 
@@ -417,7 +410,9 @@ async function buildVendorArtifacts({ offline, force }) {
   const lock = previousLock?.packages ? previousLock : { version: 1, packages: {} };
   const { literals, scannedSources } = await collectShellIconCandidates();
   const results = [];
-  const nextPackages = { ...lock.packages };
+  // 只记录当前 pins 的完整记录：pin 被删掉时，锁文件里的旧记录要跟着消失，
+  // 否则 vendor.lock.json 会长期留着一个线上早就不加载的包。
+  const nextPackages = {};
 
   for (const pin of ADMIN_VENDOR_PINS) {
     const assetKey = buildAdminVendorAssetKey(pin.upstreamUrl, "script");

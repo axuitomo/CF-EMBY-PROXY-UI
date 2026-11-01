@@ -2,8 +2,8 @@
 JWT_SECRET=replace-with-a-long-random-secret
 ADMIN_PASS=replace-with-a-local-admin-password
 
-# Deprecated since V20.0: TMDB request conversion was removed, nothing reads these.
-# Kept so existing .dev.vars files stay valid; leave them unset.
+# TMDB credentials for the per-node request conversion (see docs/architecture.md).
+# Configuration in the panel takes precedence; env is ignored once either panel field is set.
 # TMDB_API_READ_TOKEN=
 # TMDB_API_KEY=
-# TMDB_LANGUAGE=
+# TMDB_LANGUAGE=zh-CN

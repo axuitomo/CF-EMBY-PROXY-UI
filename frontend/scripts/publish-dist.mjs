@@ -33,7 +33,7 @@ console.log(
 );
 
 // vendor/ 由 build-admin-vendor.mjs 生成（文件名 = Worker 计算的 vendor assetKey）。
-// 缺失时直接失败：壳里的 4 个 CDN 脚本会被 Worker 改写到这些文件上，少一个就是白屏。
+// 缺失时直接失败：壳里的 3 个 CDN 脚本会被 Worker 改写到这些文件上，少一个就是白屏。
 let vendorFiles = [];
 try {
   vendorFiles = (await readdir(vendorSourceDirectory)).filter((name) => name.endsWith(".js"));

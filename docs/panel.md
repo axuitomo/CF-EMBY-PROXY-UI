@@ -108,6 +108,7 @@ README「管理后台」一节的展开版：后台页面构成、DNS 编辑双�
 
 ### 账号设置
 - 后台免密登录有效天数（JWT）
+- TMDB API Read Token / TMDB API Key（v3）/ TMDB 语言：节点「TMDB 聚合」用的凭据。两项凭据填任意一项即整组生效并覆盖 Worker 环境变量 `TMDB_API_READ_TOKEN` / `TMDB_API_KEY`；都留空才用环境变量。语言留空默认 `zh-CN`。同一面板里「测试 TMDB 凭据」按钮会用当前输入值直连 TMDB 并显示命中的标题；「测试 Cloudflare 令牌」按钮走 `/user/tokens/verify`，只验证令牌本身是否 active。两者都不保存配置，填错立刻能看到原因
 - Cloudflare Account ID / Zone ID / API Token
 - 一键清理全站缓存（Purge）
 - 页面上 Telegram Bot Token 与 Cloudflare API Token 用密码输入框（`type="password"`）遮罩显示，Chat ID 是普通文本框；三者都没有额外的“预览 / 脱敏”读数，值原样写入 `sys:theme`。脱敏只发生在导出与日志：`CONFIG_SECRET_FIELDS` 里的字段在普通导出中是掩码，只有二次确认的“含密钥”导出才给原值。

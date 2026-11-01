@@ -97,6 +97,12 @@ body.bg-slate-50,body.antialiased{background:rgb(var(--ui-c-n-50)) !important;co
 #node-modal [data-admin-hint-toggle="1"]:hover{color:rgb(var(--ui-c-n-600))}
 .dark #node-modal [data-admin-hint-toggle="1"]{color:rgb(var(--ui-c-n-500))}
 .dark #node-modal [data-admin-hint-toggle="1"]:hover{color:rgb(var(--ui-c-n-300))}
+#view-settings [data-admin-credential-test="1"] button{border:1px solid rgb(var(--ui-c-n-200));padding:.375rem .75rem;font-size:.75rem;line-height:1.15rem;font-weight:500;color:rgb(var(--ui-c-n-600));background:transparent;cursor:pointer}
+#view-settings [data-admin-credential-test="1"] button:hover{border-color:rgb(var(--ui-c-a-300));color:rgb(var(--ui-c-a-600))}
+#view-settings [data-admin-credential-test="1"] button:disabled{opacity:.55;cursor:progress}
+.dark #view-settings [data-admin-credential-test="1"] button{border-color:rgb(var(--ui-c-n-700));color:rgb(var(--ui-c-n-300))}
+#view-settings [data-credential-test-result="1"][data-tone="ok"]{color:rgb(var(--ui-c-a-600))}
+#view-settings [data-credential-test-result="1"][data-tone="error"]{color:#c0392b}
 #node-modal [data-admin-node-basic-grid="1"]{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
 #node-modal [data-admin-node-meta-grid="1"]{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(15rem,1fr) !important}
 #node-modal [data-admin-node-entry-field="1"] p{margin-bottom:0}
@@ -761,6 +767,12 @@ html[data-theme-switching] *::before,
 html[data-theme-switching] *::after{transition:none !important}
 ::view-transition-old(root),
 ::view-transition-new(root){animation-duration:.22s;animation-timing-function:cubic-bezier(.22,1,.36,1)}
+/* 凭据字段旁的跳转图标：跟随正文色阶，悬停才亮起，不做常驻高饱和色。 */
+#app-shell [data-admin-credential-link]{display:inline-flex;align-items:center;margin-left:.375rem;vertical-align:-.15em;color:rgb(var(--ui-c-n-400));transition:color .18s ease}
+#app-shell [data-admin-credential-link]:hover{color:#0284c7}
+.dark #app-shell [data-admin-credential-link]:hover{color:#7dd3fc}
+#app-shell [data-admin-credential-link]:focus-visible{outline:none;border-radius:4px;box-shadow:0 0 0 2px rgba(2,132,199,.3)}
+#app-shell [data-admin-credential-link] svg{width:.875rem;height:.875rem}
 </style>`;
 // 这段脚本被注入到 </head> 前，早于 <body> 里定义 window.App 的编译 bundle。
 // 因此补丁不能同步应用：入口只装事件与观察器，真正打补丁的是 scheduleShellRefresh() 排的那一帧。
@@ -1000,6 +1012,7 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
   let shellFrameId = 0;
   let nodeModalWasOpen = false;
   let patchedSafetyContractApp = null;
+  let tmdbPatchedApp = null;
   const dashboardTrafficState = {
     period: 'day',
     daily: null,
@@ -1160,6 +1173,7 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
       applyLayoutEnhancements();
       applySafetyContractEnhancements();
       patchThemeTransitionMethods(window.App);
+      patchDnsIpPoolDeleteMethods(window.App);
       mountSensitiveInputToggles(document);
       syncDashboardTrafficToggle(window.App);
     });
@@ -1485,6 +1499,164 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
   function applySettingsLayout() {
     syncWorkerHtmlUpdatePanel(window.App);
     syncThemeSkinPanel(window.App);
+    syncTmdbCredentialPanel(window.App);
+    syncCredentialHelpLinks();
+  }
+
+  // 凭据字段旁的跳转图标：目标是签发或查看该凭据的官方页面。图标用内联 SVG，
+  // 不走 lucide，免得图标库还没替换 <i data-lucide> 时这里留下一个空格子。
+  const CREDENTIAL_HELP_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>';
+  const CREDENTIAL_HELP_TARGETS = [
+    ['#cfg-tg-token', 'https://t.me/BotFather'],
+    ['#cfg-cf-account', 'https://dash.cloudflare.com/?to=/:account/workers-and-pages'],
+    ['#cfg-cf-zone', 'https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/'],
+    ['#cfg-cf-token', 'https://dash.cloudflare.com/profile/api-tokens'],
+    ['#cfg-cf-kv-namespace', 'https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces'],
+    ['#cfg-cf-d1-database', 'https://dash.cloudflare.com/?to=/:account/workers/d1'],
+  ];
+
+  // title 与 aria-label 直接写地址：悬停或读屏都能知道这枚图标跳去哪。
+  function credentialHelpLink(href) {
+    return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" data-admin-credential-link="1" title="' + href + '" aria-label="打开 ' + href + '">' + CREDENTIAL_HELP_ICON + '</a>';
+  }
+
+  function syncCredentialHelpLinks() {
+    for (const [selector, href] of CREDENTIAL_HELP_TARGETS) {
+      const input = document.querySelector(selector);
+      if (!input) continue;
+      // 密码框会被 mountSensitiveInputToggle 包进一层 span，所以标签是容器（不是输入框）的前兄弟。
+      const holder = input.parentElement?.hasAttribute('data-sensitive-input-toggle') ? input.parentElement : input;
+      const label = holder.previousElementSibling;
+      if (!label || label.tagName !== 'LABEL') continue;
+      if (label.querySelector('[data-admin-credential-link]')) continue;
+      label.insertAdjacentHTML('beforeend', credentialHelpLink(href));
+    }
+  }
+
+  // 账号设置的 TMDB 凭据：V20 删掉了这三段输入框，但 CONFIG_FORM_BINDINGS 与保存载荷还在，
+  // 所以只补 DOM，值直接读写 settingsForm（保存时由字段表带进 payload）。
+  const TMDB_CREDENTIAL_FIELDS = [
+    ['#cfg-tmdb-read-token', 'tmdbApiReadToken'],
+    ['#cfg-tmdb-api-key', 'tmdbApiV3Key'],
+    ['#cfg-tmdb-language', 'tmdbLanguage'],
+  ];
+  const TMDB_CREDENTIAL_FIELD_CLASS =
+    'w-full p-2 rounded-control border border-border-soft bg-surface-panel outline-none dark:border-border-dark dark:bg-surface-dark dark:text-white';
+  const TMDB_CREDENTIAL_MARKUP =
+    '<div class="ui-block-head"><div>' +
+    '<div class="ui-section-kicker">TMDB</div>' +
+    '<div class="ui-section-title">TMDB 聚合凭据' +
+    credentialHelpLink('https://www.themoviedb.org/settings/api') +
+    '</div>' +
+    '</div><span class="ui-chip-muted">节点级开关</span></div>' +
+    '<label class="ui-field-label" for="cfg-tmdb-read-token">TMDB API Read Token</label>' +
+    '<input type="password" id="cfg-tmdb-read-token" autocomplete="new-password" class="' +
+    TMDB_CREDENTIAL_FIELD_CLASS +
+    ' mb-3">' +
+    '<label class="ui-field-label" for="cfg-tmdb-api-key">TMDB API Key（v3）</label>' +
+    '<input type="password" id="cfg-tmdb-api-key" autocomplete="new-password" class="' +
+    TMDB_CREDENTIAL_FIELD_CLASS +
+    ' mb-3">' +
+    '<label class="ui-field-label" for="cfg-tmdb-language">TMDB 语言</label>' +
+    '<input type="text" id="cfg-tmdb-language" placeholder="zh-CN" class="' +
+    TMDB_CREDENTIAL_FIELD_CLASS +
+    ' mb-3">' +
+    '<p class="text-xs leading-5 text-slate-500">节点弹窗「高级设置」里的 TMDB 聚合开关用它把 AnyProviderIdEquals=tmdb.&lt;id&gt; 换成标题 + 年份查询。两项凭据只要填了任意一项就整组覆盖 Worker 环境变量 TMDB_API_READ_TOKEN / TMDB_API_KEY；都留空才用环境变量。语言留空默认 zh-CN。</p>' +
+    '<div class="mt-3 flex flex-wrap items-center gap-2" data-admin-credential-test="1">' +
+    '<button type="button" class="rounded-control" data-credential-test="tmdb">测试 TMDB 凭据</button>' +
+    '<button type="button" class="rounded-control" data-credential-test="cloudflare">测试 Cloudflare 令牌</button>' +
+    '<span data-credential-test-result="1" class="text-xs leading-5 text-slate-500"></span>' +
+    '</div>';
+
+  function syncTmdbCredentialPanel(app) {
+    const form = app?.settingsForm;
+    if (!form) return;
+    // 位置固定为「后台登录有效期」与「Cloudflare 联动」两块之间。
+    const loginPanel = document.querySelector('#cfg-jwt-days')?.closest('.ui-settings-panel');
+    if (!loginPanel || !loginPanel.parentElement) return;
+    let panel = document.querySelector('[data-admin-tmdb-credentials="1"]');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.setAttribute('data-admin-tmdb-credentials', '1');
+      panel.className = 'ui-settings-panel settings-block h-full';
+      panel.innerHTML = TMDB_CREDENTIAL_MARKUP;
+      for (const [selector, key] of TMDB_CREDENTIAL_FIELDS) {
+        const input = panel.querySelector(selector);
+        if (!input) continue;
+        input.addEventListener('input', () => {
+          const currentForm = window.App?.settingsForm;
+          if (currentForm) currentForm[key] = input.value;
+        });
+      }
+    }
+    // Vue 重渲染会丢掉注入节点，位置不对就补回去（存在时是幂等的）。
+    if (panel.previousElementSibling !== loginPanel) {
+      loginPanel.insertAdjacentElement('afterend', panel);
+    }
+    for (const [selector, key] of TMDB_CREDENTIAL_FIELDS) {
+      const input = panel.querySelector(selector);
+      // 正在输入时不回写，避免和光标抢值。
+      if (!input || document.activeElement === input) continue;
+      const next = String(form[key] ?? '');
+      if (input.value !== next) input.value = next;
+    }
+    bindCredentialTests(panel);
+  }
+
+  // 凭据连通性测试：直接拿页面里当前的值去问一次，填错不用等到节点列表变空才发现。
+  function bindCredentialTests(panel) {
+    const result = panel.querySelector('[data-credential-test-result="1"]');
+    const setResult = (text, tone) => {
+      if (!result) return;
+      result.textContent = text;
+      if (tone) result.setAttribute('data-tone', tone);
+      else result.removeAttribute('data-tone');
+    };
+    panel.querySelectorAll('[data-credential-test]').forEach((button) => {
+      if (button.getAttribute('data-admin-credential-test-bound') === '1') return;
+      button.setAttribute('data-admin-credential-test-bound', '1');
+      button.addEventListener('click', async () => {
+        const app = window.App;
+        if (!app || typeof app.apiCall !== 'function') return;
+        const readForm = (key) => String(app.settingsForm?.[key] ?? '');
+        const readInput = (selector, key) =>
+          String(document.querySelector(selector)?.value ?? readForm(key));
+        const kind = button.getAttribute('data-credential-test');
+        button.disabled = true;
+        setResult('测试中…', '');
+        try {
+          if (kind === 'cloudflare') {
+            const response = await app.apiCall('testCloudflareApiToken', {
+              apiToken: readInput('#cfg-cf-token', 'cfApiToken'),
+            });
+            setResult('Cloudflare 令牌可用（' + String(response?.status || 'active') + '）', 'ok');
+          } else {
+            const response = await app.apiCall('testTmdbCredential', {
+              readToken: readInput('#cfg-tmdb-read-token', 'tmdbApiReadToken'),
+              apiKey: readInput('#cfg-tmdb-api-key', 'tmdbApiV3Key'),
+              language: readInput('#cfg-tmdb-language', 'tmdbLanguage'),
+            });
+            const title = String(response?.title || '');
+            setResult(
+              'TMDB 可用：' +
+                (title || '连通') +
+                (response?.language ? '（' + response.language + '）' : '') +
+                (response?.credentialKind === 'api_key' ? ' · v3 Key' : ' · Read Token'),
+              'ok',
+            );
+          }
+        } catch (error) {
+          setResult(
+            (kind === 'cloudflare' ? 'Cloudflare 令牌测试失败：' : 'TMDB 凭据测试失败：') +
+              String(error?.message || error || '未知错误'),
+            'error',
+          );
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
   }
 
   function applyNodeAdvancedSettingsLayout() {
@@ -1531,6 +1703,7 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
       }
     }
     if (headersPanel.parentElement !== content) content.appendChild(headersPanel);
+    syncTmdbAggregationControl(window.App, content, advancedFields);
     syncNodeInheritCopy(window.App);
   }
 
@@ -3175,6 +3348,80 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
     return label ? '继承全局（' + label + '）' : '继承全局';
   }
 
+  // 节点「TMDB 聚合」开关：节点保存载荷是固定字段表，这里补一个字段并按需改写 apiCall。
+  function patchTmdbNodeMethods(app) {
+    if (!app || tmdbPatchedApp === app) return;
+    const originalBuildNodeModalFormState = app.buildNodeModalFormState;
+    const originalSaveNode = app.saveNode;
+    if (typeof originalBuildNodeModalFormState !== 'function' || typeof originalSaveNode !== 'function') return;
+    app.buildNodeModalFormState = function (...args) {
+      const state = originalBuildNodeModalFormState.apply(this, args);
+      const source = state?.hydratedNode || args[0] || {};
+      if (state?.form) state.form.tmdbAggregationEnabled = source?.tmdbAggregationEnabled === true;
+      return state;
+    };
+    app.saveNode = async function (...args) {
+      const enabled =
+        document.querySelector('[data-admin-node-tmdb-aggregation="1"] input')?.checked === true ||
+        this?.nodeModalForm?.tmdbAggregationEnabled === true;
+      if (this?.nodeModalForm) this.nodeModalForm.tmdbAggregationEnabled = enabled;
+      const originalApiCall = this.apiCall;
+      const wrappedApiCall = function (action, payload, ...rest) {
+        const nextPayload =
+          action === 'save' && payload && typeof payload === 'object'
+            ? { ...payload, tmdbAggregationEnabled: enabled }
+            : payload;
+        return originalApiCall.call(this, action, nextPayload, ...rest);
+      };
+      this.apiCall = wrappedApiCall;
+      try {
+        return await originalSaveNode.apply(this, args);
+      } finally {
+        if (this.apiCall === wrappedApiCall) this.apiCall = originalApiCall;
+      }
+    };
+    tmdbPatchedApp = app;
+  }
+
+  function syncTmdbAggregationControl(app, content, advancedFields) {
+    if (!app || !content || !advancedFields) return;
+    patchTmdbNodeMethods(app);
+    if (app.nodeModalForm) {
+      const currentName = String(app.nodeModalForm.originalName || app.nodeModalForm.name || '')
+        .trim()
+        .toLowerCase();
+      const currentNode = (Array.isArray(app.nodes) ? app.nodes : []).find(
+        (node) => String(node?.name || '').trim().toLowerCase() === currentName,
+      );
+      if (typeof app.nodeModalForm.tmdbAggregationEnabled !== 'boolean') {
+        app.nodeModalForm.tmdbAggregationEnabled = currentNode?.tmdbAggregationEnabled === true;
+      }
+    }
+    let field = document.querySelector('[data-admin-node-tmdb-aggregation="1"]');
+    if (!field) {
+      field = document.createElement('label');
+      field.setAttribute('data-admin-node-tmdb-aggregation', '1');
+      field.className =
+        'col-span-full flex items-start justify-between gap-4 border-b border-slate-100 pb-3.5 dark:border-slate-800';
+      field.innerHTML =
+        '<span class="min-w-0"><span class="block text-sm text-slate-500">TMDB 聚合</span><span class="mt-1 block text-xs leading-5 text-slate-400">把列表请求里的 AnyProviderIdEquals=tmdb.&lt;id&gt; 换成 TMDB 的标题 + 年份再向本节点查询；集与季请求不改写。凭据取「账号设置」里的 TMDB 两项，留空时读 Worker 环境变量。</span></span><span class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center"><input type="checkbox" class="peer absolute inset-0 h-full w-full cursor-pointer opacity-0"><span class="pointer-events-none absolute inset-0 rounded-full bg-slate-200 transition-colors peer-checked:bg-brand-600 peer-focus-visible:ring-2 peer-focus-visible:ring-brand-400 peer-focus-visible:ring-offset-2 dark:bg-slate-700"></span><span class="pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4"></span></span>';
+    }
+    const input = field.querySelector('input');
+    if (input) {
+      const syncValue = () => {
+        if (app.nodeModalForm) app.nodeModalForm.tmdbAggregationEnabled = input.checked === true;
+      };
+      input.onchange = syncValue;
+      input.onclick = syncValue;
+      const renderKey = String(app.nodeModalRenderKey ?? '');
+      if (field.dataset.renderKey !== renderKey) {
+        input.checked = app.nodeModalForm?.tmdbAggregationEnabled === true;
+        field.dataset.renderKey = renderKey;
+      }
+    }
+    if (field.parentElement !== advancedFields) advancedFields.prepend(field);
+  }
+
   function syncNodeInheritCopy(app) {
     if (!app) return;
     for (const [id, resolveLabel] of Object.entries(NODE_INHERIT_GLOBAL_LABELS)) {
@@ -3254,6 +3501,37 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
     const originalToggleTheme = app.toggleTheme.bind(app);
     app.toggleTheme = function toggleThemeWithoutColorFlicker() {
       swapUiTheme(originalToggleTheme);
+    };
+  }
+
+  let patchedDnsIpPoolDeleteApp = null;
+
+  // 优选 IP 工作台删除后残留：getDnsIpWorkspace 会把浏览器本地池并进 sharedPoolItems 返回
+  // （为给本地 IP 补探活结果），客户端又把这份合列表当成「共享快照」存进
+  // dnsIpSourceSharedPoolItems。于是删掉本地池条目时，服务端 fetch 缓存里根本没有这个 IP，
+  // deletedIps 是空的，那份影子副本就留在共享列表里，只有刷新页面才消失。
+  // 这里按本地池的实际删除结果，把同名影子副本一并清掉（两侧都有的 IP 已被接口删掉，重复清理无害）。
+  function patchDnsIpPoolDeleteMethods(app) {
+    if (!app || patchedDnsIpPoolDeleteApp === app) return;
+    if (typeof app.deleteSelectedDnsIpPoolItems !== 'function') return;
+    patchedDnsIpPoolDeleteApp = app;
+    const originalDelete = app.deleteSelectedDnsIpPoolItems.bind(app);
+    const readLocalPoolKeys = (target) => new Set(
+      (Array.isArray(target?.dnsIpLocalPoolItems) ? target.dnsIpLocalPoolItems : [])
+        .map((item) => String(item?.ip || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const poolItemKey = (item) => String(item?.ip || '').trim().toLowerCase();
+    app.deleteSelectedDnsIpPoolItems = async function deleteSelectedDnsIpPoolItemsWithoutStaleSharedCopies(...args) {
+      const localKeysBefore = readLocalPoolKeys(this);
+      const result = await originalDelete(...args);
+      const localKeysAfter = readLocalPoolKeys(this);
+      const removedLocalKeys = new Set([...localKeysBefore].filter((key) => !localKeysAfter.has(key)));
+      if (!removedLocalKeys.size) return result;
+      const sharedItems = Array.isArray(this.dnsIpSourceSharedPoolItems) ? this.dnsIpSourceSharedPoolItems : [];
+      const keptSharedItems = sharedItems.filter((item) => !removedLocalKeys.has(poolItemKey(item)));
+      if (keptSharedItems.length !== sharedItems.length) this.setDnsIpSourceSharedPoolItems(keptSharedItems);
+      return result;
     };
   }
 

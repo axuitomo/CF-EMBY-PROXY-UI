@@ -430,7 +430,7 @@ function inspectRuntimeAssets(html = "") {
   return { assets, importMapCount, inlineDynamicImports };
 }
 
-// 4 个 CDN pin 会被 Worker 改写成 /ADMIN_PATH/__release/<rev>/vendor/<assetKey>，由本
+// 模板里的 CDN pin（当前 3 个）会被 Worker 改写成 /ADMIN_PATH/__release/<rev>/vendor/<assetKey>，由本
 // Worker 同源返回。这些 assetKey 对应的摇树产物必须随 dist 一起发出去，少一个就是白屏。
 async function checkAdminVendorStore() {
   const { ADMIN_VENDOR_PINS, buildAdminVendorAssetKey } = await import("./build-admin-vendor.mjs");
@@ -570,7 +570,9 @@ async function main() {
   console.log(
     `[check:release] dist/index.html 满足单文件管理台 + Worker 同源代理约束（壳 ${shellBytes} B / 上限 ${MAX_ADMIN_SHELL_BYTES} B）。`,
   );
-  console.log("[check:release] dist/vendor 下的摇树产物与 4 个 pin 的 assetKey 对齐。");
+  console.log(
+    `[check:release] dist/vendor 下的摇树产物与 ${assetMatches.length} 个 pin 的 assetKey 对齐。`,
+  );
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -28,7 +28,7 @@ README 的部署细节展开版：环境变量与绑定、三种部署方式的�
 | **`ADMIN_PATH`** | 文本变量 (Var) | **自定义管理入口**。用于修改默认的 `/admin` 路径，有效防范自动化扫描工具的嗅探。 | `/secret_portal_99`<br>\> ⚠️ **注意**：不能以 `/api` 开头，也不能是 `/`；写错时 Worker 会静默回退到默认的 `/admin`（不会报错）。 |
 | **`HOST`** | 文本变量 (Var) | **主访问域名**。启用 host prefix 代理或保存 host prefix 节点前必须配置；只填写合法 DNS 主机名。 | `emby.example.com`，不要带协议、端口、路径、通配符或 IP。 |
 | **`LEGACY_HOST`** | 文本变量 (Var) | **兼容旧访问域名**。迁移主域名时保留旧的路径式节点入口。 | `old-emby.example.com` |
-| **`TMDB_API_READ_TOKEN`** / **`TMDB_API_KEY`** / **`TMDB_LANGUAGE`** | 加密变量 / 文本变量 | **已停用（保留兼容）**。V20.0 移除了 TMDB 查询转换，这三项不再被任何代码读取，填写也不会影响请求；后台「账号设置」里的同名配置项同理保留但不再生效。 | 可留空。见 `.dev.vars.example` |
+| **`TMDB_API_READ_TOKEN`** / **`TMDB_API_KEY`** / **`TMDB_LANGUAGE`** | 加密变量 / 文本变量 | **节点「TMDB 聚合」的凭据**。开启该开关的节点收到 `AnyProviderIdEquals=tmdb.<id>` 的列表请求时，Worker 先换出 TMDB 的标题 + 年份，再以 `SearchTerm` / `Years` 向本节点查询；集与季请求不改写。后台「账号设置」里只要填了任意一项，这组环境变量就被整体忽略。 | 可留空（此时开关无效、请求原样透传）。见 `.dev.vars.example` |
 
 > 💡 **命名兼容性提示**：
 > 核心代码已向下兼容多种旧版命名（如 `KV` / `EMBY_KV` / `EMBY_PROXY` 会自动映射为 `ENI_KV`，`D1` / `PROXY_LOGS` 会映射为 `DB`）。但**强烈建议在新部署时统一使用 `ENI_KV` 和 `DB`**，以确保与后续的更新、README 说明及自动化脚本保持一致。

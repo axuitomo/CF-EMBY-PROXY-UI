@@ -1,29 +1,30 @@
 # 技术栈与更新策略
 
-一句话结论：**真正上线的前端技术栈只有“一个 Worker bundle + 一个单文件 HTML + 4 个钉死版本的 CDN 脚本”**。根目录 `package.json` 和 `frontend/package.json` 里的依赖一行都不会进用户浏览器。
+一句话结论：**真正上线的前端技术栈只有“一个 Worker bundle + 一个单文件 HTML + 3 个钉死版本的 CDN 脚本 + 构建期预编译好的一段 CSS”**。根目录 `package.json` 和 `frontend/package.json` 里的依赖一行都不会进用户浏览器（唯一例外是构建期的 Tailwind 编译器，它把 CSS 编译进 HTML 后就退场）。
 
 想知道“该不该更新”，先判断你要动的东西属于下面哪一层。
 
 ## 1. 线上运行时（唯一真实栈）
 
-管理端是单文件交付：`frontend/admin-runtime.template.html` + 增强脚本 → `frontend/index.html` → `frontend/dist/index.html`，没有任何 `type="module"`，不经过打包器。页面运行时按固定版本从 CDN 拉 4 个脚本：
+管理端是单文件交付：`frontend/admin-runtime.template.html` + 增强脚本 → `frontend/index.html` → `frontend/dist/index.html`，没有任何 `type="module"`，不经过打包器。页面运行时按固定版本从 CDN 拉 3 个脚本：
 
 | 资源 | 钉死版本 | 完整 URL | 作用 |
 | --- | --- | --- | --- |
 | Vue | 3.5.32 | `https://cdn.jsdelivr.net/npm/vue@3.5.32/dist/vue.runtime.global.prod.js` | 管理台 UI 框架（global build） |
 | Chart.js | 4.4.7 | `https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js` | 仪表盘趋势图（global `Chart`） |
 | Lucide | 1.8.0 | `https://cdn.jsdelivr.net/npm/lucide@1.8.0/dist/umd/lucide.min.js` | 图标（`lucide` 指令批量替换 `<i data-lucide>`） |
-| Tailwind | 4.2.2 | `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.2/dist/index.global.js` | 样式：浏览器内 JIT 编译（v4 浏览器构建），主题来自模板里的 `<style type="text/tailwindcss">` |
 
-这 4 行是**生产依赖**。改其中任何一行，等于改用户浏览器里跑的代码；`npm run check` 里的 `tests/tech-stack-pins.test.mjs` 会把它们钉住，升级必须显式改测试。
+这 3 行是**生产依赖**。改其中任何一行，等于改用户浏览器里跑的代码；`npm run check` 里的 `tests/tech-stack-pins.test.mjs` 会把它们钉住，升级必须显式改测试。
 
-### 1.1 这 4 个脚本的内容是同源 + 摇树后的产物
+样式曾经是第 4 个运行时依赖（`@tailwindcss/browser`，271 KB 的浏览器内 JIT 编译器），现在是构建期产物：`frontend/scripts/build-admin-tailwind.mjs` 用 `tailwindcss@4.2.2` 把模板里的 `<style type="text/tailwindcss">` 编译成静态 CSS，直接内联进壳（约 122 KB 文本 / gzip 13.7 KB）。换来的是浏览器不再需要下载和执行编译器，代价是 CSS 随 HTML 文档走、不再单独缓存，细节见 §1.2。
+
+### 1.1 这 3 个脚本的内容是同源 + 摇树后的产物
 
 模板里保留绝对 URL 是为了让 Worker 能在投递时改写（浏览器不再直接连 CDN）。链路是：
 
-1. `frontend/scripts/build-admin-vendor.mjs` 按上面 4 个 URL 下载钉死版本的 npm tarball（`frontend/vendor.lock.json` 记录 sha512），摇树后落到 `frontend/vendor/<assetKey>.js`，`publish-dist.mjs` 再把它拷进 `frontend/dist/vendor/`。
+1. `frontend/scripts/build-admin-vendor.mjs` 按上面 3 个 URL 下载钉死版本的 npm tarball（`frontend/vendor.lock.json` 记录 sha512），摇树后落到 `frontend/vendor/<assetKey>.js`，`publish-dist.mjs` 再把它拷进 `frontend/dist/vendor/`。
 2. `<assetKey>` 就是 Worker 的 `buildAdminReleaseVendorAssetKey()`：`hashStableText(上游 URL) + ".js"`，与 `tests/admin-vendor-bundle.test.mjs` 用 Worker 真实代码交叉校验。
-3. 壳投递时把 4 个 URL 改写成 `/ADMIN_PATH/__release/<rev>/vendor/<assetKey>`。`<rev>` 与资产来源一一对应：
+3. 壳投递时把 3 个 URL 改写成 `/ADMIN_PATH/__release/<rev>/vendor/<assetKey>`。`<rev>` 与资产来源一一对应：
 
    | 壳来源 | `<rev>` | `renderAdminReleaseVendorAsset` 的行为 |
    | --- | --- | --- |
@@ -31,7 +32,7 @@
    | 本地上传壳 | `local-<index.html sha256>` | 读 KV 上传记录里的 manifest，命中缓存即返回，否则回源上游并写 edge 缓存 |
    | 远程 release 壳 | release tag | 回源上游并写 edge 缓存（可变 ref 走 `no-store`） |
 
-   内置壳这条分支曾经缺失：`renderBundledAdminPage` 不传 `assetRevision`，改写被整体跳过，壳里留着 4 个 `cdn.jsdelivr.net` 绝对 URL，断网即白屏。回归由 `tests/worker-defensive-boundaries.test.mjs` 的「bundled frontend assets render…」与 `tests/e2e/admin-smoke.spec.mjs` 的第二条用例覆盖。
+   内置壳这条分支曾经缺失：`renderBundledAdminPage` 不传 `assetRevision`，改写被整体跳过，壳里留着 3 个 `cdn.jsdelivr.net` 绝对 URL，断网即白屏。回归由 `tests/worker-defensive-boundaries.test.mjs` 的「bundled frontend assets render…」与 `tests/e2e/admin-smoke.spec.mjs` 的第二条用例覆盖。
 
 收益（实测，`npm.cmd run --workspace frontend build:vendor` 会打印同样一张表）：
 
@@ -40,15 +41,36 @@
 | Lucide | 397 KB | 13.5 KB | 只保留壳里真实出现过的图标名（含 `upload-cloud`/`file-plus-2`/`file-bar-chart` 这类废弃别名），`createIcons` 语义与上游逐字节对齐 |
 | Chart.js | 206 KB | 169 KB | 只 `Chart.register()` 折线图需要的 `LineController`/`LineElement`/`PointElement`/`LinearScale`/`CategoryScale`/`Filler`/`Tooltip`/`Legend` |
 | Vue | 105 KB | 105 KB | runtime-only global build，**摇不动**：模板 render 函数通过全局对象取 helper，剪掉任何一项都会运行时报错 |
-| Tailwind | 271 KB | 271 KB | 浏览器内 JIT 编译器本体，**摇不动**；真要减只能改成构建期预编译 CSS，见下 |
-| 合计 | 979 KB | 559 KB | gzip 272 KB → 175 KB |
+| 合计 | 708 KB | 288 KB | gzip 201 KB → 104 KB（Tailwind 已移出运行时，见 §1.2；含它的话原本是 979 KB → 559 KB） |
 
 两个坑写在这里，改这块之前先看：
 
 - **chart.js 的 `import '@kurkle/color'` 会被 esbuild 丢掉**（该包 `sideEffects:false`）。真正的颜色解析走 `chunks/helpers.segment.js` 里的具名导入，所以默认注解下是安全的；一旦为了别的目的打开 `ignoreAnnotations`，整个 chart.js 会从 169 KB 涨回 201 KB，且颜色表仍然存在——两个方向的错都不报错，只能靠 `tests/admin-vendor-bundle.test.mjs` 里的 `d3d3d3`/`hwb` 哨兵。
 - **lucide 子集必须按"壳里写的名字"建键**。`replaceElement` 用 `toPascalCase(名字)` 查表，所以 `file-plus-2` 要登记成 `FilePlus2`（它背后是 `file-plus-corner.js`），不能只按上游文件名登记。
 
-后续可做但没做：Tailwind 那 271 KB 是唯一还没消掉的大块。它可以在构建期用 `tailwindcss@4.2.2` 预编译成静态 CSS（模板里的 `@theme` 直接喂给编译器），但模板里有大量 `:class` 动态拼接，漏扫就是静默丢样式；要做必须配套 `npm run test:visual` 全量比对，属于独立任务。
+### 1.2 样式是构建期编译的，不是浏览器编译的
+
+`@tailwindcss/browser` 是个**运行时编译器**：它 `MutationObserver` 盯着整份 DOM，每次类名变化就重新收集 `[class]`、重新生成整张表。代价实测（同一台机器，本地 wrangler + Chromium，两边交替各跑 3 次）：
+
+| 指标 | 浏览器内 JIT | 构建期预编译 |
+| --- | --- | --- |
+| 首屏 DCL | 337–349 ms | 249–257 ms |
+| 首个长任务 | ~126 ms | ~126 ms（体量落在 Vue 挂载上） |
+| 首屏 Tailwind 编译 / 收集 | 31 ms / 6 ms（11.5 次重编译） | 0 / 0 |
+| 切 5 个视图累计 | 77–85 ms 编译（约 75 次重编译） | 0 |
+| 切 5 个视图耗时 | 1756–1811 ms | 1601–1609 ms |
+| JS 传输 | 265 + 103 + 165 KB | 103 + 165 KB |
+| 首屏总传输（gzip） | 260 KB | 200 KB |
+
+编译链路在 `frontend/scripts/build-admin-tailwind.mjs`，由 `sync-admin-runtime.mjs` 在**注入增强层之后**调用（扫描对象必须是组合后的壳，否则增强脚本注入的类漏扫）：
+
+1. `scanAdminTailwindCandidates()` 用宽松正则从壳里切出候选类名，再用 `isPlausibleCandidate()` 按候选语法过滤。过滤这一步不是洁癖：正则源码之类"长得像 class"的碎片（`[a-z0-9](?:[a-z0-9-`）会被 Tailwind 当成任意值工具类，生成一段语法非法的声明，**浏览器从那里开始丢弃整张表的剩余部分**——构建期不报错，表现是全站失去样式（含所有 `md:` 变体）。这条坑是靠"解析出的规则数只有 580 / 1838"定位的。
+2. `compileAdminTailwindCss()` 用 `tailwindcss@4.2.2` 的 `compile()`，把 `@import "tailwindcss"` 解析到包内 `index.css`/`preflight.css`/`theme.css`/`utilities.css`，主题块原样作为输入。
+3. `applyAdminTailwindPrecompile()` 把模板里的 `<style type="text/tailwindcss">` 整块替换成 `<style data-admin-tailwind="compiled">`；块缺失或为空直接抛错，不让构建静默降级。
+
+维护约束：**会被用到的类名必须在被扫描的源码里字面出现**（模板 + 增强脚本）。`:class` 三元分支、模板字符串里的类都在源码里，所以能扫到；运行时拼出来的类名（`"bg-" + hue`）会漏，届时要么改成字面量，要么在 `applyAdminTailwindPrecompile` 的候选集里显式补。验证方式不是肉眼看，而是把预编译产物和旧 JIT 产物做选择器集合对比（要求旧集合是子集），再对 5 视图 × 4 主题做计算样式逐元素比对。
+
+代价要说清楚：CSS 从"可长缓存的 vendor 文件"变成"随壳走的 HTML 内联文本"，每次壳更新要重传约 14 KB（gzip）。换到的是少一次请求、少 265 KB JS 解析执行、以及首屏不再有编译器在主线程上跑。
 
 配套的三条防线（改这块时别拆）：
 
@@ -62,28 +84,29 @@
 
 | 组 | 包含 | 谁在使用 | 改动影响 |
 | --- | --- | --- | --- |
-| **工具链** | `vite` 8、`wrangler` 4、`miniflare`、`oxlint`、`oxfmt`、`acorn` + `acorn-walk`、`@playwright/test` 1.64 | Worker 打包、lint/format、架构与 CDN 检查器、D1 测试、e2e | 影响本地与 CI，不影响线上字节 |
-| **参考源** | `vue` 3.5、`chart.js`、`lucide-vue-next`、`tailwindcss` 4、`@tailwindcss/vite`、`@vitejs/plugin-vue` | 只服务 `frontend/src/`（分叉前的可读源码，不参与构建）与少数单元测试（如 `frontend/src/lib/chart.js`） | 对线上零影响；只要还能通过 `check-frontend-sources` 即可 |
-| **生产 pins** | 管理端模板里的 4 行 CDN URL | 用户浏览器 | **直接改线上** |
+| **工具链** | `vite` 8、`wrangler` 4、`miniflare`、`oxlint`、`oxfmt`、`acorn` + `acorn-walk`、`@playwright/test` 1.64、`tailwindcss` 4.2.2 | Worker 打包、lint/format、架构与 CDN 检查器、D1 测试、e2e、管理端样式预编译 | 影响本地与 CI，不影响线上字节；`tailwindcss` 例外——它生成进 HTML 的 CSS 就是线上样式，所以版本跟着生产 pin 走 |
+| **参考源** | `vue` 3.5、`chart.js`、`lucide-vue-next`、`@vitejs/plugin-vue` | 只服务 `frontend/src/`（分叉前的可读源码，不参与构建）与少数单元测试（如 `frontend/src/lib/chart.js`） | 对线上零影响；只要还能通过 `check-frontend-sources` 即可 |
+| **生产 pins** | 管理端模板里的 3 行 CDN URL | 用户浏览器 | **直接改线上** |
 
-准确版本以 `package-lock.json` 为准，不要让文档复制版本号（除上面 4 个 pin，它们由测试守着）。
+准确版本以 `package-lock.json` 为准，不要让文档复制版本号（除上面 3 个 pin，它们由测试守着）。
 
 ## 3. 更新前先问三个问题
 
 1. **它会不会进 `frontend/dist/index.html` 或 `worker.js`？** 不会 → 属工具链/参考源，常规升级 + `npm run check` 通过即可。
-2. **它是模板里那 4 行 URL 之一吗？** 是 → 属生产变更，必须按 §6 的顺序走真实浏览器验证。
+2. **它是模板里那 3 行 URL 之一，或者会改变预编译出的 CSS 吗？** 是 → 属生产变更，必须按 §6 的顺序走真实浏览器验证。
 3. **我是不是想“让两边版本一致”？** 停一下。跨层对齐不是目标，见 §4。
 
 | 动作 | 性质 | 门槛 |
 | --- | --- | --- |
 | 升 `vite` / `wrangler` / `miniflare` / `oxlint` / `oxfmt` / `@playwright/test` | 工具链 | `npm run check`（必要时 `npm run test:e2e`） |
-| 升 `frontend/package.json` 的 `dependencies` / `devDependencies` | 参考源 | `npm run check` 里的 Vue 源语法检查 |
-| 升模板里 4 个 CDN pin 的版本号 | **生产** | 改 `tests/tech-stack-pins.test.mjs` + `npm run build:frontend` + `npm run check` + `npm run test:e2e` |
-| 新增第 5 个 CDN 脚本 | **生产 + 资产策略** | 还要过 `check:cdn`（禁止 `esm.sh`、禁止可变 GitHub ref、壳 ≤ 2 MiB） |
+| 升 `frontend/package.json` 的 `dependencies` / `devDependencies` | 参考源（`tailwindcss` 除外） | `npm run check` 里的 Vue 源语法检查 |
+| 升模板里 3 个 CDN pin 的版本号 | **生产** | 改 `tests/tech-stack-pins.test.mjs` + `npm run build:frontend` + `npm run check` + `npm run test:e2e` |
+| 升 `tailwindcss`（预编译器） | **生产**（产出物就是线上 CSS） | 版本必须与旧 pin 一致或显式升级，改完重跑预编译 + `npm run test:visual` 全量比对 |
+| 新增第 4 个 CDN 脚本 | **生产 + 资产策略** | 还要过 `check:cdn`（禁止 `esm.sh`、禁止可变 GitHub ref、壳 ≤ 2 MiB） |
 
 `package.json` 里还有三条 `overrides`：`workerd` 让我们的 `miniflare` 和 `wrangler` 自带的 `miniflare` 共用同一份运行时（否则树里同时有两份 workerd，单测和 e2e 跑在不同版本上）；`undici` / `sharp` 把 `miniflare@4` 锁定的 7.28.0 / 0.35.2 顶到已修 GHSA 的版本。三者都只影响本地测试运行时，不进线上字节。上游 `miniflare` 自己修好这两条依赖后，对应的 override 就应该删掉。
 
-## 4. 已知的三处不一致，是故意的
+## 4. 已知的两处不一致，是故意的
 
 不要为了“整齐”去对齐它们，否则会把参考源的版本升级误当成线上升级。
 
@@ -91,11 +114,12 @@
 | --- | --- | --- | --- |
 | Chart.js | 4.4.7 (UMD) | 4.6.1 | npm 那份只被 `frontend/src/lib/chart.js` 与单测引用；线上是 global `Chart`，升级要单独验证图表渲染 |
 | Lucide | `lucide@1.8.0` (UMD) | `lucide-vue-next@1.0.0` | **不是同一个包**：线上用 UMD `lucide` 全局 + 自定义指令批量替换，参考源用 Vue 组件版 |
-| Tailwind | `@tailwindcss/browser@4.2.2`（浏览器构建） | `tailwindcss@4.3.3` + `@tailwindcss/vite` | **不是同一个包**：线上是能在浏览器里即时编译的自包含构建，参考源是构建期 CLI/插件；版本也不再同步（参考源 4.3.3 / 线上 pin 4.2.2），见第 5 节 |
+
+Tailwind 原本是第三处不一致（线上浏览器构建 vs 参考源 CLI/插件），现在两边已经并到 `tailwindcss@4.2.2`：CSS 改成构建期预编译后，编译器版本直接决定线上字节，所以它归生产侧（见 §1.2）。
 
 ## 5. Tailwind v3 → v4 迁移记录
 
-线上从 `cdn.tailwindcss.com/3.4.17`（Play CDN v3）换成了 `@tailwindcss/browser@4.2.2`（v4 浏览器构建）。形态仍然是"CDN 拉脚本 + 浏览器内编译"，单文件交付没变，但配置语言从 JS 换成了 CSS：原来的 `<script>tailwind.config={...}</script>` 现在是模板里一段 `<style type="text/tailwindcss">`，用 `@theme` 描述设计令牌。
+线上从 `cdn.tailwindcss.com/3.4.17`（Play CDN v3）换成了 `@tailwindcss/browser@4.2.2`（v4 浏览器构建），随后又把编译器搬到构建期（同一个 `tailwindcss@4.2.2`，见 §1.2），单文件交付没变。两次变动都只换了"谁来编译"，配置语言从 JS 换成了 CSS 并沿用至今：原来的 `<script>tailwind.config={...}</script>` 现在是模板里一段 `<style type="text/tailwindcss">`，用 `@theme` 描述设计令牌——预编译就是拿这段当输入。
 
 ### 5.1 迁过去的映射
 
@@ -136,7 +160,7 @@ $env:VISUAL_MAX_DIFF="0"; npm.cmd run test:visual           # 打印全部差异
 
 两点实测结论，决定这套工具怎么用：
 
-- **截图像素不是精确断言。** 同一份代码、同一台机器连跑两次，`VISUAL_MAX_DIFF=0` 也会报出 0.01% 量级的差异（187–122 像素，来自字体抗锯齿）。所以它是冒烟级防漂移，验"颜色没变"要靠计算样式逐条比对（`color/backgroundColor/border*/boxShadow/rect` 全量导出后 diff），本次重构就是以此为准：经典皮肤的 4 个视图 × 2 明暗组合，矩形尺寸与颜色声明 **0 处差异**。
+- **截图像素不是精确断言。** 同一份代码、同一台机器连跑两次，`VISUAL_MAX_DIFF=0` 也会报出 0.01% 量级的差异（187–122 像素，来自字体抗锯齿）。所以它是冒烟级防漂移，验"颜色没变"要靠计算样式逐条比对（`color/backgroundColor/border*/boxShadow/rect` 全量导出后 diff）。两次大改都以这套比对为准：Tailwind v3 → v4 迁移时经典皮肤 4 个视图 × 2 明暗组合 0 处差异；改成构建期预编译时 5 视图 × 4 主题 10,224 个元素只剩 6 处数据驱动的状态徽章色差（同一份代码两次跑之间也会变）。
 - **`claude` 皮肤的基线必须先把字体落地。** 它的中文字体是按 unicode-range 分片从 CDN 抽的，`document.fonts.ready` 在分片尚未请求时就返回，同一份代码两次截图会拿到不同字形，基线随机失败。`settleSkinFonts()` 按当前可见文本调 `document.fonts.load()` 预载后才截图，之后连跑三次全绿。
 
 ### 5.5 颜色一律走 CSS 变量，不再写死 hex
@@ -182,7 +206,7 @@ html[data-theme="claude"]{--d1-action:#8e3a22;--d1-action-hover:#7a301b;--d1-act
 ## 6. 验证入口
 
 ```powershell
-npm.cmd run check        # 12 项门禁，其中 Node 测试含 4 个 CDN pin 的锁定与摇树产物校验
+npm.cmd run check        # 12 项门禁，其中 Node 测试含 3 个 CDN pin 的锁定与摇树产物校验
 npm.cmd run test:e2e     # Playwright：真实浏览器 + 本地 Worker（KV/D1 从空库开始）
 ```
 
@@ -190,7 +214,7 @@ e2e 的可运行性来自 `wrangler dev` 能在本地起真 Worker，见 [`devel
 
 ## 7. 常见误判
 
-- **“`frontend/package.json` 是技术栈清单”**：不是，它是参考源的清单；线上技术栈在上面第 1 节那张 4 行表里。
+- **“`frontend/package.json` 是技术栈清单”**：不是，它是参考源与构建工具的清单；线上技术栈在上面第 1 节那张 3 行表里，外加内联进壳的那段 CSS。
 - **“改了 `frontend/src/` 就是改了 UI”**：不是。它不参与构建，改了线上不变，只影响 `check-frontend-sources` 与少量单测。
 - **“npm 里版本更新就该跟”**：不一定。跨层版本号没有对齐义务。
 - **“`frontend/dist/index.html` 是构建产物可以随手改”**：它是 `frontend/index.html` 的拷贝，改它下次构建就丢。

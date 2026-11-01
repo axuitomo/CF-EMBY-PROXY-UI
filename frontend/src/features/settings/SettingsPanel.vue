@@ -4,6 +4,7 @@ import {
   BellRing,
   Boxes,
   Cog,
+  ExternalLink,
   RefreshCw,
   RotateCcw,
   Save,
@@ -15,6 +16,17 @@ import {
 import SectionCard from "@/components/SectionCard.vue";
 import { useUiPreferences } from "@/composables/useUiPreferences";
 import ConfigBackupPanel from "@/features/settings/components/ConfigBackupPanel.vue";
+
+// 凭据字段旁的跳转图标：网上管理台里这些链接由增强脚本注入，这里保持同一组地址。
+const credentialSourceLinks = {
+  cfAccountId: "https://dash.cloudflare.com/?to=/:account/workers-and-pages",
+  cfZoneId: "https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/",
+  cfApiToken: "https://dash.cloudflare.com/profile/api-tokens",
+  cfKvNamespaceId: "https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces",
+  cfD1DatabaseId: "https://dash.cloudflare.com/?to=/:account/workers/d1",
+  tmdbApiReadToken: "https://www.themoviedb.org/settings/api",
+  tgBotToken: "https://t.me/BotFather",
+};
 
 const props = defineProps({
   adminConsole: {
@@ -1902,17 +1914,53 @@ function resolveStatusLabel() {
           </label>
 
           <label class="field-shell">
-            <span class="field-label">Cloudflare Account ID</span>
+            <span class="field-label">
+              Cloudflare Account ID
+              <a
+                :href="credentialSourceLinks.cfAccountId"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.cfAccountId"
+                :aria-label="`打开 ${credentialSourceLinks.cfAccountId}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input v-model="form.cfAccountId" type="text" class="field-input" />
           </label>
 
           <label class="field-shell">
-            <span class="field-label">Cloudflare Zone ID</span>
+            <span class="field-label">
+              Cloudflare Zone ID
+              <a
+                :href="credentialSourceLinks.cfZoneId"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.cfZoneId"
+                :aria-label="`打开 ${credentialSourceLinks.cfZoneId}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input v-model="form.cfZoneId" type="text" class="field-input" />
           </label>
 
           <label class="field-shell">
-            <span class="field-label">Cloudflare API Token</span>
+            <span class="field-label">
+              Cloudflare API Token
+              <a
+                :href="credentialSourceLinks.cfApiToken"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.cfApiToken"
+                :aria-label="`打开 ${credentialSourceLinks.cfApiToken}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input
               v-model="form.cfApiToken"
               type="password"
@@ -1922,17 +1970,53 @@ function resolveStatusLabel() {
           </label>
 
           <label class="field-shell">
-            <span class="field-label">KV Namespace ID</span>
+            <span class="field-label">
+              KV Namespace ID
+              <a
+                :href="credentialSourceLinks.cfKvNamespaceId"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.cfKvNamespaceId"
+                :aria-label="`打开 ${credentialSourceLinks.cfKvNamespaceId}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input v-model="form.cfKvNamespaceId" type="text" class="field-input" />
           </label>
 
           <label class="field-shell">
-            <span class="field-label">D1 Database ID</span>
+            <span class="field-label">
+              D1 Database ID
+              <a
+                :href="credentialSourceLinks.cfD1DatabaseId"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.cfD1DatabaseId"
+                :aria-label="`打开 ${credentialSourceLinks.cfD1DatabaseId}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input v-model="form.cfD1DatabaseId" type="text" class="field-input" />
           </label>
 
           <label class="field-shell">
-            <span class="field-label">TMDB API Read Token (v4)</span>
+            <span class="field-label">
+              TMDB API Read Token (v4)
+              <a
+                :href="credentialSourceLinks.tmdbApiReadToken"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.tmdbApiReadToken"
+                :aria-label="`打开 ${credentialSourceLinks.tmdbApiReadToken}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input
               v-model="form.tmdbApiReadToken"
               type="password"
@@ -1980,7 +2064,19 @@ function resolveStatusLabel() {
           </label>
 
           <label class="field-shell">
-            <span class="field-label">Telegram Bot Token</span>
+            <span class="field-label">
+              Telegram Bot Token
+              <a
+                :href="credentialSourceLinks.tgBotToken"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="credentialSourceLinks.tgBotToken"
+                :aria-label="`打开 ${credentialSourceLinks.tgBotToken}`"
+                class="ml-1 inline-flex items-center align-[-0.15em] opacity-70 transition hover:opacity-100"
+              >
+                <ExternalLink class="h-3 w-3" />
+              </a>
+            </span>
             <input
               v-model="form.tgBotToken"
               type="password"
