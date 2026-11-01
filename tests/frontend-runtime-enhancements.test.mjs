@@ -1863,6 +1863,34 @@ test("account settings keep TMDB credentials and the node toggle is injected by 
   assert.match(enhancementSource, /readInput\('#cfg-cf-token', 'cfApiToken'\)/);
 });
 
+test("Cloudflare 令牌测试按钮落在 Cloudflare 联动面板，而不是 TMDB 凭据面板", async () => {
+  const enhancementSource = await readFile(
+    new URL("../frontend/scripts/admin-runtime-enhancements.mjs", import.meta.url),
+    "utf8",
+  );
+  // 按钮要贴着它测的输入框：注入锚点是 #cfg-cf-token，插在密码框包裹层之后。
+  assert.match(enhancementSource, /syncCloudflareTokenTest\(\);/);
+  assert.match(enhancementSource, /querySelector\('#cfg-cf-token'\)/);
+  assert.match(enhancementSource, /holder\.insertAdjacentElement\('afterend', row\)/);
+  // 独立常量承载这一行，按钮和结果位都在里面。
+  const markupStart = enhancementSource.indexOf("const CLOUDFLARE_TOKEN_TEST_MARKUP");
+  assert.notEqual(markupStart, -1, "缺少 CLOUDFLARE_TOKEN_TEST_MARKUP");
+  const markupBlock = enhancementSource.slice(
+    markupStart,
+    enhancementSource.indexOf("function syncCloudflareTokenTest", markupStart),
+  );
+  assert.match(markupBlock, /data-credential-test="cloudflare"/);
+  assert.match(markupBlock, /data-credential-test-result="1"/);
+  // 反向守卫：TMDB 凭据面板里不能再出现 Cloudflare 按钮。
+  const tmdbStart = enhancementSource.indexOf("const TMDB_CREDENTIAL_MARKUP");
+  const tmdbBlock = enhancementSource.slice(
+    tmdbStart,
+    enhancementSource.indexOf("function syncTmdbCredentialPanel", tmdbStart),
+  );
+  assert.match(tmdbBlock, /data-credential-test="tmdb"/);
+  assert.doesNotMatch(tmdbBlock, /data-credential-test="cloudflare"/);
+});
+
 test("credential fields link out to the official page that issues them", async () => {
   const enhancementSource = await readFile(
     new URL("../frontend/scripts/admin-runtime-enhancements.mjs", import.meta.url),

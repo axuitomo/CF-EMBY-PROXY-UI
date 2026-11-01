@@ -1500,6 +1500,7 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
     syncWorkerHtmlUpdatePanel(window.App);
     syncThemeSkinPanel(window.App);
     syncTmdbCredentialPanel(window.App);
+    syncCloudflareTokenTest();
     syncCredentialHelpLinks();
   }
 
@@ -1565,7 +1566,6 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
     '<p class="text-xs leading-5 text-slate-500">节点弹窗「高级设置」里的 TMDB 聚合开关用它把 AnyProviderIdEquals=tmdb.&lt;id&gt; 换成标题 + 年份查询。两项凭据只要填了任意一项就整组覆盖 Worker 环境变量 TMDB_API_READ_TOKEN / TMDB_API_KEY；都留空才用环境变量。语言留空默认 zh-CN。</p>' +
     '<div class="mt-3 flex flex-wrap items-center gap-2" data-admin-credential-test="1">' +
     '<button type="button" class="rounded-control" data-credential-test="tmdb">测试 TMDB 凭据</button>' +
-    '<button type="button" class="rounded-control" data-credential-test="cloudflare">测试 Cloudflare 令牌</button>' +
     '<span data-credential-test-result="1" class="text-xs leading-5 text-slate-500"></span>' +
     '</div>';
 
@@ -1602,6 +1602,35 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
       if (input.value !== next) input.value = next;
     }
     bindCredentialTests(panel);
+  }
+
+  // 「测试 Cloudflare 令牌」要贴着它测的那个输入框，所以落在「Cloudflare 联动」面板里，
+  // 而不是跟着 TMDB 凭据面板走（那边测的是另一组凭据）。
+  const CLOUDFLARE_TOKEN_TEST_MARKUP =
+    '<div class="mb-3 flex flex-wrap items-center gap-2" data-admin-credential-test="1">' +
+    '<button type="button" class="rounded-control" data-credential-test="cloudflare">测试 Cloudflare 令牌</button>' +
+    '<span data-credential-test-result="1" class="text-xs leading-5 text-slate-500"></span>' +
+    '</div>';
+
+  function syncCloudflareTokenTest() {
+    const input = document.querySelector('#cfg-cf-token');
+    const panel = input?.closest('.ui-settings-panel');
+    if (!panel) return;
+    // 密码框会被 mountSensitiveInputToggle 包进一层 span，插在包裹层后面才是标签之间的正常行。
+    const holder = input.parentElement?.hasAttribute('data-sensitive-input-toggle')
+      ? input.parentElement
+      : input;
+    let row = panel.querySelector('[data-admin-credential-test="1"]');
+    if (!row) {
+      row = document.createElement('div');
+      row.innerHTML = CLOUDFLARE_TOKEN_TEST_MARKUP;
+      row = row.firstElementChild;
+    }
+    // Vue 重渲染会丢掉注入节点，位置不对就补回去（存在时是幂等的）。
+    if (row.previousElementSibling !== holder) {
+      holder.insertAdjacentElement('afterend', row);
+    }
+    bindCredentialTests(row);
   }
 
   // 凭据连通性测试：直接拿页面里当前的值去问一次，填错不用等到节点列表变空才发现。

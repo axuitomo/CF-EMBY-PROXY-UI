@@ -23,6 +23,33 @@ test("登录后能渲染看板并在视图之间切换", async ({ page }) => {
     if (await dismiss.isVisible()) await dismiss.click();
   }
 
+  // 「测试 Cloudflare 令牌」必须贴着 Cloudflare API 令牌输入框，而不是跟着 TMDB 凭据面板走。
+  // 这条只有真实 DOM 能验：注入顺序、密码框包裹层、Vue 重渲染三者合起来才决定它落在哪。
+  await page.click('.nav-item[href="#settings"]');
+  await page.evaluate(() => {
+    const label = [...document.querySelectorAll("#view-settings *")].find(
+      (element) => element.children.length === 0 && element.textContent.trim() === "账号设置",
+    );
+    label?.closest("button, a, [role=tab]")?.click();
+    label?.click();
+  });
+  await expect(page.locator("#cfg-cf-token")).toBeVisible();
+  const credentialTestPlacement = await page.evaluate(() => {
+    const token = document.querySelector("#cfg-cf-token");
+    const panel = token?.closest(".ui-settings-panel");
+    const tmdbPanel = document.querySelector('[data-admin-tmdb-credentials="1"]');
+    return {
+      panelTitle: (panel?.querySelector(".ui-section-title")?.textContent || "").trim(),
+      cloudflareButtonInPanel: !!panel?.querySelector('[data-credential-test="cloudflare"]'),
+      tmdbButtons: [...(tmdbPanel?.querySelectorAll("[data-credential-test]") || [])].map(
+        (button) => button.getAttribute("data-credential-test"),
+      ),
+    };
+  });
+  expect(credentialTestPlacement.panelTitle).toBe("Cloudflare 联动");
+  expect(credentialTestPlacement.cloudflareButtonInPanel).toBe(true);
+  expect(credentialTestPlacement.tmdbButtons).toEqual(["tmdb"]);
+
   await page.click('.nav-item[href="#dashboard"]');
   await expect(page.locator("#view-dashboard")).toBeVisible();
 
