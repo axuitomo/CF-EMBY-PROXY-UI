@@ -27,7 +27,7 @@ jobs:
 
             - name: Sync Upstream
               # 这里我帮你升到了这个插件最新的小版本 v3.4.1
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
               with:
                   target_repo_token: ${{ secrets.GITHUB_TOKEN }}
                   upstream_sync_repo: axuitomo/CF-EMBY-PROXY-UI
