@@ -884,8 +884,78 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
   // 不该把「配置版本已变化」甩给用户；同时串行化，避免两次并发写互相踩版本号。
   const uiSkinSaveState = { running: false, target: '', saved: '' };
 
+  // 面板拿到服务端配置之前 runtimeConfig 是空对象，这时任何 saveConfig 都会把「本机默认值」写进 KV
+  // （2026-11-04 整份全局设置被重置就是这么发生的：bootstrap 卡住 90 秒，期间点了皮肤开关）。
+  // 写操作因此先过水合闸；bootstrap 成功拿到非空 config 才放行。
+  const CONFIG_HYDRATION_REQUIRED_ACTIONS = new Set([
+    'saveConfig',
+    'importSettings',
+    'importFull',
+    'tidyKvData'
+  ]);
+  // 面板水合后 runtimeConfig 有 70+ 个字段；皮肤点击会先乐观写一个 adminUiSkin 进去，
+  // 所以「非空」不算水合，必须到量级才算拿到了服务端配置。
+  const CONFIG_HYDRATED_MIN_FIELDS = 20;
+  let adminConfigHydrated = false;
+
+  function hasConfigFields(config) {
+    return (
+      !!config && typeof config === 'object' && Object.keys(config).length >= CONFIG_HYDRATED_MIN_FIELDS
+    );
+  }
+
+  function isAdminConfigHydrated(app) {
+    if (adminConfigHydrated) return true;
+    const config = app?.runtimeConfig;
+    // 没有 runtimeConfig 的调用方（脚本、单测里的假 app）不是管理端面板，不在这里拦；
+    // 面板的初始状态恰好是空对象，那个才是这次事故的入口。
+    if (!config || typeof config !== 'object') return true;
+    if (hasConfigFields(config)) {
+      adminConfigHydrated = true;
+      return true;
+    }
+    return false;
+  }
+
+  function markAdminConfigHydrated() {
+    adminConfigHydrated = true;
+    clearConfigHydrationBanner();
+  }
+
+  function clearConfigHydrationBanner() {
+    const bar = document?.getElementById?.('admin-config-hydration');
+    if (bar) bar.remove();
+  }
+
+  function showConfigHydrationBanner() {
+    if (typeof document === 'undefined' || !document.body) return;
+    if (document.getElementById('admin-config-hydration')) return;
+    const bar = document.createElement('div');
+    bar.id = 'admin-config-hydration';
+    bar.setAttribute('role', 'alert');
+    bar.style.cssText =
+      'position:fixed;left:0;right:0;top:0;z-index:2147483000;display:flex;flex-wrap:wrap;gap:.5rem .75rem;' +
+      'align-items:center;justify-content:center;padding:.5rem .75rem;font-size:13px;line-height:1.4;' +
+      'background:#b45309;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25)';
+    const text = document.createElement('span');
+    text.textContent = '配置尚未加载完成，已阻止一切写入；下面的设置不是服务器上的真实值。';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = '重新加载';
+    retry.style.cssText =
+      'background:#fff;color:#b45309;border:0;border-radius:6px;padding:.2rem .6rem;font-weight:600;cursor:pointer';
+    retry.addEventListener('click', () => navigateWithAdminCacheBust());
+    bar.append(text, retry);
+    document.body.appendChild(bar);
+  }
+
   async function saveUiSkinConfig(app, skin, config, expectedRevision) {
     const base = config && typeof config === 'object' ? config : app?.runtimeConfig || {};
+    // 只带皮肤字段的补丁在服务端会把其余字段补成默认值：没有完整配置基线时宁可不写。
+    if (!isAdminConfigHydrated(app) || Object.keys(base).length === 0) {
+      console.warn('skip ui skin save: admin config is not hydrated yet');
+      return null;
+    }
     return await app.apiCall('saveConfig', {
       config: { ...base, adminUiSkin: skin },
       expectedConfigRevision: String(expectedRevision || ''),
@@ -2595,6 +2665,40 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
       return result;
     };
   }
+  function configNotHydratedError(action) {
+    const error = new Error(
+      '配置尚未加载完成，已阻止「' + String(action || '') + '」写入；请刷新页面等配置加载完成后再保存。'
+    );
+    error.code = 'CONFIG_NOT_HYDRATED';
+    error.status = 409;
+    return error;
+  }
+
+  // 服务端的整份重置闸门只回“要动哪些字段”，真正要不要重置由用户在这里确认。
+  async function confirmConfigMassResetAndRetry(app, action, requestPayload, error, callAction) {
+    const details = error?.details && typeof error.details === 'object' ? error.details : {};
+    const fields = Array.isArray(details.resetFields) ? details.resetFields.map(String).filter(Boolean) : [];
+    const count = Number(details.resetCount) || fields.length;
+    const sample = fields.slice(0, 10).join('、');
+    const accepted = await app.askConfirm(
+      '本次保存会把 ' + count + ' 项设置恢复为默认值' +
+        (sample ? '：' + sample + (fields.length > 10 ? ' 等' : '') : '') +
+        '。确认要继续吗？',
+      { title: '确认重置设置', tone: 'warning', confirmText: '确认重置' }
+    );
+    if (!accepted) {
+      const cancelled = new Error('已取消保存：这次保存会重置 ' + count + ' 项设置');
+      cancelled.code = 'CONFIG_MASS_RESET_CANCELLED';
+      cancelled.status = 409;
+      throw cancelled;
+    }
+    return await withUiRequestTimeout(
+      app,
+      action,
+      callAction(action, { ...requestPayload, confirmMassReset: true })
+    );
+  }
+
 
   function patchSafetyContractMethods(app) {
     if (!app || patchedSafetyContractApp === app) return;
@@ -2616,17 +2720,27 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
             mutationId: String(requestPayload.mutationId || ('cfg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)))
           };
         }
+        if (CONFIG_HYDRATION_REQUIRED_ACTIONS.has(normalizedAction) && !isAdminConfigHydrated(app)) {
+          showConfigHydrationBanner();
+          throw configNotHydratedError(normalizedAction);
+        }
         let result;
         try {
           result = await withUiRequestTimeout(app, normalizedAction, originalApiCall(action, requestPayload));
         } catch (error) {
-          if (normalizedAction === 'saveConfig' && String(error?.code || '').toUpperCase() === 'CONFIG_REVISION_CONFLICT') {
-            error.message = '配置版本已变化，请刷新设置确认差异后重新提交；当前编辑内容已保留。';
+          const errorCode = String(error?.code || '').toUpperCase();
+          if (normalizedAction === 'saveConfig' && errorCode === 'CONFIG_MASS_RESET_BLOCKED') {
+            result = await confirmConfigMassResetAndRetry(app, action, requestPayload, error, originalApiCall);
+          } else {
+            if (normalizedAction === 'saveConfig' && errorCode === 'CONFIG_REVISION_CONFLICT') {
+              error.message = '配置版本已变化，请刷新设置确认差异后重新提交；当前编辑内容已保留。';
+            }
+            throw error;
           }
-          throw error;
         }
-        if (normalizedAction === 'getSettingsBootstrap' || normalizedAction === 'getAdminBootstrap') {
+        if (normalizedAction === 'getSettingsBootstrap' || normalizedAction === 'getAdminBootstrap' || normalizedAction === 'loadConfig') {
           settingsBootstrapSyncedAt = Date.now();
+          if (hasConfigFields(result?.config)) markAdminConfigHydrated();
         }
         if (normalizedAction === 'saveConfig' && result?.config && typeof result.config === 'object') {
           updateAdminBootstrapCache(app, result.config, result.revisions);

@@ -7716,6 +7716,42 @@ function assertExpectedRuntimeConfigRevision(expectedRevision = "", currentConfi
     },
   );
 }
+// 事故（2026-11-04）：管理端 bootstrap 还没结束时保存皮肤，payload 只带 adminUiSkin；
+// mergeMissingConfigFields 只回填密钥与皮肤，其余 80 余个字段被默认值补齐 —— 整份配置静默重置。
+// 下面按「当前非默认值 → 写入后默认值」统计这次写入会抹掉的字段，超过预算就拒绝，由调用方二次确认。
+var CONFIG_MASS_RESET_FIELD_BUDGET = 8;
+
+function collectConfigMassResetFields(currentConfig = {}, nextConfig = {}) {
+  const defaults = sanitizeRuntimeConfig({});
+  const current = sanitizeRuntimeConfig(currentConfig);
+  const resetFields = [];
+  for (const entry of getConfigDiffEntries(current, nextConfig)) {
+    const key = String(entry?.key || "");
+    if (!key) continue;
+    if (serializeConfigValue(entry.nextValue) !== serializeConfigValue(defaults[key])) continue;
+    if (serializeConfigValue(current[key]) === serializeConfigValue(defaults[key])) continue;
+    resetFields.push(key);
+  }
+  return resetFields.sort();
+}
+
+// 只返回字段名：重置清单会原样回给管理端让用户确认，不能带值（密钥就在同一份配置里）。
+function assertNoUnconfirmedConfigMassReset(payload = {}, currentConfig = {}, nextConfig = {}) {
+  const resetFields = collectConfigMassResetFields(currentConfig, nextConfig);
+  if (resetFields.length === 0) return resetFields;
+  if (payload?.confirmMassReset === true) return resetFields;
+  if (resetFields.length <= CONFIG_MASS_RESET_FIELD_BUDGET) return resetFields;
+  throw createStructuredConfigError(
+    "CONFIG_MASS_RESET_BLOCKED",
+    `本次保存会把 ${resetFields.length} 项设置恢复为默认值，已拦截：确认要重置请再次确认后提交`,
+    409,
+    {
+      resetCount: resetFields.length,
+      resetFields,
+      budget: CONFIG_MASS_RESET_FIELD_BUDGET,
+    },
+  );
+}
 function migrateLegacyRuntimeConfig(input = {}) {
   const migrationState = migrateRuntimeConfigLegacyAliases(input);
   return {
@@ -11682,19 +11718,20 @@ function defineConfigActions(dependencies = {}, actions = {}) {
     async saveConfig(data, { env, ctx, kv }) {
       if (!kv) return jsonError("KV_NOT_CONFIGURED", "请先绑定 ENI_KV / KV Namespace", 503);
       const currentConfig = await getRuntimeConfigStrict(env);
-      const savedConfig = data.config
-        ? await kernel.persistRuntimeConfig(
-            mergeAdminSettingsRuntimeConfig(data.config, currentConfig),
-            {
-              env,
-              kv,
-              ctx,
-              expectedConfigRevision: data?.expectedConfigRevision,
-              mutationId: data?.mutationId,
-              forceKvCommit: true,
-            },
-          )
-        : currentConfig;
+      let savedConfig = currentConfig;
+      if (data?.config) {
+        const mergedConfig = mergeAdminSettingsRuntimeConfig(data.config, currentConfig);
+        // 覆盖前先判定这次写入会抹掉多少非默认值；未确认的整份重置直接拒绝，KV 一次都不写。
+        assertNoUnconfirmedConfigMassReset(data, currentConfig, mergedConfig);
+        savedConfig = await kernel.persistRuntimeConfig(mergedConfig, {
+          env,
+          kv,
+          ctx,
+          expectedConfigRevision: data?.expectedConfigRevision,
+          mutationId: data?.mutationId,
+          forceKvCommit: true,
+        });
+      }
       // 保存路径只需要回显 revisions：getAdminRevisions 会顺带重建节点索引并查两次 ops status，
       // 稳定态要 8 次 KV。getAdminRevisionsForRead 读同一批 meta 得出完全相同的 configRevision
       // 与 nodesRevision（只差每次现算的 logs/dns 时间戳），稳定态 2 次 KV。

@@ -20,6 +20,14 @@ import {
 } from "../frontend/scripts/admin-runtime-enhancements.mjs";
 import { destroyTrendChart, renderTrendChart } from "../frontend/src/lib/chart.js";
 
+// 面板水合后 runtimeConfig 有 70+ 个字段；写操作闸门按字段数判断「是否已拿到服务端配置」，
+// 所以这些假 app 也要给到量级的字段，否则等于在测「未水合」态。
+function hydratedConfig(overrides = {}) {
+  const config = { rateLimitRpm: 20, adminUiSkin: "classic" };
+  for (let index = 0; index < 24; index += 1) config["fillerField" + index] = index;
+  return { ...config, ...overrides };
+}
+
 function loadEnhancementTestHooks(documentOverrides = {}, windowOverrides = {}) {
   const inlineScript = ADMIN_RUNTIME_ENHANCEMENT_SCRIPT.replace(/^<script[^>]*>\n?/, "").replace(
     /<\/script>$/,
@@ -95,7 +103,8 @@ function collectEnhancementSelectorAnchors(script = "") {
 function isEnhancementOwnedAnchor(script, anchor, kind) {
   return ["'", '"'].some((quote) =>
     kind === "id"
-      ? script.includes(`id=${quote}${anchor}${quote}`)
+      ? script.includes(`id=${quote}${anchor}${quote}`) ||
+        script.includes(`id = ${quote}${anchor}${quote}`)
       : script.includes(`setAttribute(${quote}${anchor}${quote}`) ||
         script.includes(`${anchor}=${quote}`),
   );
@@ -389,6 +398,120 @@ test("admin api calls reject instead of hanging forever", async () => {
   );
   assert.equal(await withUiRequestTimeout({}, "getLogs", Promise.resolve("ok"), 50), "ok");
   assert.equal(withUiRequestTimeout({}, "updateWorkerAndAdminIndex", pending, 5), pending);
+});
+
+test("a panel without a hydrated config cannot write settings", async () => {
+  // 2026-11-04：bootstrap 还没返回时点皮肤开关，runtimeConfig 还是空对象，
+  // 于是把「本机默认值」整份写回了 KV。水合闸在这里拦住第一个请求。
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const app = {
+    runtimeConfig: {},
+    async apiCall(action) {
+      calls.push(action);
+      return { success: true };
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await assert.rejects(
+    app.apiCall("saveConfig", { config: { adminUiSkin: "claude" } }),
+    (error) => error?.code === "CONFIG_NOT_HYDRATED" && error?.status === 409,
+  );
+  await assert.rejects(
+    app.apiCall("importSettings", { config: {} }),
+    (error) => error?.code === "CONFIG_NOT_HYDRATED",
+  );
+  assert.deepEqual(calls, [], "被拦下的写操作不能真的发出去");
+
+  // 配置到手之后同样的调用必须放行，闸门不能变成常闭。
+  app.runtimeConfig = hydratedConfig();
+  await app.apiCall("saveConfig", { config: { adminUiSkin: "claude" } });
+  assert.deepEqual(calls, ["saveConfig"]);
+});
+
+test("a skin save without a base config never sends a request", async () => {
+  const { persistUiSkinPreference } = loadEnhancementTestHooks();
+  const calls = [];
+  const app = {
+    runtimeConfig: {},
+    adminRevisions: {},
+    async apiCall(action, payload) {
+      calls.push({ action, payload });
+      return { config: {}, revisions: {} };
+    },
+    applyAdminRevisions() {},
+    showMessage() {},
+  };
+
+  await persistUiSkinPreference(app, "claude");
+
+  assert.deepEqual(calls, [], "没有完整配置基线时不能发 saveConfig");
+});
+
+test("a blocked mass reset asks once and retries with explicit confirmation", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const confirmations = [];
+  const requests = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall(action, payload) {
+      requests.push({ action, payload });
+      if (payload.confirmMassReset === true) return { config: payload.config, revisions: {} };
+      const error = new Error("本次保存会把 12 项设置恢复为默认值，已拦截");
+      error.code = "CONFIG_MASS_RESET_BLOCKED";
+      error.status = 409;
+      error.details = { resetCount: 12, resetFields: ["cfZoneId", "tgChatId"], budget: 8 };
+      throw error;
+    },
+    async askConfirm(message, options) {
+      confirmations.push({ message, options });
+      return true;
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await app.apiCall("saveConfig", { config: { adminUiSkin: "claude" } });
+
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0].message, /12 项设置/);
+  assert.match(confirmations[0].message, /cfZoneId/);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].payload.confirmMassReset, true);
+  assert.equal(
+    requests[1].payload.mutationId,
+    requests[0].payload.mutationId,
+    "重试要沿用同一个幂等键",
+  );
+});
+
+test("cancelling the mass reset confirmation sends nothing further", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const requests = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall(action, payload) {
+      requests.push({ action, payload });
+      const error = new Error("blocked");
+      error.code = "CONFIG_MASS_RESET_BLOCKED";
+      error.status = 409;
+      error.details = { resetCount: 9, resetFields: ["cfZoneId"] };
+      throw error;
+    },
+    async askConfirm() {
+      return false;
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await assert.rejects(
+    app.apiCall("saveConfig", { config: { adminUiSkin: "claude" } }),
+    (error) => error?.code === "CONFIG_MASS_RESET_CANCELLED",
+  );
+  assert.equal(requests.length, 1, "取消之后不能再发一次带确认的请求");
 });
 
 test("dialog overlays gain native dialog semantics, focus and Escape close", () => {
@@ -720,7 +843,7 @@ test("ui skin honors the server bootstrap value and saves the choice back to con
 
   const requests = [];
   const app = {
-    runtimeConfig: { rateLimitRpm: 20, adminUiSkin: "classic" },
+    runtimeConfig: hydratedConfig(),
     adminRevisions: { configRevision: "2026-01-01T00:00:00.000Z.abc123" },
     async apiCall(action, payload) {
       requests.push({ action, payload });
@@ -747,7 +870,7 @@ test("ui skin save refreshes the config revision and retries once after a confli
   const calls = [];
   const messages = [];
   const app = {
-    runtimeConfig: { rateLimitRpm: 20, adminUiSkin: "classic" },
+    runtimeConfig: hydratedConfig(),
     adminRevisions: { configRevision: "2026-01-01T00:00:00.000Z.stale" },
     async apiCall(action, payload) {
       calls.push({ action, payload });
@@ -799,7 +922,7 @@ test("ui skin saves are serialized so a second click cannot collide with the fir
     releaseFirstSave = resolve;
   });
   const app = {
-    runtimeConfig: { adminUiSkin: "classic" },
+    runtimeConfig: hydratedConfig({ adminUiSkin: "classic" }),
     adminRevisions: { configRevision: "r1" },
     async apiCall(action, payload) {
       assert.equal(action, "saveConfig");
@@ -2861,7 +2984,7 @@ test("dashboard reuses the cached snapshot and skips repeat requests within a mi
     dashboardD1WriteHotspot: {},
     dashboardView: { nodes: {} },
     dashboardRuntimeView: {},
-    runtimeConfig: {},
+    runtimeConfig: hydratedConfig(),
     isRouteLoadCurrent: () => true,
     async loadDashboard() {},
     applyDashboardStatsState() {},
@@ -2923,7 +3046,7 @@ test("forced dashboard refresh unlocks itself even when a later load supersedes 
     dashboardD1WriteHotspot: {},
     dashboardView: { nodes: {} },
     dashboardRuntimeView: {},
-    runtimeConfig: {},
+    runtimeConfig: hydratedConfig(),
     isRouteLoadCurrent: () => true,
     async loadDashboard() {},
     applyDashboardStatsState() {},

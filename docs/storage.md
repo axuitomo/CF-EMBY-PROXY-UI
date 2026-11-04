@@ -29,7 +29,7 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 
 | action | 读 / 写 KV | 主要用途 | 备注 |
 |---|---|---|---|
-| `saveConfig` | 写 | 保存全局设置到 `sys:theme` | 同时写 `sys:config_meta:v1`，并删除遗留的 `sys:config_snapshots:v1` |
+| `saveConfig` | 写 | 保存全局设置到 `sys:theme` | 同时写 `sys:config_meta:v1`，并删除遗留的 `sys:config_snapshots:v1`；有防重置闸门，见下 |
 | `importSettings` | 写 | 导入 settings-only 备份到 `sys:theme` | 会按当前版本规则清洗配置；不生成快照 |
 | `save` / `import` | 写 | 新增或批量导入节点 | 最终会写入 `node:*`，并同步更新 `sys:nodes_index:v1` |
 | `delete` | 删 | 删除节点 | 会删除对应 `node:*`，并重建节点索引 |
@@ -38,12 +38,21 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `getRuntimeStatus` | 读 | 读取运行状态 | 从 D1 `sys_status` 读取；未绑定或不可用时返回空运行状态，不读取旧 KV 状态键 |
 | `previewTidyData` | 读 | 预览 KV 或 D1 整理计划 | 返回分组计数、警告与短期签名计划令牌；实际执行前会再次核对计划 |
 | `tidyKvData` | 读 + 写 + 删 | 执行一键整理 KV 数据 | 重建索引、清洗 `sys:theme`、删除遗留缓存键和过期租约键 |
+
 | `listDnsRecords` / `saveDnsRecords` / `updateDnsRecord` | 读 + 写 | 读取当前站点 DNS、按模式整体保存或兼容单条更新 | UI 主链路走 `saveDnsRecords`；DNS 历史仅记录 `CNAME`，实际变更走 Cloudflare API |
 | `tidyD1Data` | 不读写 KV | 按签名计划执行 D1 整理 | 与 `previewTidyData` 配对，清理日志、统计、缓存与过期状态 |
 | `uploadAdminIndex` / `updateWorkerAndAdminIndex` | 读写 + 删 | 上传管理台 HTML、更新 Worker 脚本 | 写 KV 上传记录（含 manifest 与 revision）；Worker 更新走 Cloudflare API，失败会回滚 HTML 记录 |
 | `saveWorkerPlacement` / `getWorkerPlacementStatus` | 写 / 读 | 切换 Worker 放置模式并回读状态 | `region` 写 `sys:worker_placement_region:v1:{scriptName}`，`default` / `smart` 删除它 |
 | `saveMainVideoStreamPolicyShortcuts` | 写 | 批量开关节点的主视频流策略 | 批量改写 `node:*` 后同步节点索引 |
 | `list` / `getNode` / `pingNode` | 读 | 节点列表、单节点详情、单节点探测 | 探测走网络，不写 KV；节点列表优先读 `sys:nodes_index:v1` |
+
+### 配置写入的防重置闸门
+
+`saveConfig` 落盘前会把请求载荷和 KV 里的当前配置做一次逐字段比对（用 `getConfigDiffEntries` 的同一套清洗规则，基线是 `sanitizeRuntimeConfig({})`）。只要「非默认值 → 默认值 / 空」的字段数超过 `CONFIG_MASS_RESET_FIELD_BUDGET`（8 个），就返回 409 `CONFIG_MASS_RESET_BLOCKED`，KV 一个字节都不写。错误 details 只带 `resetCount`、`resetFields`（字段名）与 `budget`，**不带任何字段值**，避免把密钥类字段带出去。
+
+- 带 `confirmMassReset: true` 的同一个请求会放行：这是管理台在 409 后向使用者确认过一次的结果。备份导入（`importSettings` / `importFull`）与 `tidyKvData` 走各自路径，不受这条闸门约束。
+- 0 到 8 个字段的退回照常放行：废弃字段、别名清理、单分区小改动都在这个量级内。
+- 客户端另有一道水合闸：`runtimeConfig` 字段数不到 20 时，`saveConfig` / `importSettings` / `importFull` / `tidyKvData` 在管理台本地就被拒绝，不会发出请求。
 
 > 后台登录接口 `POST ADMIN_PATH/login` 不走 `action` 分发；绑定 D1 时会读写 `auth_failures`，按 IP 记录失败次数并执行临时锁定。
 >

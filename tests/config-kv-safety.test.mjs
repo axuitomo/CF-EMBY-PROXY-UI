@@ -857,6 +857,129 @@ test("a skin save retried with a fresh revision keeps the concurrent change", as
   }
 });
 
+// 2026-11-04 事故的复现底料：一份「除密钥外都是真值」的配置。
+// 事故当次是 bootstrap 没返回时点了皮肤开关，payload 只有 adminUiSkin，服务端把其余字段补成默认值。
+const MASS_RESET_GUARD_CONFIG = {
+  rateLimitRpm: 20,
+  logEnabled: false,
+  logRetentionDays: 14,
+  cfAccountId: "acc-1",
+  cfZoneId: "zone-1",
+  cfKvNamespaceId: "kv-1",
+  cfD1DatabaseId: "d1-1",
+  cfApiToken: "real-cf-token",
+  tgChatId: "123456789",
+  tgDailyReportEnabled: true,
+  tgDailyReportClockTimes: ["09:00", "21:00"],
+  tgAlertKvUsageEnabled: true,
+  tgAlertD1UsageEnabled: true,
+};
+
+async function withMassResetGuardConfig(namespace, run) {
+  const { kv } = createKv({
+    [kernel.CONFIG_KEY]: { ...MASS_RESET_GUARD_CONFIG },
+    [kernel.CONFIG_SNAPSHOTS_KEY]: [],
+  });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: namespace };
+  invalidateRuntimeConfigCache();
+  try {
+    await run({ env, kv });
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+}
+
+test("a skin-only save cannot reset the rest of the runtime config", async () => {
+  await withMassResetGuardConfig("config-mass-reset-skin", async ({ env, kv }) => {
+    await assert.rejects(
+      adminActions.saveConfig(
+        { config: { adminUiSkin: "claude" } },
+        { env, kv, ctx: null, meta: { section: "ui", source: "skin" } },
+      ),
+      (error) => {
+        assert.equal(error?.code, "CONFIG_MASS_RESET_BLOCKED");
+        assert.equal(error?.status, 409);
+        assert.ok(error?.details?.resetCount > 8);
+        assert.ok(error.details.resetFields.includes("cfZoneId"));
+        // 清单回给管理端让用户确认，只能带字段名：密钥就在同一份配置里。
+        assert.equal(JSON.stringify(error.details).includes("real-cf-token"), false);
+        return true;
+      },
+    );
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.cfZoneId, "zone-1");
+    assert.equal(stored.tgChatId, "123456789");
+    assert.equal(stored.adminUiSkin, undefined);
+  });
+});
+
+test("a full default payload is blocked even when it carries a fresh revision", async () => {
+  await withMassResetGuardConfig("config-mass-reset-defaults", async ({ env, kv }) => {
+    const loaded = await (await adminActions.loadConfig({}, { env, kv, ctx: null })).json();
+    await assert.rejects(
+      adminActions.saveConfig(
+        {
+          config: sanitizeRuntimeConfig({}),
+          expectedConfigRevision: loaded.revisions.configRevision,
+        },
+        { env, kv, ctx: null, meta: { section: "ui", source: "skin" } },
+      ),
+      (error) => error?.code === "CONFIG_MASS_RESET_BLOCKED" && error?.status === 409,
+    );
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.cfZoneId, "zone-1");
+    assert.equal(stored.logEnabled, false);
+  });
+});
+
+test("a confirmed mass reset still writes, and the reset list is returned", async () => {
+  await withMassResetGuardConfig("config-mass-reset-confirmed", async ({ env, kv }) => {
+    const loaded = await (await adminActions.loadConfig({}, { env, kv, ctx: null })).json();
+    const response = await adminActions.saveConfig(
+      {
+        config: sanitizeRuntimeConfig({}),
+        expectedConfigRevision: loaded.revisions.configRevision,
+        confirmMassReset: true,
+      },
+      { env, kv, ctx: null, meta: { section: "ui", source: "skin" } },
+    );
+    assert.equal(response.status, 200);
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.cfZoneId, undefined);
+    // 密钥由 mergeMissingConfigFields 兜底，确认重置也不会把 token 清空。
+    assert.equal(stored.cfApiToken, "real-cf-token");
+  });
+});
+
+test("a small settings save is not treated as a mass reset", async () => {
+  await withMassResetGuardConfig("config-mass-reset-small-save", async ({ env, kv }) => {
+    const response = await adminActions.saveConfig(
+      {
+        config: { ...MASS_RESET_GUARD_CONFIG, rateLimitRpm: 99, logEnabled: true },
+      },
+      { env, kv, ctx: null, meta: { section: "proxy", source: "ui" } },
+    );
+    assert.equal(response.status, 200);
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.rateLimitRpm, 99);
+    assert.equal(stored.logEnabled, true);
+    assert.equal(stored.cfZoneId, "zone-1");
+  });
+});
+
+test("settings import keeps working as an explicit full replacement", async () => {
+  await withMassResetGuardConfig("config-mass-reset-import", async ({ env, kv }) => {
+    const response = await adminActions.importSettings(
+      { config: sanitizeRuntimeConfig({}) },
+      { env, kv, ctx: null, meta: { section: "settings", source: "settings_backup" } },
+    );
+    assert.equal(response.status, 200);
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.cfZoneId, undefined);
+    assert.equal(stored.cfApiToken, "real-cf-token");
+  });
+});
+
 test("active admin index renders when a remote PoP still sees stale config", async () => {
   const record = await buildAdminLocalIndexUploadRecord(
     adminShellHtml("active-from-envelope"),
