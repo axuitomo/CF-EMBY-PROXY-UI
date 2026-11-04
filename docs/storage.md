@@ -13,11 +13,12 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `sys:nodes_index:v1` | 节点索引 | 节点列表页、导入导出和搜索时优先读取；缺失时可根据 `node:*` 自动重建 |
 | `sys:theme` | 全局配置 | 后台“全局设置”保存后的主配置，包含日志、监控、Cloudflare 联动、Telegram 等参数 |
 | `sys:config_meta:v1` | 设置版本元数据 | 记录当前 `sys:theme` 的 hash 与 revision，保存时用于并发冲突检测 |
+| `sys:config_theme_prev:v1` | 上一次保存前的配置 | 每次覆盖 `sys:theme` 之前把当时的值整份写进来，只保留一代；「恢复上次配置」就是把它写回去 |
 | `sys:dns_record_history:v1:{zoneId}:host:{hostname}` | DNS 修改历史 | 记录当前站点最近的 `CNAME` 修改值，供后台 DNS 历史卡片回填 |
 | `sys:nodes_index_meta:v1` | 节点索引元数据 | 记录节点索引的 revision / 更新时间，列表页与备份判断索引是否新鲜 |
 | `sys:worker_placement_region:v1:{scriptName}` | Worker 放置覆盖值 | 后台「Worker 放置」选 `region` 时按脚本名记录选定的区域；`default` / `smart` 清除它 |
 
-> `sys:ops_status:*`、`sys:cf_dash_cache*`、`sys:scheduled_lock:v1`、`sys:telegram_alert_state:v1`、`sys:config_snapshots:v1`、`sys:config_snapshots_meta:v1` 和 `fail:*` 都是旧版 KV 键。当前对应数据分别存放在 D1 的 `sys_status`、`cf_dashboard_cache`、`sys_locks` 和 `auth_failures` 中，设置快照本身已不再写入；KV 整理和保存设置都会删除检测到的这些遗留键。
+> `sys:ops_status:*`、`sys:cf_dash_cache*`、`sys:scheduled_lock:v1`、`sys:telegram_alert_state:v1`、`sys:config_snapshots:v1`、`sys:config_snapshots_meta:v1` 和 `fail:*` 都是旧版 KV 键。当前对应数据分别存放在 D1 的 `sys_status`、`cf_dashboard_cache`、`sys_locks` 和 `auth_failures` 中；旧版那套多代设置快照不再写入，KV 整理和保存设置都会删除检测到的这些遗留键（现行的一代快照是另一个键 `sys:config_theme_prev:v1`，整理时保留）。
 
 > 如果升级后出现“全局设置读取失败 / 设置页空白 / 节点索引丢失但 `node:*` 还在”的情况，可在后台的“账号与备份”区域使用 **一键整理 KV 数据**：
 > 1. 遍历 KV 并保留所有 `node:*`
@@ -29,8 +30,9 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 
 | action | 读 / 写 KV | 主要用途 | 备注 |
 |---|---|---|---|
-| `saveConfig` | 写 | 保存全局设置到 `sys:theme` | 同时写 `sys:config_meta:v1`，并删除遗留的 `sys:config_snapshots:v1`；有防重置闸门，见下 |
-| `importSettings` | 写 | 导入 settings-only 备份到 `sys:theme` | 会按当前版本规则清洗配置；不生成快照 |
+| `saveConfig` | 写 | 保存全局设置到 `sys:theme` | 同时写 `sys:config_meta:v1` 与一代快照 `sys:config_theme_prev:v1`，并删除遗留的 `sys:config_snapshots:v1`；有防重置闸门，见下 |
+| `importSettings` | 写 | 导入 settings-only 备份到 `sys:theme` | 会按当前版本规则清洗配置；写入前的配置同样进 `sys:config_theme_prev:v1` |
+| `restorePreviousConfig` | 读 + 写 | 把 `sys:config_theme_prev:v1` 写回 `sys:theme` | 恢复本身也留快照，所以可以再切回去；没有快照时返回 404 `CONFIG_PREV_SNAPSHOT_MISSING`，不动现有配置 |
 | `save` / `import` | 写 | 新增或批量导入节点 | 最终会写入 `node:*`，并同步更新 `sys:nodes_index:v1` |
 | `delete` | 删 | 删除节点 | 会删除对应 `node:*`，并重建节点索引 |
 | `exportSettings` / `exportConfig` | 读 | 导出全局设置或完整备份 | 数据来源就是当前 KV 中的配置与节点 |

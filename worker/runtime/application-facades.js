@@ -312,6 +312,14 @@ function logRuntimeFailure(scope, error, context = null, level = "warn") {
     console[logLevel](`[${normalizedScope}] ${getErrorMessage(error)}`, meta);
   else console[logLevel](`[${normalizedScope}] ${getErrorMessage(error)}`);
 }
+// 非错误的结构化事件：写进 console 的同一套 [scope] 前缀，便于和 logRuntimeFailure 一起捞。
+function logAdminEvent(scope, context = null, level = "info") {
+  const normalizedScope = String(scope || "admin.event").trim() || "admin.event";
+  const meta = isPlainObject(context) ? { ...context } : {};
+  const logLevel = ["info", "warn", "error"].includes(level) ? level : "info";
+  if (Object.keys(meta).length > 0) console[logLevel](`[${normalizedScope}]`, meta);
+  else console[logLevel](`[${normalizedScope}]`);
+}
 async function withNonCriticalFallback(promise, scope, context = null, fallbackValue = null) {
   try {
     return await promise;
@@ -7741,6 +7749,17 @@ function assertNoUnconfirmedConfigMassReset(payload = {}, currentConfig = {}, ne
   if (resetFields.length === 0) return resetFields;
   if (payload?.confirmMassReset === true) return resetFields;
   if (resetFields.length <= CONFIG_MASS_RESET_FIELD_BUDGET) return resetFields;
+  // 只记字段名与数量，值一个都不落——这几个字段里就有密钥。
+  logAdminEvent(
+    "config.write.rejected",
+    {
+      resetCount: resetFields.length,
+      budget: CONFIG_MASS_RESET_FIELD_BUDGET,
+      resetFields: resetFields.slice(0, 20),
+      mutationId: String(payload?.mutationId || ""),
+    },
+    "warn",
+  );
   throw createStructuredConfigError(
     "CONFIG_MASS_RESET_BLOCKED",
     `本次保存会把 ${resetFields.length} 项设置恢复为默认值，已拦截：确认要重置请再次确认后提交`,
@@ -9173,6 +9192,8 @@ function extractCloudflareApiErrorMessage(payload = null, fallbackText = "") {
   if (!fallback) return "";
   return fallback.replace(/\s+/g, " ").slice(0, 300);
 }
+// 只给管理面的 Cloudflare 调用上超时；代理数据面（fetchRequest 的其它调用方）不能加，否则会切断视频流。
+var CLOUDFLARE_API_TIMEOUT_MS = 8000;
 async function fetchCloudflareApiJson(url, apiToken, init = {}) {
   /** @type {any} */
   const extraInit = init && typeof init === "object" ? init : {};
@@ -9185,6 +9206,8 @@ async function fetchCloudflareApiJson(url, apiToken, init = {}) {
   const isFormDataBody = typeof FormData !== "undefined" && extraInit?.body instanceof FormData;
   const res = await fetchRequest(url, {
     ...extraInit,
+    // 管理面调用必须有上限：2026-11-04 事故里这些裸 fetch 挂了 89–331 秒，把 bootstrap 一起拖死。
+    signal: extraInit?.signal || AbortSignal.timeout(CLOUDFLARE_API_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${apiToken}`,
       ...(isFormDataBody ? {} : { "Content-Type": "application/json" }),
@@ -9227,6 +9250,7 @@ async function fetchCloudflareGraphQL(apiToken, query, variables) {
       : { query };
   const cfRes = await fetchRequest("https://api.cloudflare.com/client/v4/graphql", {
     method: "POST",
+    signal: AbortSignal.timeout(CLOUDFLARE_API_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json",
@@ -10953,6 +10977,7 @@ function defineDashboardActions(dependencies = {}, actions = {}) {
       });
     },
     async getAdminBootstrap(data, { env, ctx, kv, db }) {
+      const startedAt = Date.now();
       try {
         const config = await getRuntimeConfigStrict(env);
         const initHealth = buildInitHealth(env);
@@ -11001,6 +11026,15 @@ function defineDashboardActions(dependencies = {}, actions = {}) {
           "管理台启动数据加载失败：KV 读取异常",
           "admin.read.bootstrap",
         );
+      } finally {
+        // 事故里 bootstrap 卡 89 / 166 / 331 秒却没有任何一条日志，只能靠客户端时间线反推。
+        const durationMs = Date.now() - startedAt;
+        if (durationMs >= 3000)
+          logAdminEvent(
+            "config.bootstrap.slow",
+            { durationMs, action: "getAdminBootstrap" },
+            "warn",
+          );
       }
     },
     async getSettingsBootstrap(data, { env, ctx, kv, db }) {
@@ -11890,6 +11924,45 @@ function defineConfigActions(dependencies = {}, actions = {}) {
         config: redactAdminRuntimeConfig(savedConfig),
         revisions,
         generatedAt: /* @__PURE__ */ new Date().toISOString(),
+      });
+    },
+    // 恢复上一次保存前的配置。恢复本身也会把「当前配置」写成新快照，所以连点两次能来回切。
+    async restorePreviousConfig(data, { env, ctx, kv }) {
+      if (!kv) return jsonError("KV_NOT_CONFIGURED", "请先绑定 ENI_KV / KV Namespace", 503);
+      let snapshot;
+      try {
+        snapshot = await kvGetStrict(kv, kernel.CONFIG_PREV_KEY, { type: "json" });
+      } catch (error) {
+        throw remapAdminReadKvError(
+          error,
+          "CONFIG_PREV_SNAPSHOT_READ_FAILED",
+          "读取上一次配置快照失败：KV 读取异常",
+          "admin.read.config_prev",
+        );
+      }
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot))
+        return jsonError(
+          "CONFIG_PREV_SNAPSHOT_MISSING",
+          "没有可恢复的上一次配置快照（快照从本次升级后的第一次保存开始记录）",
+          404,
+        );
+      const savedConfig = await kernel.persistRuntimeConfig(snapshot, {
+        env,
+        kv,
+        ctx,
+        forceKvCommit: true,
+      });
+      logAdminEvent("config.write.restored", {
+        bytes: JSON.stringify(snapshot).length,
+        mutationId: String(data?.mutationId || ""),
+      });
+      return jsonResponse({
+        success: true,
+        config: redactAdminRuntimeConfig(savedConfig),
+        revisions: await kernel.getAdminRevisionsForRead(env, {
+          ctx,
+          config: savedConfig,
+        }),
       });
     },
     // 面板上的「测试」用未保存的输入值直连 TMDB：凭证填错时能立刻看到，而不是等到列表空。
@@ -19278,7 +19351,16 @@ function defineConfigPersistenceMethods(dependencies = {}, kernel = {}) {
       }
       const legacySnapshotRecords = Array.isArray(legacySnapshotRaw) ? legacySnapshotRaw : [];
       const configMeta = kernel.normalizeRevisionMeta(buildHashedMetaPayload(nextConfig));
+      const prevConfigJson = JSON.stringify(prevConfig);
+      // 覆盖前留一代快照：sys:theme 本身是单键覆盖，V19 又删掉了版本历史，
+      // 没有这一份就只剩「从导出文件恢复」一条退路。
+      logAdminEvent("config.write.snapshot", { bytes: prevConfigJson.length });
       const mutationPlan = [
+        {
+          type: "put",
+          key: kernel.CONFIG_PREV_KEY,
+          value: prevConfigJson,
+        },
         {
           type: "put",
           key: kernel.CONFIG_KEY,
@@ -35618,6 +35700,7 @@ var DATA_SERVICE_CONSTANTS = Object.freeze({
   WORKER_PLACEMENT_REGION_OVERRIDE_PREFIX: "sys:worker_placement_region:v1:",
   CONFIG_SNAPSHOTS_KEY: "sys:config_snapshots:v1",
   CONFIG_META_KEY: "sys:config_meta:v1",
+  CONFIG_PREV_KEY: "sys:config_theme_prev:v1",
   CONFIG_SNAPSHOTS_META_KEY: "sys:config_snapshots_meta:v1",
   NODES_INDEX_META_KEY: "sys:nodes_index_meta:v1",
   LEGACY_DNS_IP_POOL_SOURCES_KEY: "sys:dns_ip_pool_sources:v1",
@@ -37181,6 +37264,7 @@ function defineNodeKvTidyMethods(dependencies = {}, kernel = {}) {
         if (keyName.startsWith(kernel.ADMIN_INDEX_UPLOAD_PREFIX)) continue;
         if (
           keyName === kernel.CONFIG_KEY ||
+          keyName === kernel.CONFIG_PREV_KEY ||
           keyName === kernel.NODES_INDEX_KEY ||
           keyName === kernel.NODES_SUMMARY_INDEX_KEY ||
           keyName === kernel.CONFIG_SNAPSHOTS_KEY

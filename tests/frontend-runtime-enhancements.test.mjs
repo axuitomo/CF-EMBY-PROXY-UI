@@ -431,6 +431,61 @@ test("a panel without a hydrated config cannot write settings", async () => {
   assert.deepEqual(calls, ["saveConfig"]);
 });
 
+test("restoring the previous config asks once and then reloads settings", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const messages = [];
+  const revisions = [];
+  let reloaded = 0;
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall(action) {
+      calls.push(action);
+      return { revisions: { configRevision: "restored" } };
+    },
+    applyAdminRevisions(next) {
+      revisions.push(next);
+    },
+    async loadSettings() {
+      reloaded += 1;
+    },
+    async askConfirm() {
+      return true;
+    },
+    showMessage(message, options) {
+      messages.push({ message, options });
+    },
+  };
+  patchSafetyContractMethods(app);
+
+  await app.restorePreviousConfig();
+
+  assert.deepEqual(calls, ["restorePreviousConfig"]);
+  assert.deepEqual(revisions, [{ configRevision: "restored" }]);
+  assert.equal(reloaded, 1);
+  assert.equal(messages[0]?.options?.tone, "success");
+});
+
+test("cancelling the previous-config restore touches nothing", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall(action) {
+      calls.push(action);
+    },
+    async askConfirm() {
+      return false;
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await app.restorePreviousConfig();
+
+  assert.deepEqual(calls, []);
+});
+
 test("a skin save without a base config never sends a request", async () => {
   const { persistUiSkinPreference } = loadEnhancementTestHooks();
   const calls = [];

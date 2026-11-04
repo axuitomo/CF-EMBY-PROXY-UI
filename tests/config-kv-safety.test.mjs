@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createTestApplication } from "../worker/testing/hooks.js";
@@ -978,6 +979,65 @@ test("settings import keeps working as an explicit full replacement", async () =
     assert.equal(stored.cfZoneId, undefined);
     assert.equal(stored.cfApiToken, "real-cf-token");
   });
+});
+
+test("a save leaves the previous config recoverable, and restoring is reversible", async () => {
+  await withMassResetGuardConfig("config-prev-snapshot", async ({ env, kv }) => {
+    const saved = await adminActions.saveConfig(
+      { config: { ...MASS_RESET_GUARD_CONFIG, rateLimitRpm: 30 } },
+      { env, kv, ctx: null, meta: { section: "proxy", source: "ui" } },
+    );
+    assert.equal(saved.status, 200);
+    // 覆盖前的那一份进了快照：这是「整份被写坏」之后唯一的本地退路。
+    const snapshot = await kv.get(kernel.CONFIG_PREV_KEY, { type: "json" });
+    assert.equal(snapshot.rateLimitRpm, 20);
+    assert.equal(snapshot.cfZoneId, "zone-1");
+
+    const restored = await (
+      await adminActions.restorePreviousConfig({}, { env, kv, ctx: null })
+    ).json();
+    assert.equal(restored.config.rateLimitRpm, 20);
+    assert.equal((await kv.get(kernel.CONFIG_KEY, { type: "json" })).rateLimitRpm, 20);
+    // 恢复也写快照，所以恢复之后还能切回恢复前的状态。
+    assert.equal((await kv.get(kernel.CONFIG_PREV_KEY, { type: "json" })).rateLimitRpm, 30);
+  });
+});
+
+test("restoring without a snapshot fails closed", async () => {
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 20, cfZoneId: "zone-1" } });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-prev-missing" };
+  invalidateRuntimeConfigCache();
+  try {
+    const response = await adminActions.restorePreviousConfig({}, { env, kv, ctx: null });
+    assert.equal(response.status, 404);
+    assert.equal((await response.json())?.error?.code, "CONFIG_PREV_SNAPSHOT_MISSING");
+    // 没有快照时不能动现有配置。
+    assert.equal((await kv.get(kernel.CONFIG_KEY, { type: "json" })).rateLimitRpm, 20);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("the config snapshot key is not something kv tidy treats as garbage", async () => {
+  const classified = await kernel.classifyKvTidyKeys(null, [
+    kernel.CONFIG_KEY,
+    kernel.CONFIG_META_KEY,
+    kernel.CONFIG_PREV_KEY,
+    "node:demo",
+  ]);
+  assert.deepEqual([...classified.removableKeys], []);
+  assert.equal(classified.untouchedOtherKeyCount, 0);
+  assert.deepEqual(classified.nodeNames, ["demo"]);
+});
+
+test("admin cloudflare calls carry a timeout so bootstrap cannot hang for minutes", async () => {
+  const source = await readFile(
+    new URL("../worker/runtime/application-facades.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /var CLOUDFLARE_API_TIMEOUT_MS = 8000;/);
+  const calls = source.match(/AbortSignal\.timeout\(CLOUDFLARE_API_TIMEOUT_MS\)/g) || [];
+  assert.equal(calls.length, 2, "fetchCloudflareApiJson 与 fetchCloudflareGraphQL 都必须带超时");
 });
 
 test("active admin index renders when a remote PoP still sees stale config", async () => {

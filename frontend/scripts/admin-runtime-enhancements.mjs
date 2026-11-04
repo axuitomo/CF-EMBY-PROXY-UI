@@ -1572,8 +1572,28 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
     renderWorkerHtmlUpdateState();
   }
 
+  // 覆盖是单键覆盖，没有版本历史；这里把「上一次保存前」的快照做成一个按钮。
+  function syncConfigRestorePanel(app = window.App) {
+    const anchor = document.querySelector('#admin-worker-html-update-root');
+    if (!anchor || !app) return;
+    let root = document.querySelector('#admin-config-restore-root');
+    if (!root) {
+      anchor.insertAdjacentHTML('afterend', '<div id="admin-config-restore-root" class="ui-settings-panel settings-block hidden"></div>');
+      root = document.querySelector('#admin-config-restore-root');
+    }
+    if (!root || root.dataset.adminConfigRestoreReady) return;
+    root.dataset.adminConfigRestoreReady = '1';
+    root.classList.remove('hidden');
+    root.innerHTML = '<div class="ui-block-head"><div><div class="ui-section-kicker">Config Snapshot</div><div class="ui-section-title">恢复上次配置</div></div><span class="ui-chip-muted">一代</span></div>'
+      + '<p class="text-sm text-slate-500 mb-4">每次保存设置前都会把当时的配置留一份快照，只有最近一代。误改配置、导入错文件或整份重置之后，可以在这里退回上一次保存之前的状态。</p>'
+      + '<button data-admin-config-restore="1" type="button" class="inline-flex items-center justify-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition"><i data-lucide="history" class="w-4 h-4" aria-hidden="true"></i><span>恢复上次配置</span></button>';
+    root.querySelector('[data-admin-config-restore="1"]')?.addEventListener('click', () => app.restorePreviousConfig?.());
+    scheduleIconRefresh(root);
+  }
+
   function applySettingsLayout() {
     syncWorkerHtmlUpdatePanel(window.App);
+    syncConfigRestorePanel(window.App);
     syncThemeSkinPanel(window.App);
     syncTmdbCredentialPanel(window.App);
     syncCloudflareTokenTest();
@@ -3392,6 +3412,25 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
           ? formatD1RepairError(error, title + '失败')
           : '';
         this.showMessage(planRecoveryMessage || schemaRepairMessage || title + '失败: ' + (error?.message || '未知错误'), { tone: 'error', modal: true });
+      }
+    };
+
+    app.restorePreviousConfig = async function restorePreviousConfigToUi() {
+      const accepted = await this.askConfirm('将把全局配置恢复到上一次保存之前的内容（当前配置会留成新的快照，可以再切回来）。', {
+        title: '恢复上次配置', tone: 'warning', confirmText: '确认恢复'
+      });
+      if (!accepted) return;
+      try {
+        const result = await this.apiCall('restorePreviousConfig', {});
+        if (result?.revisions && typeof this.applyAdminRevisions === 'function') this.applyAdminRevisions(result.revisions);
+        await this.loadSettings?.();
+        this.showMessage('已恢复上一次保存前的配置', { tone: 'success' });
+      } catch (error) {
+        console.error('restorePreviousConfig failed', error);
+        const message = String(error?.code || '') === 'CONFIG_PREV_SNAPSHOT_MISSING'
+          ? '没有可恢复的快照：从本次升级后的第一次保存开始记录，之前只能靠导入备份。'
+          : '恢复上次配置失败: ' + (error?.message || '未知错误');
+        this.showMessage(message, { tone: 'error', modal: true });
       }
     };
 

@@ -55,8 +55,8 @@
       "treeShaken": true,
       "note": "只保留壳里出现过的图标名（含 lucide 的废弃别名）",
       "upstreamBytes": 397450,
-      "bytes": 13527,
-      "gzipBytes": 4688,
+      "bytes": 13663,
+      "gzipBytes": 4726,
       "upstreamGzipBytes": 91952,
       "iconNames": [
         "activity",
@@ -86,6 +86,7 @@
         "grip-vertical",
         "group",
         "hard-drive",
+        "history",
         "image",
         "import",
         "info",
@@ -125,7 +126,7 @@
         "wand-sparkles",
         "x"
       ],
-      "iconCount": 65
+      "iconCount": 66
     }
   ]
 }
