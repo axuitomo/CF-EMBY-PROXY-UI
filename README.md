@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-V20.2-2563eb">
+  <img alt="version" src="https://img.shields.io/badge/version-V20.3-2563eb">
   <img alt="platform" src="https://img.shields.io/badge/platform-Cloudflare%20Workers-orange">
   <img alt="storage" src="https://img.shields.io/badge/storage-KV%20%2B%20D1-green">
   <img alt="ui" src="https://img.shields.io/badge/panel-SaaS%20UI-purple">
@@ -17,7 +17,7 @@ CF-EMBY-PROXY-UI 用一台 Cloudflare Worker 给多台 Emby / Jellyfin 服务器
 - 配置与节点存在 KV（`ENI_KV`），日志与统计存在 D1（`DB`，可选）
 - 大视频流尽量不经过 Worker 内存，交给 Cloudflare 数据面转发
 
-> 当前 **V20.2** 把管理端样式从浏览器内 JIT 改成构建期预编译：运行时要拉的 CDN 脚本从 4 个减到 3 个，首屏 DCL 少约 90 ms、首屏总传输 gzip 少 60 KB，切换视图不再触发重新编译。用户可见的功能变动集中在账号设置与节点：节点级「TMDB 聚合」只在本节点开关打开时改写请求，TMDB 凭据与 Cloudflare 令牌旁补回输入框、官方签发页图标和一键连通性测试，TMDB 空结果兜底与并发查询也一并收紧。Worker 侧的节点修订缓存从 1 秒放宽到 10 秒，把每个有流量的 isolate 恒定 1 次/秒的 KV 读压下来。工程侧把同一套门禁提到 PR 阶段并接入 Dependabot，安装脚本放行清单、参考源 minor 版本与 overrides 里的运行时版本都进了 `npm run check`。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
+> 当前 **V20.3** 的重心是不让配置再被写坏：`saveConfig` 落盘前先与 KV 里的现有配置逐字段比对，出现「非默认值 → 默认值 / 空」的字段超过 8 个就直接返回 409 `CONFIG_MASS_RESET_BLOCKED`，KV 一个字节都不写，管理台列清字段名、二次确认后才放行；每次覆盖配置前另存一份上一代快照，「备份与恢复」新增「恢复上次配置」，连点两次可以来回切。管理面的 Cloudflare 调用补上 8 秒超时（此前是裸 fetch，卡住时 bootstrap 会被拖到 89–331 秒），并新增 `config.write.rejected` / `config.write.snapshot` / `config.bootstrap.slow` 三条结构化日志。管理端同时修掉优选 IP 工作台的两处几何问题：导出下拉菜单不再被工具栏的横向滚动容器裁掉，删完 IP 后列表由服务端重新结算、不再残留共享快照。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ![CF-EMBY-PROXY-UI 管理后台截图](https://web.axuitomo.qzz.io/api/p/img/github/PixPin_2026-08-03_14-00-35.png?download=true&sign=TltPfTfUurzkQ5FsY4rpQ1Wd%2Bwu1Oji3rC%2FVo2NbV%2BM%3D%3A0)
 
