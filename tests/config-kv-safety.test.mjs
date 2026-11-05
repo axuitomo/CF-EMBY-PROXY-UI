@@ -1355,6 +1355,29 @@ test("full import rejects malformed config and nodes shapes instead of rewriting
   }
 });
 
+test("node import rejects a missing nodes array before iterating it", async () => {
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: {} });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-node-shape" };
+  invalidateRuntimeConfigCache();
+  try {
+    // 面板总带数组；手写脚本漏掉 nodes 时曾经直接 for...of undefined，抛成 500。
+    for (const action of ["import", "saveOrImport"]) {
+      const response = await adminActions.saveOrImport({}, { action, env, ctx: null, kv });
+      assert.equal(response.status, 400, `${action} should reject a missing nodes array`);
+      assert.equal((await response.json()).error.code, "INVALID_BACKUP_NODES");
+    }
+    const notArray = await adminActions.saveOrImport(
+      { nodes: { alpha: { target: "https://origin.test" } } },
+      { action: "import", env, ctx: null, kv },
+    );
+    assert.equal(notArray.status, 400);
+    assert.equal((await notArray.json()).error.code, "INVALID_BACKUP_NODES");
+    assert.equal(await kv.get(`${kernel.PREFIX}alpha`, { type: "json" }), null);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
 test("full import treats an empty config object as no config", async () => {
   const currentConfig = { rateLimitRpm: 42, upstreamTimeoutMs: 12345 };
   const { kv } = createKv({ [kernel.CONFIG_KEY]: currentConfig });

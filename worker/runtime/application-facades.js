@@ -12035,6 +12035,20 @@ function defineConfigActions(dependencies = {}, actions = {}) {
           return jsonError("CF_TOKEN_INACTIVE", `令牌状态为 ${status || "unknown"}，无法使用`, 400);
         return jsonResponse({ success: true, status });
       } catch (error) {
+        // fetchCloudflareApiJson 对非 2xx 会带上真实 HTTP 状态：令牌写错是 400/401，
+        // 不能再折叠成 502 NETWORK_ERROR，否则面板会让用户去查网络和部署。
+        const apiStatus = Number(error?.status);
+        if (apiStatus >= 400 && apiStatus < 500) {
+          const upstreamMessage = String(error?.message || "");
+          // 上游消息形如 "cf_api_http_400: 6003: Invalid request headers"，前缀和这句中文重复。
+          const detail = upstreamMessage.replace(/^cf_api_http_\d+:\s*/, "") || "令牌无效";
+          return jsonError(
+            "CF_TOKEN_REJECTED",
+            `Cloudflare 拒绝了这组令牌（HTTP ${apiStatus}）：${detail}`,
+            apiStatus,
+            { upstreamStatus: apiStatus, upstreamMessage },
+          );
+        }
         return jsonError(
           "NETWORK_ERROR",
           String(error?.message || error || "cf_token_probe_failed"),
@@ -12353,7 +12367,10 @@ function defineNodeActions(dependencies = {}, actions = {}) {
       });
     },
     async saveOrImport(data, { action, ctx, kv, env }) {
+      // 面板永远带数组；手写脚本漏掉 nodes 时，这里不能直接进 for...of（会抛 TypeError 变成 500）。
       const nodesToSave = action === "save" ? [data] : data.nodes;
+      if (!Array.isArray(nodesToSave))
+        return jsonError("INVALID_BACKUP_NODES", "备份中的 nodes 必须是数组，已拒绝导入", 400);
       const reservedNodeConflict = findReservedNodeNameConflict(nodesToSave, env);
       if (reservedNodeConflict)
         return jsonError(
@@ -13192,7 +13209,14 @@ function defineMaintenanceActions(dependencies = {}, actions = {}) {
           { message },
           null,
         );
-        return jsonError("D1_TIDY_FAILED", message, 500);
+        // 和 tidyKvData 一致：计划令牌无效/过期是客户端可修正的前置条件（409），
+        // 不能一律报 500，否则面板会把「请重新预览」显示成服务端故障。
+        return jsonError(
+          String(error?.code || "D1_TIDY_FAILED"),
+          message,
+          normalizeErrorStatus(error?.status, 500),
+          isPlainObject(error?.details) ? error.details : null,
+        );
       }
     },
   };

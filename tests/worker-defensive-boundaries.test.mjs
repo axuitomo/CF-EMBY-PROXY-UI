@@ -3904,6 +3904,48 @@ test("credential probes report TMDB and Cloudflare rejections", async () => {
   );
 });
 
+test("Cloudflare token probe keeps a rejected token a 4xx instead of a network error", async () => {
+  // 真实响应：HTTP 400 + errors[0] {code:6003,message:"Invalid request headers"}。
+  // 折叠成 502 NETWORK_ERROR 会让面板把「令牌填错」显示成网络/部署故障。
+  await withWorkerGlobals(
+    {
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 6003, message: "Invalid request headers" }],
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        ),
+    },
+    async () => {
+      const response = await adminActions.testCloudflareApiToken({ apiToken: "bad-token" });
+      assert.equal(response.status, 400);
+      const body = await response.json();
+      assert.equal(body.error.code, "CF_TOKEN_REJECTED");
+      assert.match(body.error.message, /HTTP 400/);
+      assert.match(body.error.message, /6003: Invalid request headers/);
+      assert.equal(body.error.details.upstreamStatus, 400);
+    },
+  );
+});
+
+test("manual D1 tidy reports a stale plan token as 409 instead of 500", async () => {
+  // 计划令牌校验发生在任何 D1 访问之前：用会抛错的 db 证明这里没走到数据库。
+  const db = {
+    prepare() {
+      throw new Error("D1 must not be touched before the plan token is verified");
+    },
+  };
+  const response = await adminActions.tidyD1Data(
+    {},
+    { env: { DB: db, JWT_SECRET: "test-secret" }, ctx: null, kv: null, db },
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.error.code, "TIDY_PLAN_INVALID");
+});
+
 test("TMDB provider id search does nothing without a configured credential", async () => {
   isolateState.TmdbLookupCache.clear();
   let fetchCount = 0;
