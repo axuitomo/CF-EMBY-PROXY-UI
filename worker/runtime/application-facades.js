@@ -12332,7 +12332,15 @@ function defineNodeActions(dependencies = {}, actions = {}) {
   return {
     // 节点列表的「导出配置」只需要节点。走 exportConfig 会连管理端 HTML 一起算回导字节，
     // 备份一旦超过 12 MiB 上限，连节点都导不出来，而报错偏偏建议"分别导出节点"——那条路原本不存在。
-    async exportNodes(data, { env, ctx }) {
+    async exportNodes(data, { env, ctx, request }) {
+      // 节点实体带着 secret / headers，导出等于把上游凭据写到磁盘。用与 exportConfig 相同的
+      // 自定义头令牌挡住跨站表单提交（自定义头必须过 CORS 预检），而不是只靠同源 cookie。
+      if (String(request?.headers?.get("X-Admin-Confirm") || "").trim() !== "exportNodes")
+        return jsonError(
+          "CONFIRMATION_REQUIRED",
+          "Exporting node credentials requires explicit confirmation",
+          428,
+        );
       const kv = kernel.getKV(env);
       const nodes = kv
         ? (await kernel.loadAllNodeEntitiesFromKvStrict(kv, { ctx })).filter(Boolean)
@@ -12691,6 +12699,10 @@ function defineNodeActions(dependencies = {}, actions = {}) {
         return jsonError("INVALID_BACKUP_CONFIG", "备份中的 config 必须是对象，已拒绝导入", 400);
       if (data?.nodes !== void 0 && data?.nodes !== null && !Array.isArray(data.nodes))
         return jsonError("INVALID_BACKUP_NODES", "备份中的 nodes 必须是数组，已拒绝导入", 400);
+      // 空对象等同于"备份里没有配置"：mergeMissingConfigFields 只回填密钥与皮肤，其余字段会落默认值，
+      // 一个 {"config":{}} 就足以把整份设置刷回默认，而面板预览只会显示"0 个字段"。
+      const configPayload =
+        isPlainObject(data?.config) && Object.keys(data.config).length > 0 ? data.config : null;
       const reservedNodeConflict = findReservedNodeNameConflict(data?.nodes, env);
       if (reservedNodeConflict)
         return jsonError(
@@ -12751,11 +12763,11 @@ function defineNodeActions(dependencies = {}, actions = {}) {
       }
       return await runKvDataMutation(kv)(async () => {
         const currentConfig = await getRuntimeConfigStrict(env);
-        const configRollbackState = data.config
+        const configRollbackState = configPayload
           ? await kernel.captureRuntimeConfigRollbackState(env, kv)
           : null;
-        const importedConfig = data.config
-          ? mergeMissingConfigFields(data.config, currentConfig)
+        const importedConfig = configPayload
+          ? mergeMissingConfigFields(configPayload, currentConfig)
           : null;
         const nodeDnsConfig = importedConfig
           ? sanitizeRuntimeConfig(importedConfig)
@@ -12765,7 +12777,7 @@ function defineNodeActions(dependencies = {}, actions = {}) {
           ? kernel.buildAdminIndexUploadKey(importedIndexRecord.revision)
           : "";
         const previousImportedIndexValue = importedIndexKey ? await kv.get(importedIndexKey) : null;
-        const previousActiveIndexValue = data.config
+        const previousActiveIndexValue = configPayload
           ? await kv.get(kernel.ADMIN_ACTIVE_INDEX_KEY)
           : null;
         const importedActiveIndexRecord = importedIndexRevision
@@ -12882,7 +12894,7 @@ function defineNodeActions(dependencies = {}, actions = {}) {
             } catch (restoreError) {
               adminIndexRollbackError = getErrorMessage(restoreError, "admin_index_restore_failed");
             }
-          if (data.config)
+          if (configPayload)
             try {
               if (previousActiveIndexValue === null) await kv.delete(kernel.ADMIN_ACTIVE_INDEX_KEY);
               else await kv.put(kernel.ADMIN_ACTIVE_INDEX_KEY, previousActiveIndexValue);

@@ -1355,6 +1355,23 @@ test("full import rejects malformed config and nodes shapes instead of rewriting
   }
 });
 
+test("full import treats an empty config object as no config", async () => {
+  const currentConfig = { rateLimitRpm: 42, upstreamTimeoutMs: 12345 };
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: currentConfig });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-empty-config" };
+  invalidateRuntimeConfigCache();
+  try {
+    // mergeMissingConfigFields 只回填密钥与皮肤，其余字段落默认值：一个 {} 就能整份重置。
+    const response = await adminActions.importFull({ config: {} }, { env, ctx: null, kv });
+    assert.equal(response.status, 200);
+    const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+    assert.equal(stored.rateLimitRpm, currentConfig.rateLimitRpm);
+    assert.equal(stored.upstreamTimeoutMs, currentConfig.upstreamTimeoutMs);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
 test("full import rejects an oversized node before writing anything", async () => {
   const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 10 } });
   const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-full-import-limits" };
@@ -1426,7 +1443,24 @@ test("node export works without the full backup size gate", async () => {
     );
     assert.equal(fullResponse.status, 413);
 
-    const response = await adminActions.exportNodes({}, { env, ctx: null });
+    // 节点实体带 secret / headers：没有确认头时只回 428，不吐凭据。
+    const denied = await adminActions.exportNodes(
+      {},
+      { env, ctx: null, request: new Request("https://worker.test/admin") },
+    );
+    assert.equal(denied.status, 428);
+    assert.equal((await denied.json()).error.code, "CONFIRMATION_REQUIRED");
+
+    const response = await adminActions.exportNodes(
+      {},
+      {
+        env,
+        ctx: null,
+        request: new Request("https://worker.test/admin", {
+          headers: { "X-Admin-Confirm": "exportNodes" },
+        }),
+      },
+    );
     assert.equal(response.status, 200);
     const payload = await response.json();
     assert.equal(payload.nodes.length, 1);

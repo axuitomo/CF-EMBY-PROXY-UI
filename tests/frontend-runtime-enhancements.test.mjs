@@ -3193,15 +3193,28 @@ test("exports download from any view, not only after the nodes view mounted", as
   assert.equal(documentState.bodyAppended, 1);
 });
 
-test("node export calls the nodes-only action", async () => {
-  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
-  const calls = [];
+test("node export hits the nodes-only action with its confirm token", async () => {
+  const requests = [];
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks(
+    {},
+    {
+      fetch: async (url, init) => {
+        requests.push({ url, init });
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { nodes: [{ name: "alpha" }] };
+          },
+        };
+      },
+    },
+  );
   const downloads = [];
   const app = {
     runtimeConfig: hydratedConfig(),
-    async apiCall(action) {
-      calls.push(action);
-      return { nodes: [{ name: "alpha" }] };
+    async apiCall() {
+      throw new Error("节点导出不该再走完整备份 action");
     },
     downloadJson(payload, filename) {
       downloads.push({ payload, filename });
@@ -3211,7 +3224,10 @@ test("node export calls the nodes-only action", async () => {
   patchSafetyContractMethods(app);
 
   await app.exportNodes();
-  assert.deepEqual(calls, ["exportNodes"]);
+  assert.equal(requests.length, 1);
+  // 节点实体带 secret / headers，Worker 要求自定义确认头，否则回 428。
+  assert.equal(requests[0].init.headers["X-Admin-Confirm"], "exportNodes");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { action: "exportNodes" });
   assert.deepEqual(downloads[0]?.payload, [{ name: "alpha" }]);
   assert.match(downloads[0]?.filename || "", /^emby_nodes_\d+\.json$/);
 });
@@ -3309,10 +3325,11 @@ test("an empty or file-shaped full backup is rejected locally", async () => {
   const { patchSafetyContractMethods } = loadEnhancementTestHooks();
   const calls = [];
   const messages = [];
+  let payload = { version: "20.3", nodes: [], config: "not-an-object" };
   const app = {
     runtimeConfig: hydratedConfig(),
     async readJsonFileFromInputEvent() {
-      return { version: "20.3", nodes: [], config: "not-an-object" };
+      return payload;
     },
     async askConfirm() {
       return true;
@@ -3330,6 +3347,13 @@ test("an empty or file-shaped full backup is rejected locally", async () => {
   await app.importFull({ target: { files: [{}] } });
   assert.deepEqual(calls, []);
   assert.equal(messages[0]?.options?.tone, "warning");
+  assert.match(messages[0]?.message || "", /无效的备份文件/);
+
+  // 空对象不是"有配置"：Worker 侧同样当缺失处理，这里也不该发请求。
+  messages.length = 0;
+  payload = { version: "20.3", nodes: [], config: {} };
+  await app.importFull({ target: { files: [{}] } });
+  assert.deepEqual(calls, []);
   assert.match(messages[0]?.message || "", /无效的备份文件/);
 });
 

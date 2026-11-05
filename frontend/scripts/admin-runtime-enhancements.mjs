@@ -3542,7 +3542,7 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
 
     app.exportNodes = async function exportNodes() {
       try {
-        const result = await this.apiCall('exportNodes');
+        const result = await callConfirmedAdminAction(this, 'exportNodes', {}, 'exportNodes');
         this.downloadJson(Array.isArray(result?.nodes) ? result.nodes : [], 'emby_nodes_' + Date.now() + '.json');
       } catch (error) {
         console.error('exportNodes failed', error);
@@ -3604,7 +3604,9 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
         return;
       }
       if (!backup) return;
-      const config = isPlainBackupObject(backup?.config) ? backup.config : null;
+      // 空对象等同"备份里没有配置"：Worker 侧同样这么处理，否则整份设置会被默认值刷掉。
+      const config =
+        isPlainBackupObject(backup?.config) && Object.keys(backup.config).length > 0 ? backup.config : null;
       const nodes = Array.isArray(backup?.nodes) ? backup.nodes : [];
       if (!config && nodes.length === 0) {
         this.showMessage('无效的备份文件：需要 config（全局设置）或 nodes（节点）至少一项。', { tone: 'warning', modal: true });
