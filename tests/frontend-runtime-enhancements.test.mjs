@@ -1204,12 +1204,13 @@ test("theme B migration backup import and export buttons share one solid red bea
     new URL("../frontend/admin-runtime.template.html", import.meta.url),
     "utf8",
   );
-  assert.equal(template.match(/settings-secondary-label inline-flex items-center/g)?.length, 3);
+  // 迁移与备份只剩「导入备份」与「导出完整备份」两个入口。
+  assert.equal(template.match(/settings-secondary-label inline-flex items-center/g)?.length, 1);
   assert.equal(
     template.match(
       /class:"px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-sm transition font-medium"/g,
     )?.length,
-    3,
+    1,
   );
   assert.match(
     ADMIN_RUNTIME_ENHANCEMENT_STYLE,
@@ -1686,17 +1687,18 @@ test("admin runtime keeps scoped migration, node-only, and release contracts", a
   );
   assert.match(template, /id:"admin-worker-html-update-root"/);
   assert.match(template, /id:"import-full-file"/);
-  assert.match(template, /id:"import-settings-secrets-file"/);
-  assert.match(template, /id:"import-settings-file"/);
   assert.match(template, /App\.importFull/);
   assert.match(template, /App\.exportFull/);
-  assert.match(template, /App\.exportSettingsWithSecrets/);
-  assert.match(template, /App\.exportSettings\(/);
+  // 迁移与备份只保留完整备份一组入口，另外两种范围的按钮与文件输入已经下线。
+  for (const source of [template, generatedIndex]) {
+    assert.doesNotMatch(source, /id:"import-settings-secrets-file"/);
+    assert.doesNotMatch(source, /id:"import-settings-file"/);
+  }
+  assert.doesNotMatch(template, /App\.exportSettingsWithSecrets/);
+  assert.doesNotMatch(template, /App\.exportSettings\(/);
   assert.match(template, /\\u8fc1\\u79fb\\u4e0e\\u5907\\u4efd/);
   assert.doesNotMatch(template, /Settings Only/);
   assert.match(generatedIndex, /id:"import-full-file"/);
-  assert.match(generatedIndex, /id:"import-settings-secrets-file"/);
-  assert.match(generatedIndex, /id:"import-settings-file"/);
   assert.match(ADMIN_RUNTIME_ENHANCEMENT_SCRIPT, /app\.exportSettingsWithSecrets = async function/);
   assert.match(template, /\\u8282\\u70b9\\u5217\\u8868\\u64cd\\u4f5c/);
   assert.match(template, /id:"import-nodes-file"/);
