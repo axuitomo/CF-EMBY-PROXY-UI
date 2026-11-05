@@ -176,6 +176,6 @@ CF-EMBY-PROXY-UI 用一台 Cloudflare Worker 给多台 Emby / Jellyfin 服务器
 
 ## 致谢
 
-- 部分代码实现思路借鉴了 A 佬、HR 佬、maka佬的公开讨论与方案沉淀。
+- 部分代码实现思路借鉴了 A 佬、HR 佬、maka佬、蒂日佬的公开讨论与方案沉淀。
 - Telegram 通知链路实现参考了 LUO 佬的方案思路。
 - 项目名称命名灵感借鉴自 [fast63362/CF-Emby-Proxy](https://github.com/fast63362/CF-Emby-Proxy)。
