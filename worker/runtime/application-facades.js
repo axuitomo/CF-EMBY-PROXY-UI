@@ -11876,6 +11876,12 @@ function defineConfigActions(dependencies = {}, actions = {}) {
             adminIndexBytes: Number(adminIndexUpload?.bytes) || 0,
           },
         );
+      logAdminEvent("backup.export.full", {
+        includeSecrets,
+        nodeCount: backupPayload.nodes.length,
+        bytes: importRequestBytes,
+        hasAdminIndex: Boolean(adminIndexUpload),
+      });
       return new Response(backupPayloadText, { headers: jsonHeaders() });
     },
     async exportSettings(data, { env, request }) {
@@ -11886,6 +11892,10 @@ function defineConfigActions(dependencies = {}, actions = {}) {
       )
         return jsonError("CONFIRMATION_REQUIRED", "导出完整密钥需要显式确认", 428);
       const config = await getRuntimeConfigStrict(env);
+      logAdminEvent("backup.export.settings", {
+        includeSecrets,
+        fieldCount: Object.keys(config).length,
+      });
       return jsonResponse({
         version: Config.Defaults.Version,
         type: "settings-only",
@@ -11918,6 +11928,10 @@ function defineConfigActions(dependencies = {}, actions = {}) {
       const revisions = await kernel.getAdminRevisions(env, {
         ctx,
         config: savedConfig,
+      });
+      logAdminEvent("backup.import.settings", {
+        fieldCount: Object.keys(importedConfig).length,
+        source: String(data?.meta?.source || "").slice(0, 40),
       });
       return jsonResponse({
         success: true,
@@ -12316,6 +12330,20 @@ function defineNodeActions(dependencies = {}, actions = {}) {
   const { kernel } = dependencies;
   const { CacheManager, buildAdminLocalIndexUploadRecord } = dependencies;
   return {
+    // 节点列表的「导出配置」只需要节点。走 exportConfig 会连管理端 HTML 一起算回导字节，
+    // 备份一旦超过 12 MiB 上限，连节点都导不出来，而报错偏偏建议"分别导出节点"——那条路原本不存在。
+    async exportNodes(data, { env, ctx }) {
+      const kv = kernel.getKV(env);
+      const nodes = kv
+        ? (await kernel.loadAllNodeEntitiesFromKvStrict(kv, { ctx })).filter(Boolean)
+        : [];
+      logAdminEvent("backup.export.nodes", { nodeCount: nodes.length });
+      return jsonResponse({
+        version: Config.Defaults.Version,
+        exportTime: /* @__PURE__ */ new Date().toISOString(),
+        nodes,
+      });
+    },
     async saveOrImport(data, { action, ctx, kv, env }) {
       const nodesToSave = action === "save" ? [data] : data.nodes;
       const reservedNodeConflict = findReservedNodeNameConflict(nodesToSave, env);
@@ -12657,6 +12685,12 @@ function defineNodeActions(dependencies = {}, actions = {}) {
       });
     },
     async importFull(data, { env, ctx, kv }) {
+      // 形状先判：mergeMissingConfigFields 对非对象输入返回 {}，随后 sanitizeRuntimeConfig 会用
+      // 默认值补齐全部字段 —— 一个 {"config":[]} 的碎文件足以把整份全局设置刷回默认并回 200 "成功"。
+      if (data?.config !== void 0 && data?.config !== null && !isPlainObject(data.config))
+        return jsonError("INVALID_BACKUP_CONFIG", "备份中的 config 必须是对象，已拒绝导入", 400);
+      if (data?.nodes !== void 0 && data?.nodes !== null && !Array.isArray(data.nodes))
+        return jsonError("INVALID_BACKUP_NODES", "备份中的 nodes 必须是数组，已拒绝导入", 400);
       const reservedNodeConflict = findReservedNodeNameConflict(data?.nodes, env);
       if (reservedNodeConflict)
         return jsonError(
@@ -12739,16 +12773,36 @@ function defineNodeActions(dependencies = {}, actions = {}) {
             (await kernel.getAdminIndexUploadRecord(kv, importedIndexRevision))
           : null;
         const preparedMutations = [];
+        // 跳过的节点必须回报：静默丢弃非 http(s) 目标正是"导入成功但少了一个节点"的来源。
+        const skippedNodes = [];
         if (Array.isArray(data.nodes))
           for (const n of data.nodes) {
-            if (!n.name || (!n.target && !(Array.isArray(n.lines) && n.lines.length))) continue;
+            const rawName = String(n?.name || "")
+              .trim()
+              .slice(0, 64);
+            if (!n?.name || (!n.target && !(Array.isArray(n.lines) && n.lines.length))) {
+              skippedNodes.push({ name: rawName, reason: "invalid_target" });
+              continue;
+            }
             const name = String(n.name).toLowerCase();
             const existingNode = (await kv.get(`${kernel.PREFIX}${name}`, { type: "json" })) || {};
             const mutation = kernel.buildPreparedNodeMutation(n, existingNode, {
               previousName: name,
               nextName: name,
             });
-            if (!mutation) continue;
+            if (!mutation) {
+              skippedNodes.push({ name: rawName, reason: "invalid_target" });
+              continue;
+            }
+            // 与 saveOrImport 保持一致：超限节点在这里整批拒掉，不能先写进 KV 再变成"只能删不能改"的孤儿。
+            const resourceViolation = getNodeResourceLimitViolation(name, mutation.nextNode);
+            if (resourceViolation)
+              return jsonError(
+                "NODE_RESOURCE_LIMIT_EXCEEDED",
+                "节点配置超过 Worker 资源限制",
+                400,
+                resourceViolation,
+              );
             mutation.dnsPlan = kernel.buildHostPrefixDnsSyncPlan(
               mutation.previousName,
               mutation.previousNode,
@@ -12856,10 +12910,20 @@ function defineNodeActions(dependencies = {}, actions = {}) {
         }
         const config = savedConfig || (await getRuntimeConfig(env));
         const nodes = await CacheManager.getNodesList(env, ctx);
+        logAdminEvent("backup.import.full", {
+          requestedNodeCount: Array.isArray(data.nodes) ? data.nodes.length : 0,
+          importedNodeCount: preparedMutations.length,
+          skippedNodeCount: skippedNodes.length,
+          hasConfig: !!importedConfig,
+          hasAdminIndex: Boolean(importedIndexRecord),
+        });
         return jsonResponse({
           success: true,
           config,
           nodes,
+          importedNodeCount: preparedMutations.length,
+          skippedNodeCount: skippedNodes.length,
+          skippedNodes: skippedNodes.slice(0, 20),
           adminIndexUpload: importedIndexRecord
             ? {
                 revision: importedIndexRecord.revision,

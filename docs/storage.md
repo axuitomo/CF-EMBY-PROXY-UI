@@ -35,8 +35,9 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `restorePreviousConfig` | 读 + 写 | 把 `sys:config_theme_prev:v1` 写回 `sys:theme` | 恢复本身也留快照，所以可以再切回去；没有快照时返回 404 `CONFIG_PREV_SNAPSHOT_MISSING`，不动现有配置 |
 | `save` / `import` | 写 | 新增或批量导入节点 | 最终会写入 `node:*`，并同步更新 `sys:nodes_index:v1` |
 | `delete` | 删 | 删除节点 | 会删除对应 `node:*`，并重建节点索引 |
-| `exportSettings` / `exportConfig` | 读 | 导出全局设置或完整备份 | 数据来源就是当前 KV 中的配置与节点 |
-| `importFull` | 写 | 导入完整备份（节点 + 全局设置） | 会整体写回节点实体与全局配置 |
+| `exportSettings` / `exportConfig` | 读 | 导出全局设置、设置与密钥、完整备份 | 数据来源就是当前 KV 中的配置、节点与管理端 HTML 上传记录 |
+| `exportNodes` | 读 | 只导出节点（节点列表页「导出节点配置」） | 直接用 `loadAllNodeEntitiesFromKvStrict` 读 `node:*`，不经过完整备份的 12 MiB 回导闸门 |
+| `importFull` | 写 | 导入完整备份（节点 + 全局设置 + 管理端 HTML） | 节点按同名为 upsert（备份里没有的节点保留），设置整体替换，备份带的 HTML 写成新 revision 并切换 `sys:admin_active_index`；`config` / `nodes` 形状非法或任一节点超限则整批拒绝且不写 KV |
 | `getRuntimeStatus` | 读 | 读取运行状态 | 从 D1 `sys_status` 读取；未绑定或不可用时返回空运行状态，不读取旧 KV 状态键 |
 | `previewTidyData` | 读 | 预览 KV 或 D1 整理计划 | 返回分组计数、警告与短期签名计划令牌；实际执行前会再次核对计划 |
 | `tidyKvData` | 读 + 写 + 删 | 执行一键整理 KV 数据 | 重建索引、清洗 `sys:theme`、删除遗留缓存键和过期租约键 |
@@ -68,6 +69,7 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `设置 -> 任意设置分区` | 保存设置 | `saveConfig` | 将当前设置保存到 `sys:theme` |
 | `设置 -> 备份与恢复` | 导出全局设置 / 导出完整备份 | `exportSettings` / `exportConfig` | 从 KV 读取当前配置和节点，导出为 JSON |
 | `设置 -> 备份与恢复` | 导入全局设置 / 导入完整备份 | `importSettings` / `importFull` | 把 JSON 内容重新写回 KV |
+| `节点管理` | 导出节点配置 | `exportNodes` | 只读 `node:*` 导出节点，与完整备份的 12 MiB 回导上限无关 |
 | `设置 -> 备份与恢复`（高手模式） | `一键整理 KV 数据` | `tidyKvData` | 修复旧版本升级后的索引、脏配置和遗留缓存键问题 |
 | `设置 -> 备份与恢复`（高手模式） | `一键整理 D1 数据` | `tidyD1Data` | 先通过 `previewTidyData` 获取签名计划，再按硬预算清理日志、统计、缓存和过期状态 |
 | `DNS 编辑` | 刷新 / 保存 DNS | `listDnsRecords` / `saveDnsRecords` | 按当前站点整体同步 `CNAME` 或 `A / AAAA` 草稿，并维护 CNAME 历史 |

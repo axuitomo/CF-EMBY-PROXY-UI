@@ -1322,3 +1322,193 @@ test("config and DNS restoration still restores raw KV when DNS compensation fai
   );
   assert.equal(rawStateRestored, true);
 });
+
+test("full import rejects malformed config and nodes shapes instead of rewriting defaults", async () => {
+  const currentConfig = {
+    rateLimitRpm: 42,
+    upstreamTimeoutMs: 12345,
+    cfApiToken: "current-cf-secret",
+  };
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: currentConfig });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-full-import-shape" };
+  invalidateRuntimeConfigCache();
+  try {
+    // mergeMissingConfigFields 对非对象返回 {}，随后会被默认值补齐 —— 必须在写 KV 前拒绝。
+    for (const badConfig of [[], "not-an-object", 123, true]) {
+      const response = await adminActions.importFull({ config: badConfig }, { env, ctx: null, kv });
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error.code, "INVALID_BACKUP_CONFIG");
+      const stored = await kv.get(kernel.CONFIG_KEY, { type: "json" });
+      assert.equal(stored.rateLimitRpm, currentConfig.rateLimitRpm);
+      assert.equal(stored.upstreamTimeoutMs, currentConfig.upstreamTimeoutMs);
+    }
+
+    const nodesResponse = await adminActions.importFull(
+      { nodes: { alpha: { target: "https://origin.test" } } },
+      { env, ctx: null, kv },
+    );
+    assert.equal(nodesResponse.status, 400);
+    assert.equal((await nodesResponse.json()).error.code, "INVALID_BACKUP_NODES");
+    assert.equal(await kv.get(`${kernel.PREFIX}alpha`, { type: "json" }), null);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("full import rejects an oversized node before writing anything", async () => {
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 10 } });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-full-import-limits" };
+  const oversized = {
+    name: "huge",
+    target: "https://origin.test",
+    entryMode: "kv_route",
+    remark: "x".repeat(300 * 1024),
+  };
+  const healthy = { name: "healthy", target: "https://origin.test", entryMode: "kv_route" };
+  invalidateRuntimeConfigCache();
+  try {
+    const response = await adminActions.importFull(
+      { nodes: [healthy, oversized] },
+      { env, ctx: null, kv },
+    );
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "NODE_RESOURCE_LIMIT_EXCEEDED");
+    assert.equal(payload.error.details.nodeName, "huge");
+    // 整批拒绝：同批里的合法节点也不能先落盘。
+    assert.equal(await kv.get(`${kernel.PREFIX}healthy`, { type: "json" }), null);
+    assert.equal(await kv.get(`${kernel.PREFIX}huge`, { type: "json" }), null);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("full import reports skipped nodes instead of silently dropping them", async () => {
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 10 } });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-full-import-skipped" };
+  invalidateRuntimeConfigCache();
+  try {
+    const response = await adminActions.importFull(
+      {
+        nodes: [
+          { name: "kept", target: "https://origin.test", entryMode: "kv_route" },
+          { name: "javascript-target", target: "javascript:alert(1)", entryMode: "kv_route" },
+        ],
+      },
+      { env, ctx: null, kv },
+    );
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.importedNodeCount, 1);
+    assert.equal(payload.skippedNodeCount, 1);
+    assert.deepEqual(payload.skippedNodes, [
+      { name: "javascript-target", reason: "invalid_target" },
+    ]);
+    assert.ok(await kv.get(`${kernel.PREFIX}kept`, { type: "json" }));
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("node export works without the full backup size gate", async () => {
+  const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 10 } });
+  const env = { ENI_KV: kv, __CONFIG_CACHE_NAMESPACE: "config-kv-safety-node-export" };
+  const originalLoadAllNodeEntitiesFromKvStrict = kernel.loadAllNodeEntitiesFromKvStrict;
+  // 完整备份会因为 12 MiB 回导上限被拒，但节点本身必须还能导出。
+  kernel.loadAllNodeEntitiesFromKvStrict = async () => [
+    { name: "big", target: "https://origin.test", remark: "x".repeat(13 * 1024 * 1024) },
+  ];
+  invalidateRuntimeConfigCache();
+  try {
+    const fullResponse = await adminActions.exportConfig(
+      {},
+      { env, ctx: null, request: new Request("https://worker.test/admin") },
+    );
+    assert.equal(fullResponse.status, 413);
+
+    const response = await adminActions.exportNodes({}, { env, ctx: null });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.nodes.length, 1);
+    assert.equal(payload.nodes[0].name, "big");
+  } finally {
+    kernel.loadAllNodeEntitiesFromKvStrict = originalLoadAllNodeEntitiesFromKvStrict;
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("full backup roundtrip restores the uploaded admin HTML record", async () => {
+  const indexRecord = await buildAdminLocalIndexUploadRecord(
+    adminShellHtml("backup-shell"),
+    "index.html",
+  );
+  const sourceKv = createKv({
+    [kernel.CONFIG_KEY]: { rateLimitRpm: 30, indexUrl: indexRecord.sourceUrl },
+    [kernel.buildAdminIndexUploadKey(indexRecord.revision)]: indexRecord,
+    [`${kernel.PREFIX}alpha`]: { target: "https://origin.test", entryMode: "kv_route" },
+  });
+  const sourceEnv = {
+    ENI_KV: sourceKv.kv,
+    __CONFIG_CACHE_NAMESPACE: "config-kv-safety-roundtrip-src",
+  };
+  invalidateRuntimeConfigCache();
+  const exportResponse = await adminActions.exportConfig(
+    {},
+    { env: sourceEnv, ctx: null, request: new Request("https://worker.test/admin") },
+  );
+  assert.equal(exportResponse.status, 200);
+  const backup = await exportResponse.json();
+  assert.ok(backup.adminIndexUpload?.html, "完整备份必须带上管理端 HTML");
+
+  // 全新部署：目标 KV 里没有任何上传记录，只能靠备份里的 HTML 重建。
+  const targetKv = createKv({});
+  const targetEnv = {
+    ENI_KV: targetKv.kv,
+    __CONFIG_CACHE_NAMESPACE: "config-kv-safety-roundtrip-dst",
+  };
+  invalidateRuntimeConfigCache();
+  try {
+    const importResponse = await adminActions.importFull(
+      { config: backup.config, nodes: backup.nodes, adminIndexUpload: backup.adminIndexUpload },
+      { env: targetEnv, ctx: null, kv: targetKv.kv },
+    );
+    assert.equal(importResponse.status, 200);
+    const payload = await importResponse.json();
+    assert.equal(payload.adminIndexUpload?.revision, indexRecord.revision);
+    const stored = await targetKv.kv.get(kernel.buildAdminIndexUploadKey(indexRecord.revision), {
+      type: "json",
+    });
+    assert.equal(stored?.revision, indexRecord.revision);
+    assert.equal(
+      (await targetKv.kv.get(kernel.CONFIG_KEY, { type: "json" })).indexUrl,
+      indexRecord.sourceUrl,
+    );
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});
+
+test("full import without the referenced admin HTML fails closed", async () => {
+  const indexRecord = await buildAdminLocalIndexUploadRecord(
+    adminShellHtml("missing-shell"),
+    "index.html",
+  );
+  const { kv } = createKv({});
+  const env = {
+    ENI_KV: kv,
+    __CONFIG_CACHE_NAMESPACE: "config-kv-safety-full-import-index-missing",
+  };
+  invalidateRuntimeConfigCache();
+  try {
+    const response = await adminActions.importFull(
+      { config: { rateLimitRpm: 20, indexUrl: indexRecord.sourceUrl } },
+      { env, ctx: null, kv },
+    );
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, "ADMIN_INDEX_BACKUP_MISSING");
+    // fail closed：配置一个字都没写。
+    assert.equal(await kv.get(kernel.CONFIG_KEY, { type: "json" }), null);
+  } finally {
+    invalidateRuntimeConfigCache();
+  }
+});

@@ -37,7 +37,7 @@ function loadEnhancementTestHooks(documentOverrides = {}, windowOverrides = {}) 
   assert.notEqual(closureEnd, -1, "enhancement script must use the expected closure");
   const instrumentedScript =
     inlineScript.slice(0, closureEnd) +
-    "window.__enhancementTestHooks = { formatD1SchemaStatus, formatD1InitializationResult, formatD1RepairPlan, formatD1RepairError, patchSafetyContractMethods, patchTmdbNodeMethods, getDashboardMonthPeriodKey, isDashboardMonthlyTrafficCacheFresh, toggleDashboardTrafficPeriod, dashboardTrafficState, normalizeHeadProbeResult, formatHeadProbeResult, formatHeadProbeTitle, normalizeHeadProbePath, normalizeHostPrefixDnsHostname, isHostPrefixNodeLinkActive, runWithConcurrency, NODE_GET_PROBE_CONCURRENCY, readStoredUiSkin, readBootstrapUiSkin, normalizeUiSkin, applyUiSkin, resolveInitialUiThemeMode, applyUiThemeMode, swapUiTheme, patchThemeTransitionMethods, patchDnsIpPoolDeleteMethods, resolveCurrentUiSkin, syncServerUiSkin, persistUiSkinPreference, syncDialogAccessibility, handleDialogEscapeKey, withUiRequestTimeout, installAdminBootstrapFetchDedupe, patchLogPageCache, dashboardLayerState, readFreshSettingsBootstrap, updateAdminBootstrapCache, buildCurrentLogPageSignature, fetch: window.fetch };\n" +
+    "window.__enhancementTestHooks = { formatD1SchemaStatus, formatD1InitializationResult, formatD1RepairPlan, formatD1RepairError, patchSafetyContractMethods, patchTmdbNodeMethods, getDashboardMonthPeriodKey, isDashboardMonthlyTrafficCacheFresh, toggleDashboardTrafficPeriod, dashboardTrafficState, normalizeHeadProbeResult, formatHeadProbeResult, formatHeadProbeTitle, normalizeHeadProbePath, normalizeHostPrefixDnsHostname, isHostPrefixNodeLinkActive, runWithConcurrency, NODE_GET_PROBE_CONCURRENCY, readStoredUiSkin, readBootstrapUiSkin, normalizeUiSkin, applyUiSkin, resolveInitialUiThemeMode, applyUiThemeMode, swapUiTheme, patchThemeTransitionMethods, patchDnsIpPoolDeleteMethods, resolveCurrentUiSkin, syncServerUiSkin, persistUiSkinPreference, syncDialogAccessibility, handleDialogEscapeKey, withUiRequestTimeout, installAdminBootstrapFetchDedupe, patchLogPageCache, dashboardLayerState, readFreshSettingsBootstrap, updateAdminBootstrapCache, buildCurrentLogPageSignature, installAdminDownloadSink, buildFullBackupImportMessage, buildFullBackupImportedMessage, fetch: window.fetch };\n" +
     inlineScript.slice(closureEnd);
   const window = {
     addEventListener() {},
@@ -3134,4 +3134,234 @@ test("forced dashboard refresh unlocks itself even when a later load supersedes 
   calls.length = 0;
   await app.loadDashboard(null, { forceRefresh: true });
   assert.ok(calls.includes("getDashboardCoreStats"), "强制刷新不应被卡住的 pending 挡掉");
+});
+
+test("exports download from any view, not only after the nodes view mounted", async () => {
+  // 模板里唯一的自动下载锚点挂在懒挂载的 #view-nodes 上：没进过节点管理时，设置页与 DNS 页的
+  // 导出会拿到 200、Blob 也生成了，但没有元素可点 —— 用户看到的就是"导出没反应"。
+  const clicked = [];
+  const appended = [];
+  const fakeSink = {
+    id: "",
+    hidden: false,
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    click() {
+      clicked.push(this.attributes.href);
+    },
+  };
+  const documentState = { sink: null, bodyAppended: 0 };
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks({
+    getElementById(id) {
+      return id === "admin-download-sink" ? documentState.sink : null;
+    },
+    createElement() {
+      documentState.sink = fakeSink;
+      return fakeSink;
+    },
+    body: {
+      appendChild(node) {
+        documentState.bodyAppended += 1;
+        appended.push(node);
+      },
+    },
+  });
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall() {
+      return { nodes: [] };
+    },
+    triggerDownload(href, filename) {
+      throw new Error("模板实现应该被替换：" + href + filename);
+    },
+    downloadJson() {},
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  const result = await app.triggerDownload("blob:https://worker.test/abc", "backup.json");
+  assert.deepEqual(clicked, ["blob:https://worker.test/abc"]);
+  assert.equal(fakeSink.attributes.download, "backup.json");
+  assert.equal(documentState.bodyAppended, 1, "sink 只挂一次");
+  assert.equal(result.filename, "backup.json");
+
+  // 第二次导出复用同一个 sink，不再往 body 里塞锚点。
+  await app.triggerDownload("blob:https://worker.test/def", "nodes.json");
+  assert.deepEqual(clicked, ["blob:https://worker.test/abc", "blob:https://worker.test/def"]);
+  assert.equal(documentState.bodyAppended, 1);
+});
+
+test("node export calls the nodes-only action", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const downloads = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async apiCall(action) {
+      calls.push(action);
+      return { nodes: [{ name: "alpha" }] };
+    },
+    downloadJson(payload, filename) {
+      downloads.push({ payload, filename });
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await app.exportNodes();
+  assert.deepEqual(calls, ["exportNodes"]);
+  assert.deepEqual(downloads[0]?.payload, [{ name: "alpha" }]);
+  assert.match(downloads[0]?.filename || "", /^emby_nodes_\d+\.json$/);
+});
+
+test("full backup import forwards the uploaded admin HTML and asks first", async () => {
+  const { patchSafetyContractMethods, buildFullBackupImportMessage } = loadEnhancementTestHooks();
+  const calls = [];
+  const messages = [];
+  const confirmations = [];
+  const backup = {
+    version: "20.3",
+    config: { uiRadiusPx: 12 },
+    nodes: [{ name: "alpha", target: "https://origin.test" }],
+    adminIndexUpload: { html: "<!doctype html>", revision: "a".repeat(64), fileName: "index.html" },
+    containsSecrets: false,
+  };
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async readJsonFileFromInputEvent() {
+      return backup;
+    },
+    async askConfirm(message, options) {
+      confirmations.push({ message, options });
+      return true;
+    },
+    async apiCall(action, payload) {
+      calls.push({ action, payload });
+      return {
+        success: true,
+        importedNodeCount: 1,
+        skippedNodeCount: 0,
+        nodes: [],
+        adminIndexUpload: { revision: "a".repeat(64) },
+      };
+    },
+    applyAdminRevisions() {},
+    applyRuntimeConfig() {},
+    applyNodesState() {},
+    patchAdminBootstrapCache() {},
+    async loadSettings() {},
+    showMessage(message, options) {
+      messages.push({ message, options });
+    },
+  };
+  patchSafetyContractMethods(app);
+
+  await app.importFull({ target: { files: [{}] } });
+
+  assert.equal(confirmations.length, 1, "完整导入必须先确认");
+  assert.match(confirmations[0]?.message || "", /节点 1 个/);
+  assert.match(confirmations[0]?.message || "", /不会删除/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].action, "importFull");
+  // 少了这一块，全新部署的 KV 里没有对应 revision，整次还原会被拒绝。
+  assert.equal(calls[0].payload.adminIndexUpload?.revision, "a".repeat(64));
+  assert.deepEqual(calls[0].payload.nodes, backup.nodes);
+  assert.deepEqual(calls[0].payload.config, backup.config);
+  assert.equal(messages[0]?.options?.tone, "success");
+  assert.match(messages[0]?.message || "", /节点：已导入 1 个/);
+
+  const preview = buildFullBackupImportMessage({
+    config: { uiRadiusPx: 12 },
+    nodes: [],
+    adminIndexUpload: null,
+    containsSecrets: true,
+  });
+  assert.match(preview, /节点：备份里没有/);
+  assert.match(preview, /明文密钥/);
+});
+
+test("cancelling a full backup import sends nothing", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async readJsonFileFromInputEvent() {
+      return { config: { uiRadiusPx: 12 }, nodes: [] };
+    },
+    async askConfirm() {
+      return false;
+    },
+    async apiCall(action) {
+      calls.push(action);
+      return { success: true };
+    },
+    showMessage() {},
+  };
+  patchSafetyContractMethods(app);
+
+  await app.importFull({ target: { files: [{}] } });
+  assert.deepEqual(calls, []);
+});
+
+test("an empty or file-shaped full backup is rejected locally", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const messages = [];
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async readJsonFileFromInputEvent() {
+      return { version: "20.3", nodes: [], config: "not-an-object" };
+    },
+    async askConfirm() {
+      return true;
+    },
+    async apiCall(action) {
+      calls.push(action);
+      return { success: true };
+    },
+    showMessage(message, options) {
+      messages.push({ message, options });
+    },
+  };
+  patchSafetyContractMethods(app);
+
+  await app.importFull({ target: { files: [{}] } });
+  assert.deepEqual(calls, []);
+  assert.equal(messages[0]?.options?.tone, "warning");
+  assert.match(messages[0]?.message || "", /无效的备份文件/);
+});
+
+test("an oversized full backup is rejected before it is read or uploaded", async () => {
+  const { patchSafetyContractMethods } = loadEnhancementTestHooks();
+  const calls = [];
+  const messages = [];
+  let read = 0;
+  const app = {
+    runtimeConfig: hydratedConfig(),
+    async readJsonFileFromInputEvent() {
+      read += 1;
+      return { config: { uiRadiusPx: 12 } };
+    },
+    async askConfirm() {
+      return true;
+    },
+    async apiCall(action) {
+      calls.push(action);
+      return { success: true };
+    },
+    showMessage(message, options) {
+      messages.push({ message, options });
+    },
+  };
+  patchSafetyContractMethods(app);
+
+  const input = { files: [{ size: 13 * 1024 * 1024 }], value: "C:\fake\big.json" };
+  await app.importFull({ target: input });
+  assert.equal(read, 0, "超限文件不应该被读进内存");
+  assert.deepEqual(calls, []);
+  assert.equal(input.value, "", "清空 input 才能重选同一个文件");
+  assert.equal(messages[0]?.options?.tone, "error");
+  assert.match(messages[0]?.message || "", /超过导入上限（12 MiB）/);
 });

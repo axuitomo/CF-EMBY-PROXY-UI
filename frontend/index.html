@@ -7377,6 +7377,110 @@ html[data-theme-switching] *::after{transition:none !important}
       callAction(action, { ...requestPayload, confirmMassReset: true })
     );
   }
+  // 模板里只有一个隐藏的自动下载锚点，它挂在懒挂载的 #view-nodes 里。没进过「节点管理」的页面
+  // 会话中，设置页与 DNS 页的导出会拿到 200、Blob 也生成了，但没有元素可以点，浏览器什么都不做
+  // —— 界面上就是"导出没反应"。这里把下载出口换成与视图无关的 body 级 sink，并且不再写模板的
+  // downloadHref，所以 v-auto-download 不会重复触发同一次下载。
+  const DOWNLOAD_URL_REVOKE_DELAY_MS = 1000;
+  function installAdminDownloadSink(app) {
+    if (!app || typeof app.triggerDownload !== 'function') return;
+    const resolveSink = () => {
+      let sink = document.getElementById('admin-download-sink');
+      if (!sink) {
+        sink = document.createElement('a');
+        sink.id = 'admin-download-sink';
+        sink.hidden = true;
+        sink.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(sink);
+      }
+      return sink;
+    };
+    app.triggerDownload = function triggerDownloadFromAnyView(href, filename) {
+      const url = String(href || '');
+      const name = String(filename || '');
+      if (url) {
+        const sink = resolveSink();
+        sink.setAttribute('href', url);
+        sink.setAttribute('download', name);
+        sink.click();
+        window.setTimeout(() => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {}
+        }, DOWNLOAD_URL_REVOKE_DELAY_MS);
+      }
+      return Promise.resolve({ href: url, filename: name });
+    };
+  }
+
+  // 与服务端 ADMIN_FULL_BACKUP_MAX_REQUEST_BYTES 对齐（12 MiB 减去请求体余量）：超过这个值 Worker 只会回 413。
+  const FULL_BACKUP_IMPORT_MAX_BYTES = 12517376;
+  function isPlainBackupObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function buildFullBackupImportMessage({ config, nodes, adminIndexUpload, containsSecrets }) {
+    const lines = [];
+    lines.push(
+      nodes.length
+        ? '• 节点 ' + nodes.length + ' 个：同名节点会被覆盖，备份里没有的节点保留（不会删除）'
+        : '• 节点：备份里没有，节点列表保持不变'
+    );
+    lines.push(
+      config
+        ? '• 全局设置 ' + Object.keys(config).length + ' 个字段：备份未包含的字段回退为默认值（密钥与管理端皮肤保留当前值）'
+        : '• 全局设置：备份里没有，配置保持不变'
+    );
+    if (adminIndexUpload) lines.push('• 管理端 HTML：包含，导入后立即启用');
+    if (containsSecrets) lines.push('• 密钥：这份备份含明文密钥');
+    lines.push('');
+    lines.push('导入会立即覆盖当前数据；写入失败会整体回滚。');
+    return lines.join('\n');
+  }
+
+  function buildFullBackupImportedMessage(result) {
+    const lines = [];
+    const imported = Number(result?.importedNodeCount) || 0;
+    const skipped = Number(result?.skippedNodeCount) || 0;
+    lines.push('完整数据导入成功，已立即生效。');
+    lines.push('节点：已导入 ' + imported + ' 个' + (skipped > 0 ? '，跳过 ' + skipped + ' 个' : ''));
+    if (skipped > 0) {
+      const names = (Array.isArray(result?.skippedNodes) ? result.skippedNodes : [])
+        .map((item) => String(item?.name || '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      lines.push('跳过原因：目标不是有效的 http/https 地址' + (names.length ? '（' + names.join('、') + (skipped > names.length ? ' 等' : '') + '）' : ''));
+    }
+    if (result?.adminIndexUpload?.revision) lines.push('管理端 HTML：已恢复到备份中的版本');
+    return lines.join('\n');
+  }
+
+  async function applyFullBackupImportResult(app, result) {
+    if (result?.revisions && typeof app.applyAdminRevisions === 'function') app.applyAdminRevisions(result.revisions);
+    if (result?.config && isPlainBackupObject(result.config) && typeof app.applyRuntimeConfig === 'function') app.applyRuntimeConfig(result.config);
+    if (Array.isArray(result?.nodes) && typeof app.applyNodesState === 'function') app.applyNodesState(result.nodes);
+    if (typeof app.patchAdminBootstrapCache === 'function') {
+      app.patchAdminBootstrapCache({
+        config: app.runtimeConfig,
+        nodes: app.nodes,
+        hostDomain: app.hostDomain,
+        revisions: app.adminRevisions
+      });
+    }
+    // 面板刷新失败不该把"导入已成功"报成失败，所以单独兜住。
+    try {
+      await app.loadSettings?.();
+    } catch (error) {
+      console.error('importFull refresh failed', error);
+      if (typeof app.showMessage === 'function') {
+        app.showMessage('备份已导入，但设置面板刷新失败：' + (error?.message || '未知错误') + '。刷新页面即可看到最新数据。', {
+          tone: 'warning',
+          modal: true
+        });
+      }
+    }
+  }
+
 
 
   function patchSafetyContractMethods(app) {
@@ -8093,9 +8197,11 @@ html[data-theme-switching] *::after{transition:none !important}
       }
     };
 
+    installAdminDownloadSink(app);
+
     app.exportNodes = async function exportNodes() {
       try {
-        const result = await this.apiCall('exportConfig');
+        const result = await this.apiCall('exportNodes');
         this.downloadJson(Array.isArray(result?.nodes) ? result.nodes : [], 'emby_nodes_' + Date.now() + '.json');
       } catch (error) {
         console.error('exportNodes failed', error);
@@ -8128,6 +8234,68 @@ html[data-theme-switching] *::after{transition:none !important}
       } catch (error) {
         console.error('exportSettingsWithSecrets failed', error);
         this.showMessage('设置与密钥导出失败: ' + (error?.message || '未知错误'), { tone: 'error', modal: true });
+      }
+    };
+
+    // 模板里的 importFull 只转发 {config, nodes}，把备份里的 adminIndexUpload（管理端 HTML）丢了。
+    // config.indexUrl 引用的就是这个 revision，丢了它、目标 KV 又没这条记录时，Worker 会用
+    // ADMIN_INDEX_BACKUP_MISSING 拒掉整次还原 —— 完整备份在全新部署上永远导不进去。
+    app.importFull = async function importFullFromBackupFile(event) {
+      const selectedFile = event?.target?.files?.[0];
+      if (selectedFile && selectedFile.size > FULL_BACKUP_IMPORT_MAX_BYTES) {
+        event.target.value = '';
+        this.showMessage(
+          '完整备份超过导入上限（' + Math.round(FULL_BACKUP_IMPORT_MAX_BYTES / (1024 * 1024)) + ' MiB）：当前文件 ' +
+            formatWorkerHtmlUploadBytes(selectedFile.size) + '。可分别导出设置与节点后分次导入。',
+          { tone: 'error', modal: true }
+        );
+        return;
+      }
+      let backup = null;
+      try {
+        backup = await this.readJsonFileFromInputEvent?.(event);
+      } catch (error) {
+        console.error('importFull read failed', error);
+        this.showMessage(
+          error instanceof SyntaxError ? '文件解析失败：不是有效的 JSON' : '读取备份文件失败: ' + (error?.message || '未知错误'),
+          { tone: 'error', modal: true }
+        );
+        return;
+      }
+      if (!backup) return;
+      const config = isPlainBackupObject(backup?.config) ? backup.config : null;
+      const nodes = Array.isArray(backup?.nodes) ? backup.nodes : [];
+      if (!config && nodes.length === 0) {
+        this.showMessage('无效的备份文件：需要 config（全局设置）或 nodes（节点）至少一项。', { tone: 'warning', modal: true });
+        return;
+      }
+      const adminIndexUpload = backup?.adminIndexUpload && typeof backup.adminIndexUpload.html === 'string' && backup.adminIndexUpload.html
+        ? backup.adminIndexUpload
+        : null;
+      const accepted = await this.askConfirm(
+        buildFullBackupImportMessage({ config, nodes, adminIndexUpload, containsSecrets: backup?.containsSecrets === true }),
+        { title: '导入完整备份', tone: 'warning', confirmText: '覆盖导入' }
+      );
+      if (!accepted) return;
+      try {
+        const result = await this.apiCall('importFull', {
+          config: config || undefined,
+          nodes,
+          adminIndexUpload
+        });
+        await applyFullBackupImportResult(this, result);
+        this.showMessage(buildFullBackupImportedMessage(result), { title: '导入完整备份', tone: 'success', modal: true });
+      } catch (error) {
+        console.error('importFull failed', error);
+        const code = String(error?.code || '');
+        const message = code === 'ADMIN_INDEX_BACKUP_MISSING'
+          ? '导入被拒绝：这份备份的配置引用了本地上传的管理端 HTML，但备份文件里没有它，当前 KV 里也查不到同一版本。\n\n先用「Worker 和 HTML 更新」上传同一份 index.html 再导入，或用当前版本的面板重新导出一次完整备份。'
+          : code === 'ADMIN_INDEX_BACKUP_REVISION_MISMATCH'
+            ? '导入被拒绝：备份里的 index.html 与配置引用的版本不一致，请用同一份文件重新导出备份。'
+            : code === 'INVALID_BACKUP_CONFIG' || code === 'INVALID_BACKUP_NODES'
+              ? '导入被拒绝：' + (error?.message || '备份文件格式不正确')
+              : '完整数据导入失败: ' + (error?.message || '未知错误');
+        this.showMessage(message, { tone: 'error', modal: true });
       }
     };
 
