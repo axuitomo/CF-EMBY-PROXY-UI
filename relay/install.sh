@@ -9,12 +9,18 @@ RELAY_ID="${RELAY_ID:-}"
 WORKER_URL="${WORKER_URL:-}"
 RELAY_DOMAIN="${RELAY_DOMAIN:-}"
 BINARY="${BINARY:-}"
+BUILD_WORKDIR=""
 BIN=/usr/local/bin/emby-relay
 CFG=/etc/emby-relay/config.json
 UNIT=/etc/systemd/system/emby-relay.service
 SECRET_FILE=/root/emby-relay-bootstrap-secret
 DOMAIN_FILE=/etc/emby-relay/certificate-domain
-TOKEN_FILE=/root/.secrets/certbot/cloudflare.ini
+CERT_DOMAINS_FILE=/etc/emby-relay/certificate-domains
+PUBLIC_PORT_FILE=/etc/emby-relay/public-port
+CERT_MODE_FILE=/etc/emby-relay/certificate-mode
+TOKEN_FILE=/root/.secrets/certbot/emby-relay-cloudflare.ini
+LEGACY_TOKEN_FILE=/root/.secrets/certbot/cloudflare.ini
+HOOK=/etc/letsencrypt/renewal-hooks/deploy/emby-relay-push
 
 fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
 prompt() {
@@ -27,121 +33,166 @@ prompt() {
     printf -v "$name" '%s' "$value"
   fi
 }
+prompt_yes_no() {
+  local name="$1" label="$2" default="$3" answer
+  prompt answer "$label (y/n)" "$default"
+  case "${answer,,}" in
+    y|yes) printf -v "$name" y ;;
+    n|no) printf -v "$name" n ;;
+    *) fail "请输入 y 或 n" ;;
+  esac
+}
+require_root() { [ "$(id -u)" -eq 0 ] || fail "请用 sudo 运行此脚本"; }
 
-[ "$(id -u)" -eq 0 ] || fail "请用 sudo 运行，例如：curl ... | sudo bash"
-command -v systemctl >/dev/null 2>&1 || fail "需要使用 systemd 的 Debian/Ubuntu VPS"
-command -v apt-get >/dev/null 2>&1 || fail "仅支持 Debian/Ubuntu VPS（需要 apt-get）"
-[[ "$SOURCE_REF" =~ ^[A-Za-z0-9._/-]+$ && "$SOURCE_REF" != *..* ]] || fail "无效的源码版本"
-[ ! -s "$CFG" ] || fail "检测到已有中继配置；为避免覆盖密钥，请勿重复运行一键安装脚本"
-
-[ -n "$WORKER_URL" ] || prompt WORKER_URL "Worker HTTPS 根地址（不要带 /admin）"
-[ -n "$RELAY_DOMAIN" ] || prompt RELAY_DOMAIN "中继域名（例如 relay.example.com）"
-[ -n "$RELAY_PORT" ] || prompt RELAY_PORT "VPS 内部监听端口" 2087
-[ -n "$PUBLIC_PORT" ] || prompt PUBLIC_PORT "外网访问端口；NAT 映射时填服务商给的公网端口" 2087
-[[ "$WORKER_URL" =~ ^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?/?$ ]] || fail "Worker 地址必须是 HTTPS 根地址，不能带路径、账号或参数"
-if [[ "$WORKER_URL" =~ :([0-9]{1,5})/?$ ]]; then
-  WORKER_PORT=$((10#${BASH_REMATCH[1]}))
-  (( WORKER_PORT >= 1 && WORKER_PORT <= 65535 )) || fail "Worker URL 端口超出范围"
-fi
-RELAY_DOMAIN="${RELAY_DOMAIN,,}"
-[[ "$RELAY_DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ && "$RELAY_DOMAIN" == *.* && "$RELAY_DOMAIN" != *..* && "$RELAY_DOMAIN" != *.-* && "$RELAY_DOMAIN" != *-.* ]] || fail "域名格式不正确"
-for port in "$RELAY_PORT" "$PUBLIC_PORT"; do
-  [[ "$port" =~ ^[0-9]+$ ]] || fail "端口必须是 1 到 65535 之间的数字"
-  (( 10#$port >= 1 && 10#$port <= 65535 )) || fail "端口必须是 1 到 65535 之间的数字"
-done
-
-if [ -z "$RELAY_ID" ]; then
-  RELAY_ID="relay-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-fi
-[[ "$RELAY_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || fail "Relay ID 格式无效"
-
-printf '\n证书申请方式：\n  1) DNS-01（推荐，不需要开放 80 端口）\n  2) HTTP-01（需要公网 TCP 80）\n'
-prompt CERT_MODE "选择 1 或 2" 1
-[[ "$CERT_MODE" == 1 || "$CERT_MODE" == 2 ]] || fail "请选择 1 或 2"
-if [ "$CERT_MODE" = 1 ]; then
-  read -r -s -p "Cloudflare DNS API Token（输入不回显）: " CF_TOKEN </dev/tty
-  printf '\n'
-  [ -n "$CF_TOKEN" ] || fail "DNS API Token 不能为空"
-fi
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64) GOARCH=amd64 ;;
-  aarch64|arm64) GOARCH=arm64 ;;
-  *) fail "不支持的 VPS CPU 架构：$ARCH" ;;
-esac
-
-WORKDIR="$(mktemp -d /tmp/emby-relay-install.XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
-
-printf '\n[1/6] 安装所需工具并准备 Go 编译器（%s）...\n' "$GOARCH"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq ca-certificates curl python3 tar certbot >/dev/null
-if [ "$CERT_MODE" = 1 ]; then
-  apt-get install -y -qq python3-certbot-dns-cloudflare >/dev/null
-fi
-
-if [ -n "$BINARY" ]; then
-  [ -x "$BINARY" ] || fail "指定的中继程序不存在或不可执行"
-  BUILT_BINARY="$BINARY"
-else
-  curl -fsSL 'https://go.dev/dl/?mode=json' -o "$WORKDIR/go-releases.json"
-  read -r GO_VERSION GO_FILENAME GO_SHA256 < <(python3 - "$WORKDIR/go-releases.json" "$GOARCH" <<'PY'
+load_config() {
+  [ -s "$CFG" ] || return 1
+  local values
+  values="$(python3 - "$CFG" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
-    releases = json.load(f)
-for release in releases:
-    if not release.get("stable"):
-        continue
-    for item in release.get("files", []):
-        if item.get("os") == "linux" and item.get("arch") == sys.argv[2] and item.get("kind") == "archive" and item.get("filename", "").endswith(".tar.gz"):
-            print(release["version"], item["filename"], item["sha256"])
-            raise SystemExit(0)
-raise SystemExit("No stable Go archive found for this VPS")
+    c = json.load(f)
+if not isinstance(c, dict) or not isinstance(c.get("secret"), str) or not c["secret"]:
+    raise SystemExit("Existing relay config has no secret; refusing to replace it")
+def gib(value, default):
+    return (int(c.get(value, default)) + (1 << 30) - 1) // (1 << 30)
+print("\t".join(map(str, (
+    c.get("relay_id", ""), c.get("port", 2087), c.get("control_url", ""),
+    gib("monthly_limit_bytes", 9895604649984),
+    gib("per_ip_daily_limit_bytes", 32212254720),
+    c.get("per_ip_max_conns", 8), "y" if c.get("allow_cf_ips_only", True) else "n"
+))))
 PY
-  )
-  printf '下载并校验 %s...\n' "$GO_VERSION"
-  curl -fsSL "https://go.dev/dl/$GO_FILENAME" -o "$WORKDIR/go.tar.gz"
-  printf '%s  %s\n' "$GO_SHA256" "$WORKDIR/go.tar.gz" | sha256sum -c - >/dev/null
-  tar -xzf "$WORKDIR/go.tar.gz" -C "$WORKDIR"
+  )" || fail "无法安全读取现有中继配置"
+  IFS=$'\t' read -r RELAY_ID RELAY_PORT WORKER_URL MONTHLY_LIMIT_GIB DAILY_LIMIT_GIB MAX_CONNS ALLOW_CF_ONLY <<< "$values"
+  [ -s "$DOMAIN_FILE" ] && RELAY_DOMAIN="$(<"$DOMAIN_FILE")"
+  [ -s "$PUBLIC_PORT_FILE" ] && PUBLIC_PORT="$(<"$PUBLIC_PORT_FILE")"
+}
 
-  printf '[2/6] 下载项目源码并编译...\n'
-  curl -fsSL "$REPO/archive/refs/heads/$SOURCE_REF.tar.gz" -o "$WORKDIR/source.tar.gz"
-  mkdir "$WORKDIR/source"
-  tar -xzf "$WORKDIR/source.tar.gz" --strip-components=1 -C "$WORKDIR/source"
-  [ -f "$WORKDIR/source/relay/go.mod" ] || fail "下载的源码中没有 relay/go.mod"
-  CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" GOTOOLCHAIN=local \
-    "$WORKDIR/go/bin/go" -C "$WORKDIR/source/relay" build -trimpath -ldflags='-s -w' -o "$WORKDIR/emby-relay" .
-  BUILT_BINARY="$WORKDIR/emby-relay"
-fi
+validate_settings() {
+  [[ "$RELAY_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || fail "Relay ID 必须是 1-64 个 ASCII 字母、数字、- 或 _"
+  [[ "$WORKER_URL" =~ ^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?/?$ ]] || fail "Worker 地址必须是 HTTPS 根地址，不能带路径、账号或参数"
+  if [[ "$WORKER_URL" =~ :([0-9]{1,5})/?$ ]]; then
+    local worker_port=$((10#${BASH_REMATCH[1]}))
+    (( worker_port >= 1 && worker_port <= 65535 )) || fail "Worker URL 端口超出范围"
+  fi
+  for value in "$RELAY_PORT" "$PUBLIC_PORT"; do
+    [[ "$value" =~ ^[0-9]{1,5}$ ]] || fail "端口必须是 1 到 65535 之间的数字"
+    (( 10#$value >= 1 && 10#$value <= 65535 )) || fail "端口必须是 1 到 65535 之间的数字"
+  done
+  [[ "$MONTHLY_LIMIT_GIB" =~ ^[0-9]{1,8}$ ]] || fail "月流量上限须为 0-16777215 GiB，0 表示不限"
+  (( 10#$MONTHLY_LIMIT_GIB <= 16777215 )) || fail "月流量上限须为 0-16777215 GiB，0 表示不限"
+  [[ "$DAILY_LIMIT_GIB" =~ ^[0-9]{1,8}$ ]] || fail "单 IP 日流量上限须为 0-16777215 GiB，0 表示不限"
+  (( 10#$DAILY_LIMIT_GIB <= 16777215 )) || fail "单 IP 日流量上限须为 0-16777215 GiB，0 表示不限"
+  [[ "$MAX_CONNS" =~ ^[0-9]{1,5}$ ]] || fail "单 IP 并发连接数须为 0-10000，0 表示不限"
+  (( 10#$MAX_CONNS <= 10000 )) || fail "单 IP 并发连接数须为 0-10000，0 表示不限"
+  [[ "$ALLOW_CF_ONLY" == y || "$ALLOW_CF_ONLY" == n ]] || fail "Cloudflare 来源限制请选择 y 或 n"
+}
 
-printf '[3/6] 安装中继服务...\n'
-if ! id -u emby-relay >/dev/null 2>&1; then
-  useradd --system --home-dir /var/lib/emby-relay --create-home --shell /usr/sbin/nologin emby-relay
-fi
-install -d -o emby-relay -g emby-relay -m 0750 /etc/emby-relay /var/lib/emby-relay
-install -o root -g root -m 0755 "$BUILT_BINARY" "$BIN"
-printf '%s\n' "$RELAY_DOMAIN" > "$DOMAIN_FILE"
-chown root:root "$DOMAIN_FILE"
-chmod 0644 "$DOMAIN_FILE"
+validate_domain() {
+  RELAY_DOMAIN="${RELAY_DOMAIN,,}"
+  [[ "$RELAY_DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ && "$RELAY_DOMAIN" == *.* && "$RELAY_DOMAIN" != *..* && "$RELAY_DOMAIN" != *.-* && "$RELAY_DOMAIN" != *-.* ]] || fail "中继域名格式不正确"
+}
 
-if [ ! -s "$CFG" ]; then
-  SECRET="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-  printf '{\n  "port": %s,\n  "relay_id": "%s",\n  "control_url": "%s",\n  "secret": "%s",\n  "verify_upstream_tls": true,\n  "monthly_limit_bytes": 9895604649984,\n  "per_ip_daily_limit_bytes": 32212254720,\n  "per_ip_max_conns": 8,\n  "allow_cf_ips_only": true\n}\n' \
-    "$RELAY_PORT" "$RELAY_ID" "$WORKER_URL" "$SECRET" > "$WORKDIR/config.json"
-  install -o emby-relay -g emby-relay -m 0600 "$WORKDIR/config.json" "$CFG"
-  printf '%s\n' "$SECRET" > "$SECRET_FILE"
-  chown root:root "$SECRET_FILE"
-  chmod 0600 "$SECRET_FILE"
-else
-  grep -q '"relay_id"' "$CFG" || fail "已有配置缺少 relay_id；为避免覆盖，停止安装"
-  grep -q '"control_url"' "$CFG" || fail "已有配置缺少 control_url；为避免覆盖，停止安装"
-  chown emby-relay:emby-relay "$CFG"
-  chmod 0600 "$CFG"
-fi
+collect_settings() {
+  prompt RELAY_ID "Relay ID" "${RELAY_ID:-relay-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
+  prompt WORKER_URL "Worker HTTPS 根地址（不要带 /admin）" "${WORKER_URL:-}"
+  prompt RELAY_PORT "VPS 内部监听端口" "${RELAY_PORT:-2087}"
+  prompt MONTHLY_LIMIT_GIB "月出站流量上限 GiB（0=不限）" "${MONTHLY_LIMIT_GIB:-9216}"
+  prompt DAILY_LIMIT_GIB "单 IP 每日流量上限 GiB（0=不限）" "${DAILY_LIMIT_GIB:-30}"
+  prompt MAX_CONNS "单 IP 最大并发连接数（0=不限）" "${MAX_CONNS:-8}"
+  prompt_yes_no ALLOW_CF_ONLY "只接受 Cloudflare 回源 IP" "${ALLOW_CF_ONLY:-y}"
+}
 
-cat > "$UNIT" <<'EOF'
+write_config() {
+  RELAY_ID="$RELAY_ID" WORKER_URL="$WORKER_URL" RELAY_PORT="$RELAY_PORT" \
+  MONTHLY_LIMIT_GIB="$MONTHLY_LIMIT_GIB" DAILY_LIMIT_GIB="$DAILY_LIMIT_GIB" \
+  MAX_CONNS="$MAX_CONNS" ALLOW_CF_ONLY="$ALLOW_CF_ONLY" \
+    python3 - "$CFG" "$SECRET_FILE" <<'PY'
+import json, os, pwd, secrets, sys, tempfile
+config_path, secret_path = sys.argv[1:]
+if os.path.exists(config_path):
+    with open(config_path, encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict) or not isinstance(config.get("secret"), str) or not config["secret"]:
+        raise SystemExit("Existing relay config has no secret; refusing to replace it")
+else:
+    config = {"secret": secrets.token_hex(32)}
+
+def quota(name):
+    value = int(os.environ[name])
+    if value < 0 or value > 16777215:
+        raise SystemExit(f"invalid {name}")
+    return value * (1 << 30)
+
+config.update({
+    "relay_id": os.environ["RELAY_ID"],
+    "control_url": os.environ["WORKER_URL"],
+    "port": int(os.environ["RELAY_PORT"]),
+    "monthly_limit_bytes": quota("MONTHLY_LIMIT_GIB"),
+    "per_ip_daily_limit_bytes": quota("DAILY_LIMIT_GIB"),
+    "per_ip_max_conns": int(os.environ["MAX_CONNS"]),
+    "allow_cf_ips_only": os.environ["ALLOW_CF_ONLY"] == "y",
+    "verify_upstream_tls": True,
+    "allow_private_targets": False,
+})
+user = pwd.getpwnam("emby-relay")
+fd, temp_path = tempfile.mkstemp(prefix=".config.", dir=os.path.dirname(config_path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chown(temp_path, user.pw_uid, user.pw_gid)
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, config_path)
+finally:
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+fd, temp_path = tempfile.mkstemp(prefix=".secret.", dir=os.path.dirname(secret_path))
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(config["secret"] + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, secret_path)
+finally:
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+PY
+}
+
+
+
+
+ensure_python() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y -qq python3 >/dev/null
+  fi
+}
+
+install_packages() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq ca-certificates curl openssl python3 tar certbot >/dev/null
+}
+
+write_metadata() {
+  if [ -s "$DOMAIN_FILE" ]; then
+    local previous_domain
+    previous_domain="$(<"$DOMAIN_FILE")"
+    grep -Fxq "$previous_domain" "$CERT_DOMAINS_FILE" 2>/dev/null || printf '%s\n' "$previous_domain" >> "$CERT_DOMAINS_FILE"
+  fi
+  grep -Fxq "$RELAY_DOMAIN" "$CERT_DOMAINS_FILE" 2>/dev/null || printf '%s\n' "$RELAY_DOMAIN" >> "$CERT_DOMAINS_FILE"
+  printf '%s\n' "$RELAY_DOMAIN" > "$DOMAIN_FILE"
+  printf '%s\n' "$PUBLIC_PORT" > "$PUBLIC_PORT_FILE"
+  chmod 0644 "$DOMAIN_FILE" "$CERT_DOMAINS_FILE" "$PUBLIC_PORT_FILE"
+}
+
+write_service() {
+  cat > "$UNIT" <<'EOF'
 [Unit]
 Description=Emby VPS relay
 After=network-online.target
@@ -167,28 +218,105 @@ ReadWritePaths=/etc/emby-relay /var/lib/emby-relay
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable emby-relay >/dev/null
-systemctl restart emby-relay 2>/dev/null || systemctl start emby-relay
+  systemctl daemon-reload
+  systemctl enable emby-relay >/dev/null
+  systemctl restart emby-relay 2>/dev/null || systemctl start emby-relay
+}
 
-printf '[4/6] 申请 %s 的 TLS 证书...\n' "$RELAY_DOMAIN"
-if [ "$CERT_MODE" = 1 ]; then
-  install -d -m 0700 /root/.secrets/certbot
-  printf 'dns_cloudflare_api_token = %s\n' "$CF_TOKEN" > "$TOKEN_FILE"
-  chown root:root "$TOKEN_FILE"
-  chmod 0600 "$TOKEN_FILE"
-  unset CF_TOKEN
-  certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
-    --cert-name "$RELAY_DOMAIN" --dns-cloudflare \
-    --dns-cloudflare-credentials "$TOKEN_FILE" -d "$RELAY_DOMAIN"
-else
-  certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
-    --cert-name "$RELAY_DOMAIN" --standalone -d "$RELAY_DOMAIN"
-fi
+build_binary() {
+  if [ -n "$BINARY" ]; then
+    [ -x "$BINARY" ] || fail "指定的中继程序不存在或不可执行"
+    BUILT_BINARY="$BINARY"
+    return
+  fi
+  [[ "$SOURCE_REF" =~ ^[A-Za-z0-9._/-]+$ && "$SOURCE_REF" != *..* ]] || fail "无效的源码版本"
+  local arch workdir version filename checksum
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) fail "不支持的 VPS CPU 架构：$(uname -m)" ;;
+  esac
+  BUILD_WORKDIR="$(mktemp -d /tmp/emby-relay-build.XXXXXX)"
+  workdir="$BUILD_WORKDIR"
+  trap 'rm -rf "${BUILD_WORKDIR:-}"' EXIT
+  curl -fsSL 'https://go.dev/dl/?mode=json' -o "$workdir/releases.json"
+  read -r version filename checksum < <(python3 - "$workdir/releases.json" "$arch" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    releases = json.load(f)
+for release in releases:
+    if release.get("stable"):
+        for item in release.get("files", []):
+            if item.get("os") == "linux" and item.get("arch") == sys.argv[2] and item.get("kind") == "archive" and item.get("filename", "").endswith(".tar.gz"):
+                print(release["version"], item["filename"], item["sha256"])
+                raise SystemExit(0)
+raise SystemExit("No stable Go archive found for this VPS")
+PY
+  )
+  printf '正在下载并校验 Go %s（linux/%s）...\n' "$version" "$arch"
+  curl -fsSL "https://go.dev/dl/$filename" -o "$workdir/go.tar.gz"
+  printf '%s  %s\n' "$checksum" "$workdir/go.tar.gz" | sha256sum -c - >/dev/null
+  tar -xzf "$workdir/go.tar.gz" -C "$workdir"
+  curl -fsSL "$REPO/archive/refs/heads/$SOURCE_REF.tar.gz" -o "$workdir/source.tar.gz"
+  mkdir "$workdir/source"
+  tar -xzf "$workdir/source.tar.gz" --strip-components=1 -C "$workdir/source"
+  [ -f "$workdir/source/relay/go.mod" ] || fail "下载的源码中没有 relay/go.mod"
+  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" GOTOOLCHAIN=local \
+    "$workdir/go/bin/go" -C "$workdir/source/relay" build -trimpath -ldflags='-s -w' -o "$workdir/emby-relay" .
+  BUILT_BINARY="$workdir/emby-relay"
+  BUILD_WORKDIR="$workdir"
+}
 
-printf '[5/6] 安装证书续期自动推送...\n'
-install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/emby-relay-push <<'EOF'
+certificate_ready() {
+  local cert="/etc/letsencrypt/live/$RELAY_DOMAIN/fullchain.pem"
+  local key="/etc/letsencrypt/live/$RELAY_DOMAIN/privkey.pem"
+  [ -s "$cert" ] && [ -s "$key" ] && \
+    openssl x509 -in "$cert" -noout -checkend 86400 >/dev/null 2>&1 && \
+    openssl x509 -in "$cert" -noout -checkhost "$RELAY_DOMAIN" >/dev/null 2>&1
+}
+
+request_certificate() {
+  local mode token_path
+  if certificate_ready; then
+    printf '复用现有有效证书：%s\n' "$RELAY_DOMAIN"
+    return
+  fi
+  mode=1
+  [ -s "$CERT_MODE_FILE" ] && mode="$(<"$CERT_MODE_FILE")"
+  [[ "$mode" == 1 || "$mode" == 2 ]] || mode=1
+  printf '\n证书验证方式：\n  1) DNS-01（Cloudflare，无需开放公网 80）\n  2) HTTP-01（需要公网 TCP 80）\n'
+  prompt mode "请选择 1 或 2" "$mode"
+  [[ "$mode" == 1 || "$mode" == 2 ]] || fail "请选择 1 或 2"
+  if [ "$mode" = 1 ]; then
+    apt-get install -y -qq python3-certbot-dns-cloudflare >/dev/null
+    token_path="$TOKEN_FILE"
+    if [ ! -s "$token_path" ] && [ -s "$LEGACY_TOKEN_FILE" ]; then
+      token_path="$LEGACY_TOKEN_FILE"
+    fi
+    if [ ! -s "$token_path" ]; then
+      local token
+      read -r -s -p 'Cloudflare DNS API Token（输入不回显）：' token </dev/tty
+      printf '\n'
+      [ -n "$token" ] || fail "必须提供 Cloudflare API Token"
+      install -d -m 0700 /root/.secrets/certbot
+      printf 'dns_cloudflare_api_token = %s\n' "$token" > "$TOKEN_FILE"
+      chmod 0600 "$TOKEN_FILE"
+      unset token
+    fi
+    certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --cert-name "$RELAY_DOMAIN" --dns-cloudflare \
+      --dns-cloudflare-credentials "$token_path" -d "$RELAY_DOMAIN"
+  else
+    certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --cert-name "$RELAY_DOMAIN" --standalone -d "$RELAY_DOMAIN"
+  fi
+  printf '%s\n' "$mode" > "$CERT_MODE_FILE"
+  chmod 0644 "$CERT_MODE_FILE"
+}
+
+install_deploy_hook() {
+  install -d -m 0755 "$(dirname "$HOOK")"
+  cat > "$HOOK" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 RELAY_DOMAIN="$(cat /etc/emby-relay/certificate-domain)"
@@ -207,23 +335,141 @@ case " ${RENEWED_DOMAINS} " in
   *) exit 0 ;;
 esac
 EOF
-chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/emby-relay-push
+  chmod 0755 "$HOOK"
+}
 
-printf '\n安装完成。Relay ID：%s\n' "$RELAY_ID"
-printf '中继地址：https://%s:%s/\n' "$RELAY_DOMAIN" "$PUBLIC_PORT"
-printf '中继密钥文件：%s（仅 root 可读）\n' "$SECRET_FILE"
-printf '服务状态：systemctl status emby-relay\n\n'
-printf '下一步：在管理台「设置 → VPS 中继」新增并启用中继，填写上面的地址和 Relay ID；\n'
-printf '从另一个 Xshell 标签页运行 sudo cat %s 取出密钥。证书和私钥先留空。\n' "$SECRET_FILE"
-printf '管理台保存后，回到这里按 Enter，脚本会把刚申请的证书安全推送到 Worker。\n'
-read -r -p '完成管理台保存后按 Enter 继续...' _ </dev/tty
+configure_only() {
+  [ -s "$CFG" ] || fail "没有已安装的中继；请选择安装/重装"
+  ensure_python
+  load_config
+  collect_settings
+  if [ -z "$PUBLIC_PORT" ]; then PUBLIC_PORT="$RELAY_PORT"; fi
+  prompt PUBLIC_PORT "公网访问端口" "$PUBLIC_PORT"
+  validate_settings
+  validate_domain
+  write_metadata
+  write_config
+  systemctl restart emby-relay
+  printf '设置已保存并重启服务。若修改 Relay ID、Worker 地址或公网端口，请同步更新管理台；端口变更还要检查安全组/NAT 映射。\n'
+}
 
-printf '[6/6] 推送证书到 Worker...\n'
-RELAY_CERT_DOMAIN="$RELAY_DOMAIN" \
-RENEWED_LINEAGE="/etc/letsencrypt/live/$RELAY_DOMAIN" \
-RENEWED_DOMAINS="$RELAY_DOMAIN" \
-  "$BIN" push-certificate
-printf '\n证书已推送。VPS 通常会在一分钟内自动应用；之后 Certbot 续期会自动重复推送。\n'
-printf '检查服务：systemctl status emby-relay\n'
-printf '查看日志：journalctl -u emby-relay -n 50 --no-pager\n'
-printf '请确认云厂商安全组/端口映射的公网 TCP %s 指向 VPS 内部 TCP %s。\n' "$PUBLIC_PORT" "$RELAY_PORT"
+install_or_reinstall() {
+  command -v apt-get >/dev/null 2>&1 || fail "仅支持 Debian/Ubuntu VPS（需要 apt-get）"
+  install_packages
+  if [ -s "$CFG" ]; then
+    load_config
+    printf '检测到现有配置，将保留 Relay ID、Worker 地址和中继密钥。\n'
+    local edit_settings=n
+    prompt_yes_no edit_settings "是否修改运行参数" n
+    if [ "$edit_settings" = y ]; then collect_settings; fi
+  else
+    MONTHLY_LIMIT_GIB=9216
+    DAILY_LIMIT_GIB=30
+    MAX_CONNS=8
+    ALLOW_CF_ONLY=y
+    collect_settings
+  fi
+  if [ -s "$DOMAIN_FILE" ]; then RELAY_DOMAIN="$(<"$DOMAIN_FILE")"; fi
+  prompt RELAY_DOMAIN "中继证书域名（例如 relay.example.com）" "${RELAY_DOMAIN:-}"
+  if [ -z "$PUBLIC_PORT" ]; then PUBLIC_PORT="$RELAY_PORT"; fi
+  prompt PUBLIC_PORT "公网访问端口；NAT 映射时填服务商分配的端口" "$PUBLIC_PORT"
+  validate_domain
+  [[ "$PUBLIC_PORT" =~ ^[0-9]{1,5}$ ]] || fail "公网端口必须在 1 到 65535 之间"
+  (( 10#$PUBLIC_PORT >= 1 && 10#$PUBLIC_PORT <= 65535 )) || fail "公网端口必须在 1 到 65535 之间"
+  validate_settings
+
+  printf '\n正在准备依赖并构建中继程序...\n'
+  build_binary
+  if ! id -u emby-relay >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/emby-relay --create-home --shell /usr/sbin/nologin emby-relay
+  fi
+  install -d -o emby-relay -g emby-relay -m 0750 /etc/emby-relay /var/lib/emby-relay
+  write_config
+  install -o root -g root -m 0755 "$BUILT_BINARY" "$BIN"
+  write_service
+  request_certificate
+  write_metadata
+  install_deploy_hook
+  [ -z "${BUILD_WORKDIR:-}" ] || rm -rf "$BUILD_WORKDIR"
+
+  printf '\n中继已安装。Relay ID：%s\n' "$RELAY_ID"
+  printf '公网地址：https://%s:%s/\n' "$RELAY_DOMAIN" "$PUBLIC_PORT"
+  printf '中继密钥文件：%s（仅 root 可读）\n' "$SECRET_FILE"
+  printf '请先在管理台新增或更新中继并保存，然后再继续。\n'
+  printf '首次登记时，证书链和私钥留空。\n'
+  read -r -p '管理台保存后按 Enter，推送证书...' _ </dev/tty
+  RELAY_CERT_DOMAIN="$RELAY_DOMAIN" \
+  RENEWED_LINEAGE="/etc/letsencrypt/live/$RELAY_DOMAIN" \
+  RENEWED_DOMAINS="$RELAY_DOMAIN" \
+    "$BIN" push-certificate
+  printf '\n证书已推送，VPS 通常会在一分钟内自动应用。\n'
+}
+
+uninstall_all() {
+  if [ ! -e "$CFG" ] && [ ! -e "$UNIT" ] && [ ! -e "$BIN" ] && [ ! -e "$HOOK" ]; then
+    printf '没有检测到本机中继安装。\n'
+    return
+  fi
+  local confirmation domain cert_domain remove_legacy=n
+  domain=""
+  [ -s "$DOMAIN_FILE" ] && domain="$(<"$DOMAIN_FILE")"
+  printf '将删除本机中继服务、配置、密钥、运行数据、续期 Hook 和本脚本登记的证书。\n'
+  printf '不会删除 Worker 管理台记录、DNS 记录或云厂商安全组/NAT 规则。\n'
+  printf '不会卸载 apt 安装的共享系统依赖（如 Certbot、Python 和 curl）。\n'
+  read -r -p '输入 UNINSTALL 确认完整卸载：' confirmation </dev/tty
+  [ "$confirmation" = UNINSTALL ] || fail "已取消卸载"
+  if [ -s "$LEGACY_TOKEN_FILE" ]; then
+    prompt_yes_no remove_legacy "是否同时删除旧版 Cloudflare Token（可能被其他服务共用）" n
+  fi
+
+  systemctl stop emby-relay 2>/dev/null || true
+  systemctl disable emby-relay 2>/dev/null || true
+  rm -f "$HOOK"
+  if command -v certbot >/dev/null 2>&1; then
+    if [ -s "$CERT_DOMAINS_FILE" ]; then
+      while IFS= read -r cert_domain; do
+        if [ -f "/etc/letsencrypt/renewal/$cert_domain.conf" ]; then
+          certbot delete --cert-name "$cert_domain" --non-interactive || \
+            printf '警告：Certbot 无法删除证书 %s，请手动处理。\n' "$cert_domain" >&2
+        fi
+      done < "$CERT_DOMAINS_FILE"
+    elif [ -n "$domain" ] && [ -f "/etc/letsencrypt/renewal/$domain.conf" ]; then
+      certbot delete --cert-name "$domain" --non-interactive || \
+        printf '警告：Certbot 无法删除证书 %s，请手动处理。\n' "$domain" >&2
+    fi
+  fi
+  rm -f "$UNIT" "$BIN" "$SECRET_FILE" "$TOKEN_FILE"
+  [ "$remove_legacy" != y ] || rm -f "$LEGACY_TOKEN_FILE"
+  rm -rf /etc/emby-relay /var/lib/emby-relay
+  if id -u emby-relay >/dev/null 2>&1; then userdel --remove emby-relay 2>/dev/null || true; fi
+  rmdir /root/.secrets/certbot 2>/dev/null || true
+  systemctl daemon-reload
+  printf '本机中继已完整卸载。\n'
+  if [ -s "$LEGACY_TOKEN_FILE" ]; then
+    printf '保留了可能被其他服务共用的旧版 Cloudflare Token：%s\n' "$LEGACY_TOKEN_FILE"
+  fi
+  printf '请先让管理台中的所有节点停用中继，再删除中继记录。\n'
+}
+
+main() {
+  require_root
+  command -v systemctl >/dev/null 2>&1 || fail "需要使用 systemd 的 VPS"
+  local action="${1:-}"
+  if [ -z "$action" ]; then
+    printf '\nEmby VPS Relay\n'
+    printf '  1) 安装 / 重装 / 更新（保留现有密钥）\n'
+    printf '  2) 修改配置\n'
+    printf '  3) 完整卸载\n'
+    printf '  0) 退出\n'
+    prompt action "请选择操作编号" 1
+  fi
+  case "$action" in
+    1|install|reinstall) install_or_reinstall ;;
+    2|configure) configure_only ;;
+    3|uninstall) uninstall_all ;;
+    0|exit) printf '已退出。\n' ;;
+    *) fail "未知选项：$action" ;;
+  esac
+}
+
+main "$@"
