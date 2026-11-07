@@ -101,12 +101,23 @@ function collectEnhancementSelectorAnchors(script = "") {
 }
 
 function isEnhancementOwnedAnchor(script, anchor, kind) {
-  return ["'", '"'].some((quote) =>
-    kind === "id"
-      ? script.includes(`id=${quote}${anchor}${quote}`) ||
-        script.includes(`id = ${quote}${anchor}${quote}`)
-      : script.includes(`setAttribute(${quote}${anchor}${quote}`) ||
-        script.includes(`${anchor}=${quote}`),
+  if (kind === "id") {
+    return ["'", '"'].some(
+      (quote) =>
+        script.includes(`id=${quote}${anchor}${quote}`) ||
+        script.includes(`id = ${quote}${anchor}${quote}`),
+    );
+  }
+  const datasetKey = anchor.slice(5).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+  return (
+    script.includes(`dataset.${datasetKey}`) ||
+    ["'", '"'].some(
+      (quote) =>
+        script.includes(`setAttribute(${quote}${anchor}${quote}`) ||
+        script.includes(`${anchor}=${quote}`) ||
+        script.includes(`${anchor} `) ||
+        script.includes(`${anchor}>`),
+    )
   );
 }
 

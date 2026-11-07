@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { webcrypto } from "node:crypto";
 
 import { createTestApplication } from "../worker/testing/hooks.js";
 import {
@@ -1044,6 +1045,36 @@ function createDeferred() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+async function encryptedRelaySecretForTest(secret) {
+  const encoder = new TextEncoder();
+  const master = await webcrypto.subtle.importKey(
+    "raw",
+    encoder.encode("relay-storage-key-for-tests-at-least-32-bytes"),
+    "HKDF",
+    false,
+    ["deriveKey"],
+  );
+  const key = await webcrypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: encoder.encode("cf-emby-relay-storage-v1"),
+      info: encoder.encode("relay:secret"),
+    },
+    master,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"],
+  );
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await webcrypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: encoder.encode("v1\nsecret\nrelay-1") },
+    key,
+    encoder.encode(JSON.stringify({ secret })),
+  );
+  const encode = (bytes) => Buffer.from(bytes).toString("base64url");
+  return { version: 1, iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)) };
 }
 
 async function withWorkerGlobals(overrides, callback) {
@@ -4325,6 +4356,104 @@ test("node normalization keeps the TMDB aggregation flag as a strict boolean", (
   assert.equal("tmdbAggregationEnabled" in summary, true, "兼容字段不能被删掉");
 });
 
+test("node relay policy defaults off and keeps only ordered valid relay IDs", () => {
+  const defaults = kernel.normalizeNode("alpha", { target: "https://origin.test" }).data;
+  assert.equal(defaults.relayMode, "off");
+  assert.deepEqual(defaults.relayIds, []);
+  const configured = kernel.normalizeNode("alpha", {
+    target: "https://origin.test",
+    relayMode: "worker",
+    relayIds: ["backup", "primary", "bad/id", "backup", "third", "fourth"],
+  }).data;
+  assert.equal(configured.relayMode, "worker");
+  assert.deepEqual(configured.relayIds, ["backup", "primary", "third"]);
+  assert.equal(
+    kernel.normalizeNode("alpha", { target: "https://origin.test", relayMode: "unknown" }).data
+      .relayMode,
+    "off",
+  );
+});
+
+test("node relay policy fails closed instead of contacting the source when no relay is configured", async () => {
+  let fetchCount = 0;
+  await withWorkerGlobals(
+    {
+      fetch: async () => {
+        fetchCount += 1;
+        return new Response("must not fetch");
+      },
+    },
+    async () => {
+      const request = new Request("https://worker.test/node/secret/Videos/1/stream");
+      const response = await proxyService.handle(
+        request,
+        { target: "https://origin.test", relayMode: "worker", relayIds: [] },
+        "/Videos/1/stream",
+        "node",
+        "secret",
+        {},
+        { waitUntil() {} },
+        { requestUrl: new URL(request.url), runtimeConfig: { rateLimitRpm: 0 } },
+      );
+      assert.equal(response.status, 503);
+      assert.match(await response.text(), /VPS relay/);
+    },
+  );
+  assert.equal(fetchCount, 0);
+});
+
+test("worker relay mode signs the logical source while fetching only the configured VPS", async () => {
+  const calls = [];
+  const relaySecret = "relay-secret-012345678901234567890123";
+  const encryptedSecret = await encryptedRelaySecretForTest(relaySecret);
+  await withWorkerGlobals(
+    {
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response("relayed media", { headers: { "Content-Type": "video/mp4" } });
+      },
+    },
+    async () => {
+      const request = new Request("https://worker.test/node/secret/Videos/1/stream?x=1", {
+        headers: { Range: "bytes=0-9", "X-Relay-Target": "https://attacker.test/" },
+      });
+      const env = {
+        RELAY_STORAGE_KEY: "relay-storage-key-for-tests-at-least-32-bytes",
+        ENI_KV: {
+          async get(key) {
+            if (key === "sys:relay_registry:v1")
+              return {
+                relays: [{ id: "relay-1", url: "https://relay.example:2087", enabled: true }],
+              };
+            if (key === "sys:relay_secret:relay-1") return encryptedSecret;
+            return null;
+          },
+        },
+      };
+      const response = await proxyService.handle(
+        request,
+        { target: "https://origin.test", relayMode: "worker", relayIds: ["relay-1"] },
+        "/Videos/1/stream",
+        "node",
+        "secret",
+        env,
+        { waitUntil() {} },
+        { requestUrl: new URL(request.url), runtimeConfig: { rateLimitRpm: 0 } },
+      );
+      assert.equal(response.status, 200);
+      assert.equal(await response.text(), "relayed media");
+    },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url).host, "relay.example:2087");
+  assert.equal(new URL(calls[0].init.headers.get("X-Relay-Target")).origin, "https://origin.test");
+  assert.equal(
+    calls[0].init.headers.get("X-Relay-Target"),
+    "https://origin.test/Videos/1/stream?x=1",
+  );
+  assert.equal(calls[0].init.headers.get("range"), "bytes=0-9");
+  assert.equal(calls[0].init.headers.get("x-relay-auth").length, 64);
+});
 test("blocked cross-origin image redirects fall back to a client-visible redirect", async () => {
   const fetched = [];
   await withWorkerGlobals(

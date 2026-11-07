@@ -1,6 +1,6 @@
 # 部署与 Cloudflare 配置指南
 
-README 的部署细节展开版：环境变量与绑定、三种部署方式的逐条步骤、定时触发器、自定义域与 Cache Rules。先按 README 的「快速开始」跑通，需要逐项配置时再回到本文件。
+README 的部署细节展开版：环境变量与绑定、三种部署方式的逐条步骤、定时触发器、自定义域与 Cache Rules。VPS 中继部署见 [Xshell 8 一键部署教程](vps-relay-deploy.md)。先按 README 的「快速开始」跑通，需要逐项配置时再回到本文件。
 
 ## 环境变量与绑定
 
@@ -28,6 +28,7 @@ README 的部署细节展开版：环境变量与绑定、三种部署方式的�
 | **`ADMIN_PATH`** | 文本变量 (Var) | **自定义管理入口**。用于修改默认的 `/admin` 路径，有效防范自动化扫描工具的嗅探。 | `/secret_portal_99`<br>\> ⚠️ **注意**：不能以 `/api` 开头，也不能是 `/`；写错时 Worker 会静默回退到默认的 `/admin`（不会报错）。 |
 | **`HOST`** | 文本变量 (Var) | **主访问域名**。启用 host prefix 代理或保存 host prefix 节点前必须配置；只填写合法 DNS 主机名。 | `emby.example.com`，不要带协议、端口、路径、通配符或 IP。 |
 | **`LEGACY_HOST`** | 文本变量 (Var) | **兼容旧访问域名**。迁移主域名时保留旧的路径式节点入口。 | `old-emby.example.com` |
+| **`RELAY_STORAGE_KEY`** | 加密变量 (Secret) | 启用 VPS 中继时必需，至少 32 字节，与 relay 长期密钥分开；轮换前须迁移并重加密已有 KV 记录。 | 使用独立高熵随机值；见 [VPS Relay Deployment](vps-relay-deploy.md)。 |
 | **`TMDB_API_READ_TOKEN`** / **`TMDB_API_KEY`** / **`TMDB_LANGUAGE`** | 加密变量 / 文本变量 | **节点「TMDB 聚合」的凭据**。开启该开关的节点收到 `AnyProviderIdEquals=tmdb.<id>` 的列表请求时，Worker 先换出 TMDB 的标题 + 年份，再以 `SearchTerm` / `Years` 向本节点查询；集与季请求不改写。后台「账号设置」里只要填了任意一项，这组环境变量就被整体忽略。 | 可留空（此时开关无效、请求原样透传）。见 `.dev.vars.example` |
 
 > 💡 **命名兼容性提示**：

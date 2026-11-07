@@ -79,6 +79,11 @@ const MAIN_VIDEO_STREAM_MODE_OPTIONS = [
   { value: "direct", label: "direct" },
 ];
 
+const RELAY_MODE_OPTIONS = [
+  { value: "off", label: "不使用中继" },
+  { value: "worker", label: "经 Worker 中继" },
+  { value: "direct_media", label: "视频直连中继（实验）" },
+];
 const NODE_GET_PROBE_CONCURRENCY = 4;
 
 async function runWithConcurrency(items = [], concurrency = 1, task = null) {
@@ -954,6 +959,8 @@ function hydrateNodeForm(nextState) {
   form.routingDecisionMode = normalizeRoutingDecisionMode(nextState?.routingDecisionMode);
   form.mainVideoStreamMode = normalizeMainVideoStreamMode(nextState?.mainVideoStreamMode);
   form.hedgeProbePath = String(nextState?.hedgeProbePath || "").trim();
+  form.relayMode = normalizeRelayMode(nextState?.relayMode);
+  form.relayIdsText = normalizeRelayIds(nextState?.relayIds).join(", ");
   const nextHeaders = buildHeaderDrafts(nextState?.headers);
   form.headers.splice(0, form.headers.length, ...nextHeaders);
 
@@ -1001,6 +1008,8 @@ function createEmptyNodeForm() {
     routingDecisionMode: "inherit",
     mainVideoStreamMode: "inherit",
     hedgeProbePath: "",
+    relayMode: "off",
+    relayIdsText: "",
     headers: [],
     lines: [createEmptyLineDraft(0)],
     activeLineId: "line-1",
@@ -1087,6 +1096,8 @@ function buildNodeFormFromNode(node = {}) {
     realClientIpMode: normalizeRealClientIpMode(node?.realClientIpMode),
     routingDecisionMode: normalizeRoutingDecisionMode(node?.routingDecisionMode),
     mainVideoStreamMode: normalizeMainVideoStreamMode(node?.mainVideoStreamMode),
+    relayMode: normalizeRelayMode(node?.relayMode),
+    relayIdsText: normalizeRelayIds(node?.relayIds).join(", "),
     hedgeProbePath: String(node?.hedgeProbePath || "").trim(),
     headers: buildHeaderDrafts(node?.headers),
     lines: resolveLines(node).length
@@ -1223,6 +1234,8 @@ function buildNodePayload(currentForm, currentEditor) {
       realClientIpMode: normalizeRealClientIpMode(currentForm?.realClientIpMode),
       routingDecisionMode: normalizeRoutingDecisionMode(currentForm?.routingDecisionMode),
       mainVideoStreamMode: normalizeMainVideoStreamMode(currentForm?.mainVideoStreamMode),
+      relayMode: normalizeRelayMode(currentForm?.relayMode),
+      relayIds: normalizeRelayIds(currentForm?.relayIdsText),
       hedgeProbePath: String(currentForm?.hedgeProbePath || "").trim(),
       headers: normalizeHeaderDrafts(currentForm?.headers),
       lines: normalizedLines,
@@ -1276,6 +1289,8 @@ function serializeNodeForm(value = {}) {
     routingDecisionMode: normalizeRoutingDecisionMode(value?.routingDecisionMode),
     mainVideoStreamMode: normalizeMainVideoStreamMode(value?.mainVideoStreamMode),
     hedgeProbePath: String(value?.hedgeProbePath || "").trim(),
+    relayMode: normalizeRelayMode(value?.relayMode),
+    relayIds: normalizeRelayIds(value?.relayIdsText),
     headers: normalizeHeaderDrafts(value?.headers),
     activeLineId: String(value?.activeLineId || "").trim(),
     lines: normalizeLineDrafts(value?.lines),
@@ -1468,6 +1483,25 @@ function normalizeMainVideoStreamMode(value = "") {
   if (normalized === "direct") return "direct";
   if (normalized === "proxy") return "proxy";
   return "inherit";
+}
+
+function normalizeRelayMode(value = "") {
+  const mode = String(value || "")
+    .trim()
+    .toLowerCase();
+  return mode === "worker" || mode === "direct_media" ? mode : "off";
+}
+
+function normalizeRelayIds(value = []) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/[，,\\s]+/);
+  const seen = new Set();
+  return source
+    .map((item) => String(item || "").trim())
+    .filter((id) => {
+      if (!/^[a-z0-9_-]{1,64}$/i.test(id) || seen.has(id) || seen.size >= 3) return false;
+      seen.add(id);
+      return true;
+    });
 }
 
 function resolveStatusTone() {
@@ -2699,6 +2733,33 @@ async function copyText(text = "") {
               </select>
             </label>
 
+            <label class="field-shell">
+              <span class="field-label">VPS 中继模式</span>
+              <select
+                v-model="form.relayMode"
+                class="field-input"
+                :disabled="savingNode || importingNodes"
+              >
+                <option
+                  v-for="option in RELAY_MODE_OPTIONS"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+            <label class="field-shell">
+              <span class="field-label">Relay ID（按优先级，最多 3 个）</span>
+              <input
+                v-model="form.relayIdsText"
+                type="text"
+                class="field-input"
+                placeholder="primary, backup"
+                :disabled="savingNode || importingNodes"
+              />
+              <span class="field-hint">填写管理台中继列表里的 Relay ID，按优先级用逗号分隔。</span>
+            </label>
             <label class="field-shell">
               <span class="field-label">Hedge Probe Path</span>
               <input

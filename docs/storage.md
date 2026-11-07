@@ -16,6 +16,10 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `sys:config_theme_prev:v1` | 上一次保存前的配置 | 每次覆盖 `sys:theme` 之前把当时的值整份写进来，只保留一代；「恢复上次配置」就是把它写回去 |
 | `sys:dns_record_history:v1:{zoneId}:host:{hostname}` | DNS 修改历史 | 记录当前站点最近的 `CNAME` 修改值，供后台 DNS 历史卡片回填 |
 | `sys:nodes_index_meta:v1` | 节点索引元数据 | 记录节点索引的 revision / 更新时间，列表页与备份判断索引是否新鲜 |
+| `sys:relay_registry:v1` | VPS 中继元数据 | 只含 ID、名称、HTTPS 根地址、启用状态和配置 revision，不存密钥或 TLS 私钥 |
+| `sys:relay_secret:{relayId}` | VPS 中继长期密钥 | `RELAY_STORAGE_KEY` 派生的 AES-GCM 密文；不进入普通备份或 action 响应 |
+| `sys:relay_tls:{relayId}` | VPS TLS 材料 | 证书链和私钥的 AES-GCM 密文及 revision；中继经签名 HTTPS 端点推送续期证书，VPS 再通过配置拉取端点获取 |
+| `sys:relay_state:{relayId}` | VPS 运行状态 | 中继状态预留键；整理工具会保留，不参与请求路由 |
 | `sys:worker_placement_region:v1:{scriptName}` | Worker 放置覆盖值 | 后台「Worker 放置」选 `region` 时按脚本名记录选定的区域；`default` / `smart` 清除它 |
 
 > `sys:ops_status:*`、`sys:cf_dash_cache*`、`sys:scheduled_lock:v1`、`sys:telegram_alert_state:v1`、`sys:config_snapshots:v1`、`sys:config_snapshots_meta:v1` 和 `fail:*` 都是旧版 KV 键。当前对应数据分别存放在 D1 的 `sys_status`、`cf_dashboard_cache`、`sys_locks` 和 `auth_failures` 中；旧版那套多代设置快照不再写入，KV 整理和保存设置都会删除检测到的这些遗留键（现行的一代快照是另一个键 `sys:config_theme_prev:v1`，整理时保留）。
@@ -33,6 +37,9 @@ README「数据存储说明」的展开版：KV 键位、管理 API 的 action �
 | `saveConfig` | 写 | 保存全局设置到 `sys:theme` | 同时写 `sys:config_meta:v1` 与一代快照 `sys:config_theme_prev:v1`，并删除遗留的 `sys:config_snapshots:v1`；有防重置闸门，见下 |
 | `importSettings` | 写 | 导入 settings-only 备份到 `sys:theme` | 会按当前版本规则清洗配置；写入前的配置同样进 `sys:config_theme_prev:v1` |
 | `restorePreviousConfig` | 读 + 写 | 把 `sys:config_theme_prev:v1` 写回 `sys:theme` | 恢复本身也留快照，所以可以再切回去；没有快照时返回 404 `CONFIG_PREV_SNAPSHOT_MISSING`，不动现有配置 |
+| `listRelays` | 读 | 列出中继元数据 | 不回传凭据或私钥；列表中的可用状态仅表示保存的启用状态 |
+| `saveRelay` | 读 + 写 | 保存中继地址、密钥和 TLS 材料 | 要求 `RELAY_STORAGE_KEY` 至少 32 字节；密钥与证书分键加密保存，注册表仅存元数据 |
+| `deleteRelay` | 读 + 写 + 删 | 删除中继配置 | 若节点仍引用中继则返回 409；否则删除凭据、TLS 和状态键 |
 | `save` / `import` | 写 | 新增或批量导入节点 | 最终会写入 `node:*`，并同步更新 `sys:nodes_index:v1` |
 | `delete` | 删 | 删除节点 | 会删除对应 `node:*`，并重建节点索引 |
 | `exportSettings` / `exportConfig` | 读 | 导出全局设置、设置与密钥、完整备份 | 数据来源就是当前 KV 中的配置、节点与管理端 HTML 上传记录 |

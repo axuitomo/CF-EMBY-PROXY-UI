@@ -133,6 +133,35 @@ function replaceAllRequired(source, search, replacement, label) {
   return source.replaceAll(search, replacement);
 }
 
+function applyRelayNodeContract(outputHtml = "") {
+  let output = String(outputHtml || "");
+  output = replaceRequired(
+    output,
+    "function createEmptyNodeModalForm(){return{",
+    'function normalizeAdminRelayMode(value=""){const mode=String(value||"").trim().toLowerCase();return mode==="worker"||mode==="direct_media"?mode:"off"}function normalizeAdminRelayIds(value=[]){const source=Array.isArray(value)?value:String(value||"").split(/[，,\\s]+/),seen=new Set,ids=[];for(const item of source){const id=String(item||"").trim();if(!/^[a-z0-9_-]{1,64}$/i.test(id)||seen.has(id))continue;seen.add(id);ids.push(id);if(ids.length===3)break}return ids}function createEmptyNodeModalForm(){return{',
+    "node relay normalization helpers",
+  );
+  output = replaceRequired(
+    output,
+    'mainVideoStreamMode:"inherit",activeLineId:"",headers:[]}}function createToastState',
+    'mainVideoStreamMode:"inherit",relayMode:"off",relayIds:[],activeLineId:"",headers:[]}}function createToastState',
+    "node relay form defaults",
+  );
+  output = replaceRequired(
+    output,
+    "mainVideoStreamMode:readNodeMainVideoStreamMode(void 0!==a?.mainVideoStreamMode?a:r),activeLineId:",
+    "mainVideoStreamMode:readNodeMainVideoStreamMode(void 0!==a?.mainVideoStreamMode?a:r),relayMode:normalizeAdminRelayMode(a?.relayMode??r?.relayMode),relayIds:normalizeAdminRelayIds(a?.relayIds??r?.relayIds),activeLineId:",
+    "node relay form hydration",
+  );
+  output = replaceRequired(
+    output,
+    "mainVideoStreamMode:normalizeNodeMainVideoStreamMode(this.nodeModalForm.mainVideoStreamMode),tag:",
+    "mainVideoStreamMode:normalizeNodeMainVideoStreamMode(this.nodeModalForm.mainVideoStreamMode),relayMode:normalizeAdminRelayMode(this.nodeModalForm.relayMode),relayIds:normalizeAdminRelayIds(this.nodeModalForm.relayIds),tag:",
+    "node relay save payload",
+  );
+  return output;
+}
+
 function applyHeadProbeContract(outputHtml = "") {
   let output = String(outputHtml || "");
   output = replaceAllRequired(output, "pingTimeout:5e3", "pingTimeout:1e4", "GET 默认超时");
@@ -238,7 +267,7 @@ function applyHeadProbeContract(outputHtml = "") {
 function composeAdminRuntimeEnhancements(outputHtml = "") {
   // 模板只保留 2 处 syncReleaseSourcePreviewInSettingsForm 调用，方法体由这里补齐。
   const output = replaceRequired(
-    applyHeadProbeContract(outputHtml),
+    applyHeadProbeContract(applyRelayNodeContract(outputHtml)),
     "},syncSettingsFormFromRuntimeConfig",
     "},syncReleaseSourcePreviewInSettingsForm(){const r=this.settingsForm&&typeof this.settingsForm==='object'?this.settingsForm:{};const o=String(r.githubRepo||r.releaseRepo||r.repo||'').trim();if(o&&r.githubRepo!==o)r.githubRepo=o;return o},syncSettingsFormFromRuntimeConfig",
     "发布源预览设置方法",

@@ -17,6 +17,7 @@ README 只保留使用者需要的主干；细节按下面四份文档展开，�
 | 文档 | 内容 | 适合什么时候读 |
 | --- | --- | --- |
 | [`deploy.md`](deploy.md) | 环境变量与绑定、三种部署方式逐条步骤、Cron、自定义域、Cache Rules | 首次部署或换绑定项 |
+| [`vps-relay-deploy.md`](vps-relay-deploy.md) | Xshell 8 一键安装、DNS-01/HTTP-01 证书、公网端口映射、Worker 登记与回滚 | 启用 Worker→VPS 中继 |
 | [`panel.md`](panel.md) | 后台页面、DNS 双模式、设置页每个分区、字段上限、节点资源上限 | 配置后台、排查设置项 |
 | [`glossary.md`](glossary.md) | 按面板字样逐条解释名词、状态词与错误码 | 看不懂后台某个词是什么意思 |
 | [`screenshots.md`](screenshots.md) | 10 张页面截图的索引：视图、主题、录制版本、图上元素、缺口清单 | 想找某个页面长什么样，或要重录视觉基线 |

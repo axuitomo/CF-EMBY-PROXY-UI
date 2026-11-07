@@ -37,6 +37,11 @@ import { makeKvMutationQueueRunner } from "./maintenance/mutation-queues.js";
 import { makeLogBindingStateManager } from "./observability/log-binding-state.js";
 import { guardApiResponseMime as guardApiResponseMimeRepresentation } from "./proxy/http/api-mime-guard.js";
 import { isJsonHttpMediaType, normalizeHttpMediaType } from "./proxy/http/media-types.js";
+import { fetchThroughRelays } from "./proxy/http/relay.js";
+import {
+  isVerifiedDirectMediaClientProfile,
+  issueDirectMediaTickets,
+} from "./proxy/playback/media-ticket.js";
 import { buildProxyErrorState } from "./proxy/http/proxy-error-response.js";
 import {
   inspectPlaybackInfoResponse,
@@ -864,6 +869,28 @@ function normalizeNodeMainVideoStreamMode(value = "") {
   if (normalized === "direct") return "direct";
   if (normalized === "proxy") return "proxy";
   return "inherit";
+}
+function normalizeNodeRelayMode(value = "") {
+  const mode = String(value || "")
+    .trim()
+    .toLowerCase();
+  return mode === "worker" || mode === "direct_media" ? mode : "off";
+}
+function isValidRelayId(value = "") {
+  return /^[a-z0-9_-]{1,64}$/i.test(String(value || "").trim());
+}
+function normalizeRelayIdList(values = []) {
+  const source = Array.isArray(values) ? values : String(values || "").split(/[，,\s]+/);
+  const seen = new Set();
+  const ids = [];
+  for (const value of source) {
+    const id = String(value || "").trim();
+    if (!isValidRelayId(id) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length === 3) break;
+  }
+  return ids;
 }
 function readNodeMainVideoStreamMode(node = {}) {
   return normalizeNodeMainVideoStreamMode(
@@ -6285,6 +6312,412 @@ function consumeProxyLinkVariantPrefix(rawPath = "") {
 }
 //#endregion
 //#region worker/kernel/bindings.js
+var RELAY_REGISTRY_KV_KEY = "sys:relay_registry:v1";
+var RELAY_SECRET_PREFIX = "sys:relay_secret:";
+var RELAY_TLS_PREFIX = "sys:relay_tls:";
+function relayStorageMaster(env = {}) {
+  return String(env.RELAY_STORAGE_KEY || "");
+}
+function base64UrlEncode(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32768)
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function base64UrlDecode(value) {
+  const text = String(value || "");
+  if (!/^[A-Za-z0-9_-]+$/.test(text)) throw new Error("INVALID_RELAY_CIPHERTEXT");
+  const binary = atob(
+    text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4),
+  );
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+async function relayStorageKey(env, purpose) {
+  const secret = relayStorageMaster(env);
+  const raw = new TextEncoder().encode(secret);
+  if (raw.byteLength < 32) throw new Error("RELAY_STORAGE_KEY_UNAVAILABLE");
+  const subtle = getCryptoSubtle();
+  const master = await subtle.importKey("raw", raw, "HKDF", false, ["deriveKey"]);
+  return await subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new TextEncoder().encode("cf-emby-relay-storage-v1"),
+      info: new TextEncoder().encode(`relay:${purpose}`),
+    },
+    master,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+async function encryptRelayValue(env, purpose, relayId, value) {
+  const subtle = getCryptoSubtle();
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const additionalData = new TextEncoder().encode(`v1\n${purpose}\n${relayId}`);
+  const ciphertext = await subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData },
+    await relayStorageKey(env, purpose),
+    new TextEncoder().encode(JSON.stringify(value)),
+  );
+  return {
+    version: 1,
+    iv: base64UrlEncode(iv),
+    ciphertext: base64UrlEncode(new Uint8Array(ciphertext)),
+  };
+}
+async function decryptRelayValue(env, purpose, relayId, envelope) {
+  if (!envelope) return null;
+  if (envelope.version !== 1) throw new Error("UNSUPPORTED_RELAY_CIPHERTEXT");
+  const iv = base64UrlDecode(envelope.iv);
+  const ciphertext = base64UrlDecode(envelope.ciphertext);
+  if (iv.byteLength !== 12 || ciphertext.byteLength < 17 || ciphertext.byteLength > 786432)
+    throw new Error("INVALID_RELAY_CIPHERTEXT");
+  const plaintext = await getCryptoSubtle().decrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      additionalData: new TextEncoder().encode(`v1\n${purpose}\n${relayId}`),
+    },
+    await relayStorageKey(env, purpose),
+    ciphertext,
+  );
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
+}
+var relayRegistryHotCache = new WeakMap();
+async function readRelayRegistryCache(kv, env) {
+  const now = Date.now();
+  const cached = relayRegistryHotCache.get(kv);
+  if (cached && cached.expiresAt > now) return cached.byId;
+  const registry = await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" });
+  const records = (Array.isArray(registry?.relays) ? registry.relays : [])
+    .filter((relay) => relay?.enabled === true && isValidRelayId(String(relay?.id || "")))
+    .slice(0, 10);
+  const credentials = await Promise.all(
+    records.map(async (relay) => {
+      const envelope = await kv.get(`${RELAY_SECRET_PREFIX}${relay.id}`, { type: "json" });
+      return await decryptRelayValue(env, "secret", relay.id, envelope);
+    }),
+  );
+  const byId = new Map(
+    records.map((relay, index) => [
+      String(relay?.id || "").trim(),
+      { ...relay, secret: String(credentials[index]?.secret || "") },
+    ]),
+  );
+  relayRegistryHotCache.set(kv, { byId, expiresAt: now + 15_000 });
+  return byId;
+}
+function invalidateRelayRegistryCache(kv) {
+  if (kv && (typeof kv === "object" || typeof kv === "function")) relayRegistryHotCache.delete(kv);
+}
+async function loadRelayChainForNode(node = {}, env = {}) {
+  const ids = normalizeRelayIdList(node.relayIds);
+  if (!ids.length) return [];
+  const kv = getKvBinding(env);
+  if (!kv) throw new Error("RELAY_KV_NOT_CONFIGURED");
+  const byId = await readRelayRegistryCache(kv, env);
+  const chain = [];
+  for (const id of ids) {
+    const relay = byId.get(id);
+    if (relay?.enabled !== true || !relay.secret) continue;
+    let url;
+    try {
+      url = new URL(String(relay.url || ""));
+    } catch {
+      continue;
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    )
+      continue;
+    chain.push({ id, url: url.origin, secret: relay.secret, enabled: true });
+  }
+  return chain;
+}
+
+function constantTimeEqualHex(expected, provided) {
+  const left = String(expected || "").toLowerCase();
+  const right = String(provided || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(left) || !/^[0-9a-f]{64}$/.test(right)) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1)
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
+}
+async function verifyRelayControlSignature(request, secret, relayId, purpose, bodyBytes = null) {
+  const version = request.headers.get("X-Relay-Version") || "";
+  const signedPurpose = request.headers.get("X-Relay-Purpose") || "";
+  const signedRelayId = request.headers.get("X-Relay-ID") || "";
+  const timestamp = request.headers.get("X-Relay-Ts") || "";
+  const auth = request.headers.get("X-Relay-Auth") || "";
+  const issuedAt = Number(timestamp);
+  if (
+    version !== "2" ||
+    signedPurpose !== purpose ||
+    signedRelayId !== relayId ||
+    !Number.isSafeInteger(issuedAt) ||
+    Math.abs(Date.now() - issuedAt) > 300_000
+  )
+    return false;
+  const parts = [
+    version,
+    purpose,
+    relayId,
+    timestamp,
+    request.method,
+    new URL(request.url).toString(),
+  ];
+  if (bodyBytes) {
+    const digest = await getCryptoSubtle().digest("SHA-256", bodyBytes);
+    parts.push(
+      Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    );
+  }
+  const key = await getCryptoSubtle().importKey(
+    "raw",
+    new TextEncoder().encode(String(secret)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await getCryptoSubtle().sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(parts.join("\n")),
+  );
+  const expected = Array.from(new Uint8Array(signature), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return constantTimeEqualHex(expected, auth);
+}
+async function readRelayRequestBody(request, limit) {
+  const contentLength = Number(request.headers.get("Content-Length"));
+  if (Number.isFinite(contentLength) && contentLength > limit) return null;
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+async function handleRelayCertificatePush(request, env = {}) {
+  const requestUrl = new URL(request.url);
+  const pathParts = requestUrl.pathname.split("/");
+  const markerIndex = pathParts.lastIndexOf("__relay");
+  const relayId =
+    markerIndex >= 0 &&
+    markerIndex === pathParts.length - 3 &&
+    pathParts[markerIndex + 1] === "certificate"
+      ? pathParts[markerIndex + 2]
+      : "";
+  if (!/^[a-z0-9_-]{1,64}$/i.test(relayId)) return null;
+  if (request.method !== "POST")
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
+  const headers = {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+  };
+  const kv = getKvBinding(env);
+  if (!kv) return new Response("Relay control unavailable", { status: 503, headers });
+  const registry = await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" });
+  const relays = Array.isArray(registry?.relays) ? registry.relays : [];
+  const relayIndex = relays.findIndex((item) => String(item?.id || "") === relayId);
+  if (relayIndex < 0) return new Response("Not Found", { status: 404, headers });
+  let credentials;
+  try {
+    credentials = await decryptRelayValue(
+      env,
+      "secret",
+      relayId,
+      await kv.get(`${RELAY_SECRET_PREFIX}${relayId}`, { type: "json" }),
+    );
+  } catch {
+    return new Response("Relay control unavailable", { status: 503, headers });
+  }
+  if (!String(credentials?.secret || ""))
+    return new Response("Not Found", { status: 404, headers });
+  const bodyBytes = await readRelayRequestBody(request, 600 * 1024);
+  if (!bodyBytes) return new Response("Certificate payload too large", { status: 413, headers });
+  if (
+    !(await verifyRelayControlSignature(
+      request,
+      credentials.secret,
+      relayId,
+      "certificate-push",
+      bodyBytes,
+    ))
+  )
+    return new Response("Unauthorized", { status: 403, headers });
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes));
+  } catch {
+    return new Response("Invalid certificate payload", { status: 400, headers });
+  }
+  const certPem = String(payload?.cert_pem || "");
+  const keyPem = String(payload?.key_pem || "");
+  const certificateDomain = String(payload?.domain || "")
+    .trim()
+    .toLowerCase();
+  const encoder = new TextEncoder();
+  if (
+    !certificateDomain ||
+    !certPem ||
+    !keyPem ||
+    encoder.encode(certPem).byteLength > 262144 ||
+    encoder.encode(keyPem).byteLength > 262144 ||
+    !certPem.includes("-----BEGIN CERTIFICATE-----") ||
+    !/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(keyPem)
+  )
+    return new Response("Invalid certificate payload", { status: 400, headers });
+  try {
+    return await runKvDataMutation(kv)(async () => {
+      const latestRegistry = (await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" })) || {};
+      const latestRelays = Array.isArray(latestRegistry.relays)
+        ? latestRegistry.relays.slice()
+        : [];
+      const latestIndex = latestRelays.findIndex((item) => String(item?.id || "") === relayId);
+      if (latestIndex < 0) return new Response("Not Found", { status: 404, headers });
+      const relay = latestRelays[latestIndex];
+      let relayUrl;
+      try {
+        relayUrl = new URL(String(relay.url || ""));
+      } catch {
+        return new Response("Invalid relay configuration", { status: 503, headers });
+      }
+      if (
+        relayUrl.protocol !== "https:" ||
+        relayUrl.pathname !== "/" ||
+        relayUrl.username ||
+        relayUrl.password
+      )
+        return new Response("Invalid relay configuration", { status: 503, headers });
+      if (certificateDomain !== relayUrl.hostname.toLowerCase())
+        return new Response("Certificate hostname mismatch", { status: 400, headers });
+      const revision = hashStableText(JSON.stringify([relayId, relayUrl.origin, certPem, keyPem]));
+      const encrypted = await encryptRelayValue(env, "tls", relayId, { certPem, keyPem });
+      await kv.put(`${RELAY_TLS_PREFIX}${relayId}`, JSON.stringify({ revision, encrypted }));
+      latestRelays[latestIndex] = { ...relay, revision, hasCertificate: true };
+      await kv.put(
+        RELAY_REGISTRY_KV_KEY,
+        JSON.stringify({ ...latestRegistry, version: 1, relays: latestRelays }),
+      );
+      invalidateRelayRegistryCache(kv);
+      return new Response(JSON.stringify({ ok: true, revision }), { status: 200, headers });
+    });
+  } catch {
+    return new Response("Certificate update unavailable", { status: 503, headers });
+  }
+}
+async function handleRelayConfigPull(request, env = {}) {
+  const requestUrl = new URL(request.url);
+  const match = /(?:^|\/)__relay\/config\/([a-z0-9_-]{1,64})$/i.exec(requestUrl.pathname);
+  if (!match) return null;
+  if (request.method !== "GET")
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET" } });
+  const relayId = match[1];
+  const kv = getKvBinding(env);
+  if (!kv) return new Response("Relay control unavailable", { status: 503 });
+  const registry = await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" });
+  const relay = (Array.isArray(registry?.relays) ? registry.relays : []).find(
+    (item) => String(item?.id || "") === relayId,
+  );
+  if (!relay) return new Response("Not Found", { status: 404 });
+  let credentials;
+  try {
+    const envelope = await kv.get(`${RELAY_SECRET_PREFIX}${relayId}`, { type: "json" });
+    credentials = await decryptRelayValue(env, "secret", relayId, envelope);
+  } catch {
+    return new Response("Relay control unavailable", { status: 503 });
+  }
+  if (!String(credentials?.secret || "")) return new Response("Not Found", { status: 404 });
+  const version = request.headers.get("X-Relay-Version") || "";
+  const purpose = request.headers.get("X-Relay-Purpose") || "";
+  const signedRelayId = request.headers.get("X-Relay-ID") || "";
+  const timestamp = request.headers.get("X-Relay-Ts") || "";
+  const auth = request.headers.get("X-Relay-Auth") || "";
+  const issuedAt = Number(timestamp);
+  if (
+    version !== "2" ||
+    purpose !== "config-pull" ||
+    signedRelayId !== relayId ||
+    !Number.isSafeInteger(issuedAt) ||
+    Math.abs(Date.now() - issuedAt) > 300_000
+  )
+    return new Response("Unauthorized", { status: 403 });
+  const payload = [
+    version,
+    purpose,
+    relayId,
+    timestamp,
+    request.method,
+    requestUrl.toString(),
+  ].join("\n");
+  const key = await getCryptoSubtle().importKey(
+    "raw",
+    new TextEncoder().encode(String(credentials.secret)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await getCryptoSubtle().sign("HMAC", key, new TextEncoder().encode(payload));
+  const expected = Array.from(new Uint8Array(signature), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  if (!constantTimeEqualHex(expected, auth)) return new Response("Unauthorized", { status: 403 });
+  const headers = new Headers({
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+  });
+  const tlsRecord = await kv.get(`${RELAY_TLS_PREFIX}${relayId}`, { type: "json" });
+  if (!tlsRecord?.encrypted) return new Response(null, { status: 204, headers });
+  const revision = String(relay.revision || "");
+  if (!revision || tlsRecord.revision !== revision)
+    return new Response("Relay TLS config is updating", { status: 503, headers });
+  if (request.headers.get("X-Relay-Applied-Revision") === revision)
+    return new Response(null, { status: 204, headers });
+  let tlsConfig;
+  try {
+    tlsConfig = await decryptRelayValue(env, "tls", relayId, tlsRecord.encrypted);
+  } catch {
+    return new Response("Relay TLS config unavailable", { status: 503, headers });
+  }
+  if (!tlsConfig?.certPem || !tlsConfig?.keyPem)
+    return new Response("Relay TLS config is incomplete", { status: 503, headers });
+  return new Response(
+    JSON.stringify({
+      revision,
+      cert_pem: String(tlsConfig.certPem),
+      key_pem: String(tlsConfig.keyPem),
+    }),
+    { status: 200, headers },
+  );
+}
 function getKvBinding(env = {}) {
   return env.ENI_KV || env.KV || env.EMBY_KV || env.EMBY_PROXY || null;
 }
@@ -15790,6 +16223,184 @@ function defineDatabaseActions(dependencies = {}, actions = {}) {
 }
 //#endregion
 //#region worker/features/admin/database-methods.js
+function defineRelayActions(dependencies = {}) {
+  const { kernel } = dependencies;
+  return {
+    async listRelays(data, { kv }) {
+      if (!kv) return jsonError("KV_NOT_CONFIGURED", "请先绑定 ENI_KV / KV Namespace", 503);
+      const registry = (await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" })) || {};
+      return jsonResponse({
+        relays: (Array.isArray(registry.relays) ? registry.relays : []).map((relay) => ({
+          id: relay.id,
+          name: relay.name,
+          url: relay.url,
+          enabled: relay.enabled === true,
+          hasSecret: relay.hasSecret === true,
+          hasCertificate: relay.hasCertificate === true,
+          revision: String(relay.revision || ""),
+        })),
+      });
+    },
+    async saveRelay(data, { kv, env = {} }) {
+      if (!kv) return jsonError("KV_NOT_CONFIGURED", "请先绑定 ENI_KV / KV Namespace", 503);
+      if (new TextEncoder().encode(relayStorageMaster(env)).byteLength < 32)
+        return jsonError(
+          "RELAY_STORAGE_KEY_REQUIRED",
+          "请配置至少 32 字节的 RELAY_STORAGE_KEY",
+          503,
+        );
+      return await runKvDataMutation(kv)(async () => {
+        const id = String(data?.id || "").trim();
+        if (!isValidRelayId(id)) return jsonError("INVALID_RELAY_ID", "中继 ID 格式无效", 400);
+        const name =
+          String(data?.name || id)
+            .trim()
+            .slice(0, 80) || id;
+        let relayUrl;
+        try {
+          relayUrl = new URL(String(data?.url || ""));
+        } catch {
+          return jsonError("INVALID_RELAY_URL", "中继地址必须是 HTTPS URL", 400);
+        }
+        if (
+          relayUrl.protocol !== "https:" ||
+          !relayUrl.hostname ||
+          relayUrl.username ||
+          relayUrl.password ||
+          relayUrl.pathname !== "/" ||
+          relayUrl.search ||
+          relayUrl.hash
+        )
+          return jsonError("INVALID_RELAY_URL", "中继地址必须是无路径、无凭据的 HTTPS 根地址", 400);
+
+        const registry = (await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" })) || { relays: [] };
+        const relays = Array.isArray(registry.relays) ? registry.relays.slice() : [];
+        const index = relays.findIndex((relay) => String(relay?.id || "") === id);
+        if (index < 0 && relays.length >= 10)
+          return jsonError("RELAY_LIMIT_REACHED", "最多支持 10 台 VPS 中继", 400);
+        const existing = index >= 0 ? relays[index] : {};
+        const secretKey = `${RELAY_SECRET_PREFIX}${id}`;
+        const tlsKey = `${RELAY_TLS_PREFIX}${id}`;
+        let storedCredentials = {};
+        let storedTls = {};
+        try {
+          const secretRecord = await kv.get(secretKey, { type: "json" });
+          storedCredentials =
+            secretRecord?.version === 1
+              ? await decryptRelayValue(env, "secret", id, secretRecord)
+              : { secret: secretRecord?.secret || existing.secret || "" };
+          const tlsRecord = await kv.get(tlsKey, { type: "json" });
+          storedTls = tlsRecord?.encrypted
+            ? await decryptRelayValue(env, "tls", id, tlsRecord.encrypted)
+            : {
+                certPem: tlsRecord?.certPem || existing.certPem || "",
+                keyPem: tlsRecord?.keyPem || existing.keyPem || "",
+              };
+        } catch {
+          return jsonError(
+            "RELAY_CREDENTIALS_UNAVAILABLE",
+            "中继凭据无法解密，请检查 RELAY_STORAGE_KEY",
+            503,
+          );
+        }
+        const requestedSecret = String(data?.secret || "").trim();
+        if (
+          storedCredentials.secret &&
+          requestedSecret &&
+          requestedSecret !== storedCredentials.secret
+        )
+          return jsonError(
+            "RELAY_SECRET_ROTATION_UNSUPPORTED",
+            "当前版本不支持在线轮换中继密钥，请保留现有密钥",
+            409,
+          );
+        const secret = requestedSecret || String(storedCredentials.secret || "").trim();
+        if (secret.length < 32 || secret.length > 512)
+          return jsonError("RELAY_SECRET_REQUIRED", "中继长期密钥长度必须为 32 到 512 个字符", 400);
+
+        const certPem = String(data?.certPem ?? storedTls.certPem ?? "");
+        const keyPem = String(data?.keyPem ?? storedTls.keyPem ?? "");
+        if (!!certPem !== !!keyPem)
+          return jsonError("RELAY_CERTIFICATE_PAIR_REQUIRED", "证书链和私钥必须同时提供", 400);
+        if (
+          new TextEncoder().encode(certPem).byteLength > 262144 ||
+          new TextEncoder().encode(keyPem).byteLength > 262144
+        )
+          return jsonError("RELAY_CERTIFICATE_TOO_LARGE", "证书链或私钥超过 256 KiB", 400);
+        if (
+          certPem &&
+          (!certPem.includes("-----BEGIN CERTIFICATE-----") ||
+            !/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(keyPem))
+        )
+          return jsonError("INVALID_RELAY_CERTIFICATE", "请提供 PEM 格式的证书链和私钥", 400);
+
+        const revision = hashStableText(JSON.stringify([id, relayUrl.origin, certPem, keyPem]));
+        const relay = {
+          id,
+          name,
+          url: relayUrl.origin,
+          enabled: typeof data?.enabled === "boolean" ? data.enabled : existing.enabled === true,
+          hasSecret: true,
+          hasCertificate: !!certPem && !!keyPem,
+          revision,
+        };
+        const encryptedSecret = await encryptRelayValue(env, "secret", id, { secret });
+        const encryptedTls = relay.hasCertificate
+          ? await encryptRelayValue(env, "tls", id, { certPem, keyPem })
+          : null;
+        await kv.put(secretKey, JSON.stringify(encryptedSecret));
+        if (encryptedTls)
+          await kv.put(tlsKey, JSON.stringify({ revision, encrypted: encryptedTls }));
+        else {
+          await kv.delete(tlsKey);
+        }
+        if (index >= 0) relays[index] = relay;
+        else relays.push(relay);
+        await kv.put(RELAY_REGISTRY_KV_KEY, JSON.stringify({ version: 1, relays }));
+        invalidateRelayRegistryCache(kv);
+        return jsonResponse({
+          success: true,
+          relay: {
+            id: relay.id,
+            name: relay.name,
+            url: relay.url,
+            enabled: relay.enabled,
+            hasSecret: relay.hasSecret,
+            hasCertificate: relay.hasCertificate,
+            revision: relay.revision,
+          },
+        });
+      });
+    },
+    async deleteRelay(data, { kv, ctx }) {
+      if (!kv) return jsonError("KV_NOT_CONFIGURED", "请先绑定 ENI_KV / KV Namespace", 503);
+      return await runKvDataMutation(kv)(async () => {
+        const id = String(data?.id || "").trim();
+        if (!isValidRelayId(id)) return jsonError("INVALID_RELAY_ID", "中继 ID 格式无效", 400);
+        const nodes = await kernel.loadAllNodeEntitiesFromKvStrict(kv, { ctx });
+        const referencedBy = (Array.isArray(nodes) ? nodes : [])
+          .filter((node) => normalizeRelayIdList(node?.relayIds).includes(id))
+          .map((node) => String(node?.name || "").trim())
+          .filter(Boolean);
+        if (referencedBy.length)
+          return jsonError("RELAY_IN_USE", "此中继仍被节点引用，请先更新节点中继列表", 409, {
+            nodes: referencedBy,
+          });
+        const registry = (await kv.get(RELAY_REGISTRY_KV_KEY, { type: "json" })) || { relays: [] };
+        const relays = Array.isArray(registry.relays) ? registry.relays : [];
+        const nextRelays = relays.filter((relay) => String(relay?.id || "") !== id);
+        if (nextRelays.length === relays.length)
+          return jsonError("RELAY_NOT_FOUND", "中继不存在", 404);
+        await kv.delete(`${RELAY_SECRET_PREFIX}${id}`);
+        await kv.delete(`${RELAY_TLS_PREFIX}${id}`);
+        await kv.delete(`sys:relay_state:${id}`);
+        await kv.put(RELAY_REGISTRY_KV_KEY, JSON.stringify({ version: 1, relays: nextRelays }));
+        invalidateRelayRegistryCache(kv);
+        return jsonResponse({ success: true, deletedId: id });
+      });
+    },
+  };
+}
 function defineAdminActionRegistry(dependencies = {}) {
   const { kernel } = dependencies;
   const handlers = {};
@@ -15834,6 +16445,10 @@ function defineAdminActionRegistry(dependencies = {}) {
           },
           handlers,
         ),
+      },
+      {
+        name: "relay",
+        handlers: defineRelayActions({ ...dependencies, kernel }),
       },
       {
         name: "maintenance",
@@ -21366,6 +21981,12 @@ function defineNodeMutationMethods(dependencies = {}, kernel = {}) {
           delete n[key];
           changed = true;
         }
+      const normalizedRelayMode = normalizeNodeRelayMode(n.relayMode);
+      if (String(n.relayMode || "") !== normalizedRelayMode) changed = true;
+      n.relayMode = normalizedRelayMode;
+      const normalizedRelayIds = normalizeRelayIdList(n.relayIds);
+      if (JSON.stringify(n.relayIds || []) !== JSON.stringify(normalizedRelayIds)) changed = true;
+      n.relayIds = normalizedRelayIds;
       const normalizedHeaders = kernel.sanitizeHeaders(n.headers);
       if (JSON.stringify(normalizedHeaders) !== JSON.stringify(n.headers || {})) changed = true;
       n.headers = normalizedHeaders;
@@ -21524,6 +22145,8 @@ function defineNodeMutationMethods(dependencies = {}, kernel = {}) {
           rawMainVideoStreamMode !== void 0
             ? normalizeNodeMainVideoStreamMode(rawMainVideoStreamMode)
             : readNodeMainVideoStreamMode(existingNode),
+        relayMode: normalizeNodeRelayMode(rawNode?.relayMode ?? existingNode.relayMode),
+        relayIds: normalizeRelayIdList(rawNode?.relayIds ?? existingNode.relayIds),
         headers: kernel.sanitizeHeaders(parsedHeaders),
         schemaVersion: 6,
       }).data;
@@ -24058,6 +24681,16 @@ function defineProxyCacheDeliveryMethods(dependencies = {}, kernel = {}) {
         // 校验器（ETag / Last-Modified）来自另一台主机，上游判定失配会回 200 全量，
         // 而客户端在等第 N 个字节的 206；丢掉校验器至少能拿到同偏移的 206。
         if (options.stripRangeValidator === true) headers.delete("If-Range");
+        for (const headerName of [
+          "X-Relay-Target",
+          "X-Relay-Version",
+          "X-Relay-Purpose",
+          "X-Relay-ID",
+          "X-Relay-Ts",
+          "X-Relay-Auth",
+          "X-Relay-Key",
+        ])
+          headers.delete(headerName);
         if (effectiveMethod === "GET" || effectiveMethod === "HEAD")
           headers.delete("Content-Length");
         /** @type {WorkerRequestInit} */
@@ -24066,6 +24699,8 @@ function defineProxyCacheDeliveryMethods(dependencies = {}, kernel = {}) {
           headers,
           redirect: "manual",
         };
+        if (Array.isArray(execution.relayChain) && execution.relayChain.length > 0)
+          fetchOptions.__relayChain = execution.relayChain;
         if (requestTraits.isMetadataCacheable) fetchOptions.cache = "no-store";
         if (effectiveMethod !== "GET" && effectiveMethod !== "HEAD") {
           if (
@@ -26307,6 +26942,8 @@ function defineProxyUpstreamFetchMethods(dependencies = {}, kernel = {}) {
   return {
     async performFetchWithTimeout(finalUrl, buildFetchOptions, options = {}) {
       const fetchOptions = await buildFetchOptions(finalUrl, options);
+      const relayChain = Array.isArray(fetchOptions.__relayChain) ? fetchOptions.__relayChain : [];
+      delete fetchOptions.__relayChain;
       const timeoutMs = Math.max(0, Number(options.timeoutMs) || 0);
       const requestLifecycle = options.requestLifecycle || null;
       let timeoutId = null;
@@ -26325,11 +26962,8 @@ function defineProxyUpstreamFetchMethods(dependencies = {}, kernel = {}) {
           }, timeoutMs);
       }
       try {
-        return {
-          response: await fetchRequest(finalUrl.toString(), fetchOptions),
-          finalUrl,
-          releaseFetchController,
-        };
+        const response = await fetchThroughRelays(fetchRequest, finalUrl, fetchOptions, relayChain);
+        return { response, finalUrl, releaseFetchController };
       } catch (error) {
         releaseFetchController();
         if (timedOut) {
@@ -26830,6 +27464,28 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
       const currentConfig = isPlainObject(options.runtimeConfig)
         ? options.runtimeConfig
         : await getRuntimeConfig(env);
+      const relayMode = normalizeNodeRelayMode(node.relayMode);
+      let relayChain = [];
+      if (relayMode !== "off") {
+        try {
+          relayChain = await loadRelayChainForNode(node, env);
+        } catch {
+          return {
+            invalidResponse: new Response("VPS relay configuration unavailable", {
+              status: 503,
+              headers: applySecurityHeaders(new Headers({ "Cache-Control": "no-store" })),
+            }),
+          };
+        }
+        if (!relayChain.length) {
+          return {
+            invalidResponse: new Response("VPS relay enabled but no selected relay is available", {
+              status: 503,
+              headers: applySecurityHeaders(new Headers({ "Cache-Control": "no-store" })),
+            }),
+          };
+        }
+      }
       const rawRequestUrl = options.requestUrl || new URL(request.url);
       const runtimeRouteContext =
         options.runtimeRouteContext && typeof options.runtimeRouteContext === "object"
@@ -26939,11 +27595,13 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
           ? "proxy"
           : "";
       const forceWorkerProxyReason =
-        linkVariant !== "main"
-          ? "link_variant_force_proxy"
-          : rewritePlaybackEntry
-            ? "rewrite_playback_entry_proxy"
-            : "";
+        relayMode !== "off"
+          ? "relay_mode_worker_proxy"
+          : linkVariant !== "main"
+            ? "link_variant_force_proxy"
+            : rewritePlaybackEntry
+              ? "rewrite_playback_entry_proxy"
+              : "";
       const forceWorkerProxy = !!forceWorkerProxyReason;
       const requestTraits = forceWorkerProxy
         ? {
@@ -27026,7 +27684,8 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
         86400;
       const enableH3 = protocolProfile.enableH3 === true;
       const forceH1 = protocolProfile.forceH1 === true;
-      const playbackInfoCacheEnabled = currentConfig.playbackInfoCacheEnabled !== false;
+      const playbackInfoCacheEnabled =
+        currentConfig.playbackInfoCacheEnabled !== false && relayMode !== "direct_media";
       const playbackInfoCacheTtlSec = clampIntegerConfig(
         currentConfig.playbackInfoCacheTtlSec,
         DEFAULT_PLAYBACK_INFO_CACHE_TTL_SEC,
@@ -27091,6 +27750,8 @@ function definePlaybackExecutionCacheMethods(dependencies = {}, kernel = {}) {
         ctx,
         startTime,
         currentConfig,
+        relayMode,
+        relayChain,
         rawRequestUrl,
         requestUrl,
         requestOrigin: rawRequestUrl.origin,
@@ -29737,10 +30398,30 @@ function defineProxyTransportMethods(dependencies = {}, kernel = {}) {
           return upstreamState;
       }
       try {
+        const responseBaseUrl =
+          upstreamState?.finalUrl || execution?.requestUrl || execution?.rawRequestUrl || null;
+        const directMediaUrls =
+          execution.relayMode === "direct_media" &&
+          rewriteEnabled &&
+          isVerifiedDirectMediaClientProfile(execution.request)
+            ? await issueDirectMediaTickets(
+                normalizePlaybackInfoObjectArray(
+                  upstreamState.playbackInfoRepresentation.payload?.MediaSources,
+                ).items,
+                {
+                  relay: execution.relayChain?.[0],
+                  nodeId: execution.nodeName,
+                  activeTargetBase: upstreamState?.activeTargetBase,
+                  responseBaseUrl,
+                },
+              )
+            : new Map();
         const rewriteResult = rewritePlaybackInfoRepresentation(
           upstreamState.playbackInfoRepresentation,
           {
             rewriteEnabled,
+            buildDirectMediaUrl: (candidateUrl) =>
+              directMediaUrls.get(String(candidateUrl || "")) || "",
             buildProxyUrl: (candidateUrl) =>
               methods.buildPlaybackInfoProxyUrl(
                 execution,
@@ -35793,6 +36474,10 @@ var DATA_SERVICE_CONSTANTS = Object.freeze({
   CONFIG_KEY: "sys:theme",
   NODES_INDEX_KEY: "sys:nodes_index:v1",
   NODES_SUMMARY_INDEX_KEY: "sys:nodes_index_full:v2",
+  RELAY_REGISTRY_KEY: "sys:relay_registry:v1",
+  RELAY_SECRET_PREFIX: "sys:relay_secret:",
+  RELAY_TLS_PREFIX: "sys:relay_tls:",
+  RELAY_STATE_PREFIX: "sys:relay_state:",
   ADMIN_INDEX_UPLOAD_PREFIX: ADMIN_LOCAL_INDEX_KV_PREFIX,
   ADMIN_ACTIVE_INDEX_KEY: ADMIN_ACTIVE_INDEX_KV_KEY,
   LEGACY_OPS_STATUS_KEY: "sys:ops_status:v1",
@@ -37367,6 +38052,10 @@ function defineNodeKvTidyMethods(dependencies = {}, kernel = {}) {
           keyName === kernel.CONFIG_PREV_KEY ||
           keyName === kernel.NODES_INDEX_KEY ||
           keyName === kernel.NODES_SUMMARY_INDEX_KEY ||
+          keyName === kernel.RELAY_REGISTRY_KEY ||
+          keyName.startsWith(kernel.RELAY_SECRET_PREFIX) ||
+          keyName.startsWith(kernel.RELAY_TLS_PREFIX) ||
+          keyName.startsWith(kernel.RELAY_STATE_PREFIX) ||
           keyName === kernel.CONFIG_SNAPSHOTS_KEY
         )
           continue;
@@ -38361,6 +39050,10 @@ function createWorkerApplication({ includeTestingSupport = false } = {}) {
   };
   const workerHandler = Object.freeze({
     async fetch(request, env, ctx) {
+      const relayCertificateResponse = await handleRelayCertificatePush(request, env);
+      if (relayCertificateResponse) return relayCertificateResponse;
+      const relayControlResponse = await handleRelayConfigPull(request, env);
+      if (relayControlResponse) return relayControlResponse;
       const routeContext = buildNodeRouteContext(request, env);
       const requestMethod = request.method;
       const isFaviconRoute =

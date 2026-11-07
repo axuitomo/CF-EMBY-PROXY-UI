@@ -2,6 +2,8 @@
 JWT_SECRET=replace-with-a-long-random-secret
 ADMIN_PASS=replace-with-a-local-admin-password
 
+# Required only when using VPS relays; use at least 32 random bytes.
+RELAY_STORAGE_KEY=replace-with-a-separate-long-random-secret
 # TMDB credentials for the per-node request conversion (see docs/architecture.md).
 # Configuration in the panel takes precedence; env is ignored once either panel field is set.
 # TMDB_API_READ_TOKEN=

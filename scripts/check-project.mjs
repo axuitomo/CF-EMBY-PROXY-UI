@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
 const frontendDirectory = path.join(repositoryRoot, "frontend");
+const relayDirectory = path.join(repositoryRoot, "relay");
 
 const requiredChecks = [
   {
@@ -63,8 +64,17 @@ const requiredChecks = [
       "tests/tech-stack-pins.test.mjs",
       "tests/frontend-color-tokens.test.mjs",
       "tests/admin-vendor-bundle.test.mjs",
+      "tests/relay-signing.test.mjs",
+      "tests/relay-control-endpoint.test.mjs",
+      "tests/direct-media-ticket.test.mjs",
     ],
     cwd: repositoryRoot,
+  },
+  {
+    name: "Go relay tests",
+    command: "go",
+    args: ["test", "./..."],
+    cwd: relayDirectory,
   },
   {
     name: "Admin runtime composition",

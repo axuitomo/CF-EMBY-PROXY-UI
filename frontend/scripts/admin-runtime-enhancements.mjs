@@ -779,6 +779,7 @@ html[data-theme-switching] *::after{transition:none !important}
 .dark #app-shell [data-admin-credential-link]:hover{color:#7dd3fc}
 #app-shell [data-admin-credential-link]:focus-visible{outline:none;border-radius:4px;box-shadow:0 0 0 2px rgba(2,132,199,.3)}
 #app-shell [data-admin-credential-link] svg{width:.875rem;height:.875rem}
+#view-settings .relay-admin-panel{display:grid;gap:1rem;padding:1rem 0;color:rgb(var(--ui-c-n-800))}.dark #view-settings .relay-admin-panel{color:rgb(var(--ui-c-n-100))}.relay-panel-heading,.relay-row,.relay-form-actions{display:flex;align-items:center;justify-content:space-between;gap:1rem}.relay-panel-heading h2{margin:.15rem 0;font-size:1.25rem;font-weight:700}.relay-kicker{margin:0;color:rgb(var(--ui-c-a-700));font-size:.7rem;font-weight:700;letter-spacing:.08em}.relay-panel-copy{max-width:46rem;margin:.4rem 0 0;color:rgb(var(--ui-c-n-500));font-size:.875rem;line-height:1.5}.relay-rows{display:grid;border-top:1px solid rgb(var(--ui-c-n-200))}.dark .relay-rows{border-color:rgb(var(--ui-c-n-700))}.relay-row{min-width:0;padding:.85rem 0;border-bottom:1px solid rgb(var(--ui-c-n-200))}.dark .relay-row{border-color:rgb(var(--ui-c-n-700))}.relay-identity{display:grid;min-width:0;gap:.2rem}.relay-identity strong{font-size:.9rem}.relay-identity span{overflow-wrap:anywhere;color:rgb(var(--ui-c-n-500));font-size:.78rem}.relay-state{flex:0 0 auto;color:rgb(var(--ui-c-n-500));font-size:.78rem}.relay-row-actions,.relay-form-actions{display:flex;flex-wrap:wrap;gap:.5rem}.relay-secondary-button,.relay-danger-button,.relay-primary-button{display:inline-flex;min-height:2.25rem;align-items:center;justify-content:center;gap:.4rem;border:1px solid rgb(var(--ui-c-n-300));border-radius:6px;padding:.4rem .7rem;background:rgb(var(--ui-c-white));color:rgb(var(--ui-c-n-700));font-size:.82rem;font-weight:600}.dark .relay-secondary-button,.dark .relay-danger-button{border-color:rgb(var(--ui-c-n-600));background:rgb(var(--ui-c-n-900));color:rgb(var(--ui-c-n-100))}.relay-primary-button{border-color:rgb(var(--ui-c-a-700));background:rgb(var(--ui-c-a-700));color:white}.relay-danger-button{color:#b42318}.relay-form{display:grid;gap:.85rem;border-top:1px solid rgb(var(--ui-c-n-200));padding-top:1rem}.dark .relay-form{border-color:rgb(var(--ui-c-n-700))}.relay-form h3{margin:0;font-size:1rem;font-weight:700}.relay-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.85rem}.relay-form-grid label,.node-relay-mode-label{display:grid;min-width:0;gap:.35rem;font-size:.82rem;font-weight:600}.relay-form-grid input:not([type=checkbox]),.relay-form-grid textarea,.node-relay-mode-label select{width:100%;min-width:0;border:1px solid rgb(var(--ui-c-n-300));border-radius:5px;padding:.55rem .65rem;background:rgb(var(--ui-c-white));color:inherit;font:inherit}.dark .relay-form-grid input:not([type=checkbox]),.dark .relay-form-grid textarea,.dark .node-relay-mode-label select{border-color:rgb(var(--ui-c-n-600));background:rgb(var(--ui-c-n-900))}.relay-form-grid textarea{resize:vertical;font-family:ui-monospace,monospace;font-size:.75rem}.relay-span-two{grid-column:1/-1}.relay-check{display:flex!important;align-items:center;gap:.55rem!important}.relay-check input,.node-relay-option input{width:1rem;height:1rem;accent-color:rgb(var(--ui-c-a-700))}.relay-empty-state{padding:.8rem 0;color:rgb(var(--ui-c-n-500));font-size:.875rem}.relay-status{border-left:3px solid rgb(var(--ui-c-a-600));padding:.55rem .75rem;background:rgb(var(--ui-c-n-50));font-size:.85rem}.relay-status[data-tone=error]{border-color:#b42318;color:#b42318}.relay-status[data-tone=success]{border-color:#16805d;color:#16805d}.dark .relay-status{background:rgb(var(--ui-c-n-900))}.node-relay-fields{display:grid;grid-column:1/-1;gap:.75rem;border-top:1px solid rgb(var(--ui-c-n-200));padding-top:.8rem}.dark .node-relay-fields{border-color:rgb(var(--ui-c-n-700))}.node-relay-picker{display:grid;gap:.4rem}.node-relay-picker-title{font-size:.82rem;font-weight:600}.node-relay-options{display:flex;flex-wrap:wrap;gap:.5rem}.node-relay-option{display:flex;align-items:center;gap:.5rem;border:1px solid rgb(var(--ui-c-n-200));border-radius:5px;padding:.3rem .4rem;font-size:.8rem}.dark .node-relay-option{border-color:rgb(var(--ui-c-n-700))}.node-relay-option label{display:inline-flex;align-items:center;gap:.4rem}.node-relay-option-actions{display:inline-flex;gap:.15rem}.node-relay-order-button{display:inline-flex;width:1.75rem;height:1.75rem;align-items:center;justify-content:center;border-radius:4px;color:rgb(var(--ui-c-n-600))}.node-relay-order-button:hover:not(:disabled){background:rgb(var(--ui-c-n-100))}.node-relay-order-button:focus-visible{outline:2px solid rgb(var(--ui-c-a-600));outline-offset:1px}.node-relay-order-button:disabled{opacity:.35}.dark .node-relay-order-button:hover:not(:disabled){background:rgb(var(--ui-c-n-800))}.node-relay-picker p{margin:0;color:rgb(var(--ui-c-n-500));font-size:.75rem;line-height:1.45}@media(max-width:640px){.relay-row{align-items:flex-start;flex-wrap:wrap}.relay-identity{width:100%}.relay-state{margin-right:auto}.relay-form-grid{grid-template-columns:minmax(0,1fr)}.relay-span-two{grid-column:auto}.relay-panel-heading{align-items:flex-start}}
 </style>`;
 // 这段脚本被注入到 </head> 前，早于 <body> 里定义 window.App 的编译 bundle。
 // 因此补丁不能同步应用：入口只装事件与观察器，真正打补丁的是 scheduleShellRefresh() 排的那一帧。
@@ -1240,6 +1241,296 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
   }
 
   function scheduleShellRefresh() {
+  const relayAdminState = { relays: [], loaded: false, loading: false, saving: false, attemptedAt: 0, error: '', notice: '', editingId: '' };
+
+  function createRelayControl(tag, className = '') {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    return element;
+  }
+
+  function setRelayPanelMessage(panel, text, tone = 'info') {
+    const status = panel?.querySelector('[data-relay-status]');
+    if (!status) return;
+    status.textContent = text;
+    status.dataset.tone = tone;
+    status.hidden = !text;
+  }
+
+  function renderRelayRows(panel) {
+    const body = panel.querySelector('[data-relay-rows]');
+    if (!body) return;
+    body.replaceChildren();
+    if (!relayAdminState.relays.length) {
+      const empty = createRelayControl('p', 'relay-empty-state');
+      empty.textContent = '尚未添加 VPS 中继。';
+      body.appendChild(empty);
+      return;
+    }
+    for (const relay of relayAdminState.relays) {
+      const row = createRelayControl('div', 'relay-row');
+      const identity = createRelayControl('div', 'relay-identity');
+      const title = createRelayControl('strong');
+      title.textContent = String(relay.name || relay.id || '未命名中继');
+      const detail = createRelayControl('span');
+      detail.textContent = String(relay.id || '') + ' · ' + String(relay.url || '');
+      identity.append(title, detail);
+      const state = createRelayControl('span', 'relay-state');
+      state.textContent = relay.enabled === true ? '已启用 · 状态未验证' : '已禁用';
+      const actions = createRelayControl('div', 'relay-row-actions');
+      const edit = createRelayControl('button', 'relay-secondary-button');
+      edit.type = 'button';
+      edit.textContent = '编辑';
+      edit.addEventListener('click', () => fillRelayForm(panel, relay));
+      const remove = createRelayControl('button', 'relay-danger-button');
+      remove.type = 'button';
+      remove.textContent = '删除';
+      remove.disabled = relayAdminState.saving;
+      remove.addEventListener('click', async () => {
+        if (!window.confirm('删除中继 ' + String(relay.id || '') + '？仍被节点引用时无法删除。')) return;
+        relayAdminState.saving = true;
+        try {
+          await window.App.apiCall('deleteRelay', { id: relay.id });
+          relayAdminState.notice = '中继已删除。';
+          relayAdminState.loaded = false;
+          await loadRelayRegistry(panel, true);
+        } catch (error) {
+          setRelayPanelMessage(panel, error?.message || '删除中继失败。', 'error');
+        } finally {
+          relayAdminState.saving = false;
+          renderRelayRows(panel);
+        }
+      });
+      actions.append(edit, remove);
+      row.append(identity, state, actions);
+      body.appendChild(row);
+    }
+  }
+
+  function fillRelayForm(panel, relay = null) {
+    const form = panel?.querySelector('[data-relay-form]');
+    if (!form) return;
+    relayAdminState.editingId = String(relay?.id || '');
+    form.elements.namedItem('id').value = String(relay?.id || '');
+    form.elements.namedItem('id').disabled = !!relay;
+    form.elements.namedItem('name').value = String(relay?.name || '');
+    form.elements.namedItem('url').value = String(relay?.url || '');
+    form.elements.namedItem('enabled').checked = relay?.enabled === true;
+    form.elements.namedItem('secret').value = '';
+    form.elements.namedItem('secret').placeholder = relay?.hasSecret ? '留空则保留现有密钥' : '至少 32 个字符';
+    form.elements.namedItem('certPem').value = '';
+    form.elements.namedItem('keyPem').value = '';
+    setRelayPanelMessage(panel, relay ? '编辑中继配置。密钥与私钥不会回显。' : '', 'info');
+  }
+
+  async function loadRelayRegistry(panel, force = false) {
+    panel = panel || document.querySelector('#admin-relay-view');
+    if (relayAdminState.loading || (relayAdminState.loaded && !force)) return;
+    if (typeof window.App?.apiCall !== 'function') return;
+    if (!force && Date.now() - relayAdminState.attemptedAt < 5000) return;
+    relayAdminState.attemptedAt = Date.now();
+    relayAdminState.loading = true;
+    try {
+      const result = await window.App.apiCall('listRelays', {});
+      relayAdminState.relays = Array.isArray(result?.relays) ? result.relays : [];
+      relayAdminState.loaded = true;
+      if (panel) renderRelayRows(panel);
+      const idSelect = document.querySelector('#node-modal [data-node-relay-options]');
+      if (idSelect) renderNodeRelayOptions(idSelect.closest('[data-node-relay-fields]'));
+      if (relayAdminState.notice && panel) setRelayPanelMessage(panel, relayAdminState.notice, 'success');
+    } catch (error) {
+      if (panel) setRelayPanelMessage(panel, error?.message || '读取中继列表失败。', 'error');
+    } finally {
+      relayAdminState.loading = false;
+    }
+  }
+
+  function buildRelayPanel() {
+    const panel = createRelayControl('section', 'relay-admin-panel');
+    panel.id = 'admin-relay-view';
+    panel.dataset.adminRelayPanel = '1';
+    panel.hidden = true;
+    panel.setAttribute('aria-labelledby', 'admin-relay-title');
+    panel.innerHTML = '<div class="relay-panel-heading"><div><p class="relay-kicker">NETWORK</p><h2 id="admin-relay-title">VPS 中继</h2><p class="relay-panel-copy">填写中继地址和长期密钥。首次登记可以留空证书，VPS Certbot 续期后会自动推送；状态未验证前不要分配给生产节点。</p></div><button type="button" class="relay-secondary-button" data-relay-refresh><i data-lucide="refresh-cw" aria-hidden="true"></i><span>刷新</span></button></div><div data-relay-status class="relay-status" role="status" hidden></div><div data-relay-rows class="relay-rows"></div><form data-relay-form class="relay-form"><h3 data-relay-form-title>添加中继</h3><div class="relay-form-grid"><label>Relay ID<input name="id" required pattern="[A-Za-z0-9_-]{1,64}" maxlength="64" autocomplete="off"></label><label>名称<input name="name" maxlength="80" autocomplete="off"></label><label class="relay-span-two">HTTPS 根地址<input name="url" type="url" required placeholder="https://relay.example.com:2087"></label><label>长期密钥<input name="secret" type="password" autocomplete="new-password"></label><label class="relay-check"><input name="enabled" type="checkbox"><span>启用此中继</span></label><label class="relay-span-two">证书链 PEM<textarea name="certPem" rows="4" autocomplete="off"></textarea></label><label class="relay-span-two">私钥 PEM<textarea name="keyPem" rows="4" autocomplete="off"></textarea></label></div><div class="relay-form-actions"><button type="button" class="relay-secondary-button" data-relay-cancel>清空</button><button type="submit" class="relay-primary-button">保存中继</button></div></form>';
+    panel.querySelector('[data-relay-refresh]')?.addEventListener('click', () => loadRelayRegistry(panel, true));
+    panel.querySelector('[data-relay-cancel]')?.addEventListener('click', () => fillRelayForm(panel));
+    panel.querySelector('[data-relay-form]')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (relayAdminState.saving) return;
+      const form = event.currentTarget;
+      const values = new FormData(form);
+      const id = String(values.get('id') || '').trim();
+      const url = String(values.get('url') || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+        setRelayPanelMessage(panel, 'Relay ID 只能包含字母、数字、连字符和下划线。', 'error');
+        return;
+      }
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error();
+      } catch {
+        setRelayPanelMessage(panel, '请输入不带路径、凭据或查询参数的 HTTPS 根地址。', 'error');
+        return;
+      }
+      relayAdminState.saving = true;
+      try {
+        await window.App.apiCall('saveRelay', {
+          id,
+          name: String(values.get('name') || '').trim(),
+          url,
+          enabled: values.get('enabled') === 'on',
+          secret: String(values.get('secret') || ''),
+          ...(String(values.get('certPem') || '') ? { certPem: String(values.get('certPem')) } : {}),
+          ...(String(values.get('keyPem') || '') ? { keyPem: String(values.get('keyPem')) } : {})
+        });
+        relayAdminState.notice = '中继配置已保存；连通性和客户端直连状态尚未验证。';
+        relayAdminState.loaded = false;
+        fillRelayForm(panel);
+        await loadRelayRegistry(panel, true);
+      } catch (error) {
+        setRelayPanelMessage(panel, error?.message || '保存中继失败。', 'error');
+      } finally {
+        relayAdminState.saving = false;
+        renderRelayRows(panel);
+      }
+    });
+    return panel;
+  }
+
+  function showRelaySettingsView(panel, visible) {
+    if (!panel) return;
+    panel.hidden = !visible;
+    const forms = panel.parentElement;
+    forms?.querySelectorAll?.('[id^="set-"]').forEach((view) => { view.hidden = visible; });
+    const tabs = panel.closest('#view-settings')?.querySelectorAll?.('[role="tablist"] [role="tab"]') || [];
+    tabs.forEach((tab) => tab.setAttribute('aria-selected', tab === panel._relayTab && visible ? 'true' : 'false'));
+    if (visible) loadRelayRegistry(panel);
+  }
+
+  function syncRelaySettingsView() {
+    const settings = document.querySelector('#view-settings');
+    const forms = settings?.querySelector('#settings-forms');
+    const tablist = settings?.querySelector('[role="tablist"]');
+    if (!settings || !forms || !tablist) return;
+    let panel = forms.querySelector('#admin-relay-view');
+    if (!panel) {
+      panel = buildRelayPanel();
+      forms.appendChild(panel);
+    }
+    let tab = tablist.querySelector('[data-admin-relay-tab="1"]');
+    if (!tab) {
+      tab = createRelayControl('button', 'set-tab min-w-[8.75rem] lg:min-w-0 lg:w-full flex-shrink-0 text-left px-3 py-2 rounded-control border text-[13px] transition-[transform,box-shadow,border-color,background-color,color] duration-ui ease-out-expo motion-reduce:transition-none motion-reduce:transform-none');
+      tab.type = 'button';
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', panel.id);
+      tab.setAttribute('aria-selected', 'false');
+      tab.dataset.adminRelayTab = '1';
+      const label = createRelayControl('span', 'block font-semibold');
+      label.textContent = 'VPS 中继';
+      tab.appendChild(label);
+      tablist.appendChild(tab);
+      tab.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showRelaySettingsView(panel, true);
+      });
+    }
+    panel._relayTab = tab;
+    if (!panel.dataset.adminRelayNavigationBound) {
+      panel.dataset.adminRelayNavigationBound = '1';
+      settings.addEventListener('click', (event) => {
+        if (event.target?.closest?.('[data-admin-relay-tab="1"]')) return;
+        if (event.target?.closest?.('[role="tab"]')) showRelaySettingsView(panel, false);
+      }, true);
+    }
+  }
+
+  function renderNodeRelayOptions(fields) {
+    const list = fields?.querySelector('[data-node-relay-options]');
+    if (!list) return;
+    const app = window.App;
+    const relays = relayAdminState.relays;
+    const selected = new Set(Array.isArray(app?.nodeModalForm?.relayIds) ? app.nodeModalForm.relayIds : []);
+    list.replaceChildren();
+    for (const relay of relays) {
+      const id = String(relay.id || '');
+      const row = createRelayControl('div', 'node-relay-option');
+      const label = createRelayControl('label');
+      const checkbox = createRelayControl('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = id;
+      checkbox.checked = selected.has(id);
+      checkbox.disabled = relay.enabled !== true && !checkbox.checked;
+      const text = createRelayControl('span');
+      text.textContent = String(relay.name || id || '') + (relay.enabled === true ? '' : ' · 已禁用');
+      label.append(checkbox, text);
+      row.appendChild(label);
+      checkbox.addEventListener('change', () => {
+        const knownIds = new Set(relays.map((item) => String(item.id || '')));
+        const ids = (Array.isArray(app.nodeModalForm.relayIds) ? app.nodeModalForm.relayIds : [])
+          .filter((item) => knownIds.has(item) && (item !== id || checkbox.checked));
+        if (checkbox.checked && !ids.includes(id)) ids.push(id);
+        if (ids.length > 3) {
+          checkbox.checked = false;
+          const status = fields.querySelector('[data-node-relay-status]');
+          status.textContent = '每个节点最多选择 3 台中继。';
+          status.hidden = false;
+          return;
+        }
+        const status = fields.querySelector('[data-node-relay-status]');
+        status.textContent = '';
+        status.hidden = true;
+        app.nodeModalForm.relayIds = ids;
+        renderNodeRelayOptions(fields);
+      });
+      if (checkbox.checked) {
+        const ids = Array.isArray(app.nodeModalForm.relayIds) ? app.nodeModalForm.relayIds : [];
+        const index = ids.indexOf(id);
+        const actions = createRelayControl('span', 'node-relay-option-actions');
+        for (const [offset, glyph, name] of [[-1, '↑', '提高优先级'], [1, '↓', '降低优先级']]) {
+          const button = createRelayControl('button', 'node-relay-order-button');
+          button.type = 'button';
+          button.textContent = glyph;
+          button.title = name;
+          button.setAttribute('aria-label', name + ': ' + String(relay.name || id));
+          button.disabled = index + offset < 0 || index + offset >= ids.length;
+          button.addEventListener('click', () => {
+            const reordered = [...app.nodeModalForm.relayIds];
+            const next = index + offset;
+            [reordered[index], reordered[next]] = [reordered[next], reordered[index]];
+            app.nodeModalForm.relayIds = reordered;
+            renderNodeRelayOptions(fields);
+          });
+          actions.appendChild(button);
+        }
+        row.appendChild(actions);
+      }
+      list.appendChild(row);
+    }
+  }
+
+  function syncNodeRelayFields() {
+    const modal = document.querySelector('#node-modal');
+    const app = window.App;
+    if (!modal || !app?.nodeModalForm || modal.hidden || modal.open === false) return;
+    const modeSelect = modal.querySelector('#form-main-video-stream-mode');
+    if (!modeSelect) return;
+    let fields = modal.querySelector('[data-node-relay-fields]');
+    if (!fields) {
+      fields = createRelayControl('section', 'node-relay-fields');
+      fields.dataset.nodeRelayFields = '1';
+      fields.innerHTML = '<label class="node-relay-mode-label">VPS 中继模式<select data-node-relay-mode aria-label="VPS 中继模式"><option value="off">不使用中继</option><option value="worker">经 Worker 中继</option><option value="direct_media">视频直连中继（实验）</option></select></label><div class="node-relay-picker"><span class="node-relay-picker-title">节点中继优先级</span><div data-node-relay-status class="relay-status" role="status" hidden></div><div data-node-relay-options class="node-relay-options"></div><p>最多选择 3 台已启用的中继；顺序可单独调整。直连仅适用于已验证客户端版本；当前未验证档案会回退到 Worker。</p></div>';
+      modeSelect.closest('.space-y-2')?.insertAdjacentElement('afterend', fields) || modal.querySelector('form')?.appendChild(fields);
+      fields.querySelector('[data-node-relay-mode]')?.addEventListener('change', (event) => {
+        app.nodeModalForm.relayMode = event.currentTarget.value;
+      });
+    }
+    const mode = fields.querySelector('[data-node-relay-mode]');
+    if (mode && document.activeElement !== mode) mode.value = String(app.nodeModalForm.relayMode || 'off');
+    if (!relayAdminState.loaded) loadRelayRegistry(document.querySelector('#admin-relay-view'));
+    renderNodeRelayOptions(fields);
+  }
+
     if (shellFrameId) return;
     shellFrameId = enqueue(() => {
       shellFrameId = 0;
@@ -1252,6 +1543,8 @@ const ADMIN_RUNTIME_ENHANCEMENT_SCRIPT = `<script data-admin-runtime-enhancement
       patchDnsIpPoolDeleteMethods(window.App);
       mountSensitiveInputToggles(document);
       syncDashboardTrafficToggle(window.App);
+      syncRelaySettingsView();
+      syncNodeRelayFields();
     });
   }
 

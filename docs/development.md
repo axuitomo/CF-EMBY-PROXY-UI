@@ -116,6 +116,7 @@ node --test tests/*.test.mjs
 - `wrangler.toml` 中的 KV/D1 ID 当前是占位值时，不应直接部署；先配置真实 namespace/database。
 - PowerShell 如果 `npm` 命中执行策略错误，使用 `npm.cmd`；不要为了绕过策略修改仓库文件。
 - `npm.cmd run dev:worker` 起本地 Worker（`wrangler dev`，自动跑 `build:worker`，读 `.dev.vars`）；手动验收代理行为时用它，不要靠 Playwright 配置去摸命令。
+- `RELAY_STORAGE_KEY` 是 VPS 中继凭据和 TLS 私钥的独立加密密钥，至少 32 字节且必须保存在 Worker Secret/本地 `.dev.vars`，不得提交明文值；更换密钥前需迁移/重加密 KV 凭据，否则现有中继配置将无法读取。
 
 ## 7. 浏览器端 e2e（Playwright）
 

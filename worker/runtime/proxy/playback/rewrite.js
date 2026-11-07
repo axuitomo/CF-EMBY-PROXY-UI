@@ -106,6 +106,8 @@ export function rewritePlaybackInfoPayload(payload, options = {}) {
   }
   const buildProxyUrl =
     typeof options.buildProxyUrl === "function" ? options.buildProxyUrl : () => "";
+  const buildDirectMediaUrl =
+    typeof options.buildDirectMediaUrl === "function" ? options.buildDirectMediaUrl : () => "";
   let changed = sanitizedResult.rewriteState === "applied";
   const nextMediaSources = sanitizedPayload.MediaSources.map((mediaSource) => {
     let nextMediaSource = mediaSource;
@@ -124,11 +126,16 @@ export function rewritePlaybackInfoPayload(payload, options = {}) {
     const rawDirectStreamUrl = String(mediaSource.DirectStreamUrl || "").trim();
     const rawPath = String(mediaSource.Path || "").trim();
     const playbackCandidateUrl = rawDirectStreamUrl || rawPath;
-    const rewrittenPlaybackUrl = playbackCandidateUrl ? buildProxyUrl(playbackCandidateUrl) : "";
+    const directMediaUrl = playbackCandidateUrl
+      ? buildDirectMediaUrl(playbackCandidateUrl, mediaSource)
+      : "";
+    const rewrittenPlaybackUrl =
+      directMediaUrl || (playbackCandidateUrl ? buildProxyUrl(playbackCandidateUrl) : "");
     if (rewrittenPlaybackUrl) {
       applyField("DirectStreamUrl", rewrittenPlaybackUrl, { ensurePresent: true });
       applyField("Path", rewrittenPlaybackUrl, { ensurePresent: true });
     } else applyField("Path", "", { ensurePresent: true });
+    if (directMediaUrl) applyField("RequiredHttpHeaders", {});
     applyField("IsRemote", false, { ensurePresent: true });
     applyField("Protocol", "Http", { ensurePresent: true });
     applyField("SupportsTranscoding", false, { ensurePresent: true });
@@ -150,7 +157,10 @@ export function rewritePlaybackInfoRepresentation(representation, options = {}) 
     return { kind: "invalid", reason: "invalid_representation" };
   const rewriteResult =
     options.rewriteEnabled === true
-      ? rewritePlaybackInfoPayload(representation.payload, { buildProxyUrl: options.buildProxyUrl })
+      ? rewritePlaybackInfoPayload(representation.payload, {
+          buildProxyUrl: options.buildProxyUrl,
+          buildDirectMediaUrl: options.buildDirectMediaUrl,
+        })
       : sanitizePlaybackInfoMediaSourcesPayload(representation.payload);
   if (rewriteResult.rewriteState !== "applied") {
     return {

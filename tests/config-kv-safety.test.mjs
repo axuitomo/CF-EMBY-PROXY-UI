@@ -74,6 +74,57 @@ function createKv(initialValues = {}) {
   };
 }
 
+test("relay administration stores secrets privately and redacts list responses", async () => {
+  const { kv } = createKv();
+  const missingKey = await adminActions.saveRelay(
+    { id: "relay-missing-key", url: "https://relay.example:2087", secret: "x".repeat(32) },
+    { kv, env: {}, ctx: null },
+  );
+  assert.equal(missingKey.status, 503);
+  const relayEnv = { RELAY_STORAGE_KEY: "relay-storage-key-for-tests-at-least-32-bytes" };
+  const relay = {
+    id: "relay-1",
+    name: "Primary",
+    url: "https://relay.example:2087",
+    secret: "long-lived-relay-secret-1234567890",
+    certPem: "-----BEGIN CERTIFICATE-----\ncertificate-chain\n-----END CERTIFICATE-----",
+    keyPem: "-----BEGIN PRIVATE KEY-----\nprivate-key\n-----END PRIVATE KEY-----",
+    enabled: true,
+  };
+  const savedResponse = await adminActions.saveRelay(relay, { kv, env: relayEnv, ctx: null });
+  assert.equal(savedResponse.status, 200);
+  const saved = await savedResponse.json();
+  assert.equal(saved.relay.id, relay.id);
+  assert.equal("secret" in saved.relay, false);
+  assert.equal("keyPem" in saved.relay, false);
+  const stored = await kv.get("sys:relay_registry:v1", { type: "json" });
+  assert.equal(stored.relays[0].id, relay.id);
+  assert.equal("secret" in stored.relays[0], false);
+  assert.equal("keyPem" in stored.relays[0], false);
+  const secretRecord = await kv.get("sys:relay_secret:relay-1", { type: "json" });
+  const tlsRecord = await kv.get("sys:relay_tls:relay-1", { type: "json" });
+  assert.equal("secret" in secretRecord, false);
+  assert.equal("keyPem" in tlsRecord, false);
+  assert.equal("encrypted" in tlsRecord, true);
+  const listed = await (await adminActions.listRelays({}, { kv })).json();
+  assert.equal(listed.relays[0].hasSecret, true);
+  assert.equal("secret" in listed.relays[0], false);
+  assert.equal("certPem" in listed.relays[0], false);
+  const rejected = await adminActions.saveRelay(
+    { ...relay, url: "http://relay.example:2087" },
+    { kv, env: relayEnv, ctx: null },
+  );
+  assert.equal(rejected.status, 400);
+  const deletedResponse = await adminActions.deleteRelay(
+    { id: relay.id },
+    { kv, env: relayEnv, ctx: null },
+  );
+  assert.equal(deletedResponse.status, 200);
+  assert.equal(await kv.get("sys:relay_secret:relay-1", { type: "json" }), null);
+  assert.equal(await kv.get("sys:relay_tls:relay-1", { type: "json" }), null);
+  assert.equal((await kv.get("sys:relay_registry:v1", { type: "json" })).relays.length, 0);
+});
+
 test("persistRuntimeConfig rejects writes when KV is not configured", async () => {
   await assert.rejects(
     kernel.persistRuntimeConfig({ rateLimitRpm: 20 }, { env: {} }),
@@ -1002,6 +1053,16 @@ test("a save leaves the previous config recoverable, and restoring is reversible
     assert.equal((await kv.get(kernel.CONFIG_PREV_KEY, { type: "json" })).rateLimitRpm, 30);
   });
 });
+test("relay secret and certificate keys are retained by KV tidy", async () => {
+  const classified = await kernel.classifyKvTidyKeys(null, [
+    kernel.RELAY_REGISTRY_KEY,
+    `${kernel.RELAY_SECRET_PREFIX}relay-1`,
+    `${kernel.RELAY_TLS_PREFIX}relay-1`,
+    `${kernel.RELAY_STATE_PREFIX}relay-1`,
+  ]);
+  assert.deepEqual([...classified.removableKeys], []);
+  assert.equal(classified.untouchedOtherKeyCount, 0);
+});
 
 test("restoring without a snapshot fails closed", async () => {
   const { kv } = createKv({ [kernel.CONFIG_KEY]: { rateLimitRpm: 20, cfZoneId: "zone-1" } });
@@ -1023,6 +1084,8 @@ test("the config snapshot key is not something kv tidy treats as garbage", async
     kernel.CONFIG_KEY,
     kernel.CONFIG_META_KEY,
     kernel.CONFIG_PREV_KEY,
+    kernel.RELAY_REGISTRY_KEY,
+    `${kernel.RELAY_STATE_PREFIX}relay-1`,
     "node:demo",
   ]);
   assert.deepEqual([...classified.removableKeys], []);
