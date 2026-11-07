@@ -21,10 +21,10 @@
 在 Xshell 8 登录 VPS 后粘贴：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axuitomo/CF-EMBY-PROXY-UI/main/relay/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/axuitomo/CF-EMBY-PROXY-UI/test/relay/install.sh | sudo env RELAY_SOURCE_REF=test bash
 ```
 
-如果已用 `root` 登录，把末尾的 `| sudo bash` 改成 `| bash`。菜单选项如下：
+如果已用 `root` 登录，把命令中的 `sudo env` 改成 `env`。菜单选项如下：
 
 1. **安装 / 重装 / 更新**：首次安装时自动编译、申请证书、配置续期推送。已有配置时保留 Relay ID 和长期密钥；可选择修改参数。重装会更新程序和服务，不会覆盖现有密钥。
 2. **配置运行参数**：修改 Relay ID、Worker 根地址、内部/公网端口、月流量上限、单 IP 日流量上限、单 IP 并发数和 Cloudflare 来源限制。每项默认显示当前值，直接按 Enter 保持不变。Relay ID、Worker 地址或公网端口修改后，需同步更新管理台记录；端口变更也要检查安全组/NAT 映射。

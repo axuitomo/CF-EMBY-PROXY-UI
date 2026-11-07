@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="https://github.com/axuitomo/CF-EMBY-PROXY-UI"
-SOURCE_REF="${RELAY_SOURCE_REF:-main}"
+SOURCE_REF="${RELAY_SOURCE_REF:-test}"
 RELAY_PORT="${RELAY_PORT:-}"
 PUBLIC_PORT="${PUBLIC_PORT:-}"
 RELAY_ID="${RELAY_ID:-}"
@@ -260,7 +260,7 @@ PY
   curl -fsSL "$REPO/archive/refs/heads/$SOURCE_REF.tar.gz" -o "$workdir/source.tar.gz"
   mkdir "$workdir/source"
   tar -xzf "$workdir/source.tar.gz" --strip-components=1 -C "$workdir/source"
-  [ -f "$workdir/source/relay/go.mod" ] || fail "下载的源码中没有 relay/go.mod"
+  [ -f "$workdir/source/relay/go.mod" ] || fail "源码分支 '$SOURCE_REF' 中没有 relay/go.mod；请指定包含中继源码的分支（RELAY_SOURCE_REF）"
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" GOTOOLCHAIN=local \
     "$workdir/go/bin/go" -C "$workdir/source/relay" build -trimpath -ldflags='-s -w' -o "$workdir/emby-relay" .
   BUILT_BINARY="$workdir/emby-relay"
