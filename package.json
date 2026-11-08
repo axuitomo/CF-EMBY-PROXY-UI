@@ -33,10 +33,10 @@
     "acorn": "^8.19.0",
     "acorn-walk": "^8.3.5",
     "miniflare": "^4.20260730.0",
-    "oxfmt": "^0.75.0",
-    "oxlint": "^1.90.0",
-    "vite": "^8.1.5",
-    "wrangler": "^4.0.0"
+    "oxfmt": "^0.76.0",
+    "oxlint": "^1.91.0",
+    "vite": "^8.3.6",
+    "wrangler": "^4.157.0"
   },
   "overrides": {
     "workerd": "1.20261023.1",
