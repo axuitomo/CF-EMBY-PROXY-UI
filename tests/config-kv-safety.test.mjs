@@ -81,6 +81,13 @@ test("persistRuntimeConfig rejects writes when KV is not configured", async () =
   );
 });
 
+test("video progress interval defaults to eight seconds without overriding saved values", () => {
+  assert.equal(sanitizeRuntimeConfig({}).videoProgressForwardIntervalSec, 8);
+  assert.equal(
+    sanitizeRuntimeConfig({ videoProgressForwardIntervalSec: 3 }).videoProgressForwardIntervalSec,
+    3,
+  );
+});
 test("adminUiSkin persists in KV config and normalizes unknown skins", async () => {
   assert.equal(sanitizeRuntimeConfig({ adminUiSkin: "claude" }).adminUiSkin, "claude");
   assert.equal(sanitizeRuntimeConfig({ adminUiSkin: " CLAUDE " }).adminUiSkin, "claude");

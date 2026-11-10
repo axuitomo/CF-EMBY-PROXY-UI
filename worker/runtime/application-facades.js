@@ -445,7 +445,7 @@ var CACHE_DEFAULTS = Object.freeze({
   PlaybackInfoCacheMax: 64,
   PlaybackInfoCacheEntryMaxBytes: 256 * 1024,
   PlaybackInfoCacheTotalMaxBytes: 4 * 1024 * 1024,
-  VideoProgressForwardIntervalSec: 3,
+  VideoProgressForwardIntervalSec: 8,
   VideoProgressForwardSessionMax: 128,
   VideoProgressSnapshotMaxBytes: 32 * 1024,
   RateLimitCacheMax: 4096,
@@ -23376,16 +23376,13 @@ function createProxyRequestLifecycle(requestSignal) {
       };
       if (abortReason || controller.signal.aborted) relayAbort();
       else controller.signal.addEventListener("abort", relayAbort, { once: true });
-      activeFetchCleanup = () => {
+      const cleanup = () => {
         controller.signal.removeEventListener("abort", relayAbort);
         if (activeFetchController === fetchController) activeFetchController = null;
+        if (activeFetchCleanup === cleanup) activeFetchCleanup = null;
       };
-      return () => {
-        if (!activeFetchCleanup) return;
-        const cleanup = activeFetchCleanup;
-        activeFetchCleanup = null;
-        cleanup();
-      };
+      activeFetchCleanup = cleanup;
+      return cleanup;
     },
     dispose() {
       if (requestAbortCleanup) {
@@ -26189,115 +26186,109 @@ function defineProxyMetadataResponseMethods(dependencies = {}, kernel = {}) {
         clearIdleTimer();
         idleTimer = setTimeout(() => requestLifecycle.abort("stream_idle_timeout"), idleTimeoutMs);
       };
-      removeAbortListener = requestLifecycle.onAbort((reason) => {
-        if (streamClosed) return;
-        clearIdleTimer();
-        if (reason === "stream_idle_timeout")
-          recordStreamLog({
-            statusCode: 504,
-            category: "error",
-            errorDetail: `stream_idle_timeout_${idleTimeoutMs}ms`,
-          });
-        else if (reason === "client_aborted" || reason === "downstream_cancelled")
-          recordStreamLog({
-            statusCode: 499,
-            category: kernel.classifyProxyLogCategory(execution.requestTraits),
-            errorDetail: reason,
-          });
-        else if (reason)
-          recordStreamLog({
-            statusCode: 502,
-            category: "error",
-            errorDetail: String(reason),
-          });
-        Promise.resolve(reader.cancel(reason))
-          .catch(() => {})
-          .finally(() => {
-            if (!streamClosed) finalize();
-          });
-      });
-      return new ReadableStream({
-        pull: async (controller) => {
-          if (streamClosed) return;
-          if (readPromise) return readPromise;
-          armIdleTimer();
-          readPromise = (async () => {
-            try {
-              const { done, value } = await reader.read();
+      return new ReadableStream(
+        {
+          start(controller) {
+            removeAbortListener = requestLifecycle.onAbort((reason) => {
+              if (streamClosed) return;
               clearIdleTimer();
-              if (done) {
-                const abortReason = requestLifecycle.getAbortReason();
-                finalize();
-                if (abortReason === "stream_idle_timeout") {
-                  try {
-                    controller.error(createLifecycleAbortError(abortReason, `${idleTimeoutMs}ms`));
-                  } catch {}
-                  return;
-                }
-                recordStreamLog();
-                controller.close();
-                return;
-              }
-              // 计时只覆盖 reader.read() 窗口。enqueue 之后若继续计时，客户端暂停或缓冲
-              // 超过阈值会被 stream_idle_timeout 误杀，日志还会记成上游 504。
-              controller.enqueue(value);
-            } catch (error) {
-              clearIdleTimer();
-              const abortReason = requestLifecycle.getAbortReason();
-              const normalizedError =
-                abortReason === "stream_idle_timeout"
-                  ? createLifecycleAbortError(abortReason, `${idleTimeoutMs}ms`)
-                  : abortReason
-                    ? createLifecycleAbortError(abortReason)
-                    : error;
-              finalize();
-              if (abortReason === "client_aborted" || abortReason === "downstream_cancelled") {
-                recordStreamLog({
-                  statusCode: 499,
-                  category: kernel.classifyProxyLogCategory(execution.requestTraits),
-                  errorDetail: abortReason,
-                });
-                try {
-                  controller.close();
-                } catch {}
-                return;
-              }
-              if (abortReason === "stream_idle_timeout")
+              if (reason === "stream_idle_timeout")
                 recordStreamLog({
                   statusCode: 504,
                   category: "error",
                   errorDetail: `stream_idle_timeout_${idleTimeoutMs}ms`,
                 });
-              else
+              else if (reason === "client_aborted" || reason === "downstream_cancelled")
+                recordStreamLog({
+                  statusCode: 499,
+                  category: kernel.classifyProxyLogCategory(execution.requestTraits),
+                  errorDetail: reason,
+                });
+              else if (reason)
                 recordStreamLog({
                   statusCode: 502,
                   category: "error",
-                  errorDetail: error?.message || String(error),
+                  errorDetail: String(reason),
                 });
+              controller.error(
+                createLifecycleAbortError(
+                  reason,
+                  reason === "stream_idle_timeout" ? `${idleTimeoutMs}ms` : "",
+                ),
+              );
               try {
-                controller.error(normalizedError);
-              } catch {}
-            } finally {
-              readPromise = null;
-            }
-          })();
-          return readPromise;
+                Promise.resolve(reader.cancel(reason)).catch(() => {});
+              } finally {
+                finalize();
+              }
+            });
+          },
+          pull: async (controller) => {
+            if (streamClosed) return;
+            if (readPromise) return readPromise;
+            armIdleTimer();
+            readPromise = (async () => {
+              try {
+                const { done, value } = await reader.read();
+                clearIdleTimer();
+                if (streamClosed || requestLifecycle.getAbortReason()) return;
+                if (done) {
+                  finalize();
+                  recordStreamLog();
+                  controller.close();
+                  return;
+                }
+                // 计时只覆盖 reader.read() 窗口。enqueue 之后若继续计时，客户端暂停或缓冲
+                // 超过阈值会被 stream_idle_timeout 误杀，日志还会记成上游 504。
+                controller.enqueue(value);
+              } catch (error) {
+                clearIdleTimer();
+                const abortReason = requestLifecycle.getAbortReason();
+                const normalizedError =
+                  abortReason === "stream_idle_timeout"
+                    ? createLifecycleAbortError(abortReason, `${idleTimeoutMs}ms`)
+                    : abortReason
+                      ? createLifecycleAbortError(abortReason)
+                      : error;
+                finalize();
+                if (abortReason === "client_aborted" || abortReason === "downstream_cancelled") {
+                  recordStreamLog({
+                    statusCode: 499,
+                    category: kernel.classifyProxyLogCategory(execution.requestTraits),
+                    errorDetail: abortReason,
+                  });
+                  try {
+                    controller.close();
+                  } catch {}
+                  return;
+                }
+                if (abortReason === "stream_idle_timeout")
+                  recordStreamLog({
+                    statusCode: 504,
+                    category: "error",
+                    errorDetail: `stream_idle_timeout_${idleTimeoutMs}ms`,
+                  });
+                else
+                  recordStreamLog({
+                    statusCode: 502,
+                    category: "error",
+                    errorDetail: error?.message || String(error),
+                  });
+                try {
+                  controller.error(normalizedError);
+                } catch {}
+              } finally {
+                readPromise = null;
+              }
+            })();
+            return readPromise;
+          },
+          cancel() {
+            if (!streamClosed) requestLifecycle.abort("downstream_cancelled");
+          },
         },
-        cancel: async (reason) => {
-          if (streamClosed) return;
-          requestLifecycle.abort("downstream_cancelled");
-          clearIdleTimer();
-          try {
-            await reader.cancel(reason);
-          } catch {}
-          recordStreamLog({
-            statusCode: 499,
-            category: kernel.classifyProxyLogCategory(execution.requestTraits),
-            errorDetail: "downstream_cancelled",
-          });
-          finalize();
-        },
-      });
+        { highWaterMark: 0 },
+      );
     },
   };
 }
@@ -27954,7 +27945,20 @@ function defineProxyRoutingDecisionMethods(dependencies = {}, kernel = {}) {
       const isStaticFile = STATIC_ASSET_EXTENSION_REGEX.test(proxyPath);
       const isSubtitle = SUBTITLE_EXTENSION_REGEX.test(proxyPath);
       const isManifest = STREAM_MANIFEST_EXTENSION_REGEX.test(proxyPath);
-      const isSegment = STREAM_SEGMENT_EXTENSION_REGEX.test(proxyPath);
+      const hasSegmentExtension = STREAM_SEGMENT_EXTENSION_REGEX.test(proxyPath);
+      const isExplicitSegmentPath =
+        hasSegmentExtension &&
+        /\/(?:hls\d*|dash|stream(?:\.[^/]+)?|universal(?:\.[^/]+)?)\//i.test(proxyPath);
+      const isWholeMediaStreamRoute =
+        !isExplicitSegmentPath &&
+        (/\/videos\/[^/]+\/(?:stream|original|download|file)(?:\.[^/]+)?\/?$/i.test(proxyPath) ||
+          /\/audio\/[^/]+\/(?:stream|original|download|file|universal)(?:\.[^/]+)?\/?$/i.test(
+            proxyPath,
+          ) ||
+          /\/items\/[^/]+\/download(?:\/[^/]+)?\/?$/i.test(proxyPath) ||
+          requestUrl.searchParams.get("Static") === "true" ||
+          requestUrl.searchParams.get("Download") === "true");
+      const isSegment = hasSegmentExtension && !isWholeMediaStreamRoute;
       const isSmartStrmMedia = isSmartStrmMediaProxyPath(proxyPath);
       const isWsUpgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
       const isPlaybackInfoRequest = isPlaybackInfoPath(proxyPath);
@@ -27964,12 +27968,7 @@ function defineProxyRoutingDecisionMethods(dependencies = {}, kernel = {}) {
       const isPlaybackSessionControlRequest =
         isPlaybackProgressRequest || isPlaybackStoppedRequest || isPlaybackStartedRequest;
       const looksLikeMediaStreamRoute =
-        STREAMING_MEDIA_EXTENSION_REGEX.test(proxyPath) ||
-        VIDEO_STREAM_ROUTE_REGEX.test(proxyPath) ||
-        AUDIO_STREAM_ROUTE_REGEX.test(proxyPath) ||
-        /\/items\/[^/]+\/download/i.test(proxyPath) ||
-        requestUrl.searchParams.get("Static") === "true" ||
-        requestUrl.searchParams.get("Download") === "true";
+        STREAMING_MEDIA_EXTENSION_REGEX.test(proxyPath) || isWholeMediaStreamRoute;
       const isSafeMethod = requestMethod === "GET" || requestMethod === "HEAD";
       const isBigStream =
         looksLikeMediaStreamRoute && !isManifest && !isSegment && !isSubtitle && !isImage;
@@ -38476,6 +38475,7 @@ export {
   defineNodeProxyKernel,
   defineSchemaInspectionMethods,
   defineSnapshotMethods,
+  createProxyRequestLifecycle,
   createTargetRecord,
   createWorkerApplication,
   databaseReadinessState,

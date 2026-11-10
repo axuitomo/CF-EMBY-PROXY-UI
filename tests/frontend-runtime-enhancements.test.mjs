@@ -28,6 +28,16 @@ function hydratedConfig(overrides = {}) {
   return { ...config, ...overrides };
 }
 
+test("production settings default to eight-second progress and FREE plan", async () => {
+  const template = await readFile(
+    new URL("../frontend/admin-runtime.template.html", import.meta.url),
+    "utf8",
+  );
+  assert.match(template, /videoProgressForwardIntervalSec:8/);
+  assert.match(template, /videoProgressForwardIntervalSec:\{fallback:8,min:0,max:60\}/);
+  assert.match(template, /settingsExperienceMode:"novice",cfQuotaPlanOverride:"free"/);
+  assert.match(template, /return"free"===r\|\|"paid"===r\?r:"free"/);
+});
 function loadEnhancementTestHooks(documentOverrides = {}, windowOverrides = {}) {
   const inlineScript = ADMIN_RUNTIME_ENHANCEMENT_SCRIPT.replace(/^<script[^>]*>\n?/, "").replace(
     /<\/script>$/,

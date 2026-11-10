@@ -169,7 +169,7 @@
 | PlaybackInfo 缓存时间 | `playbackInfoCacheTtlSec` | 60 秒 | 0–60 | 缓存有效期 |
 | PlaybackInfo 默认模式 | `defaultPlaybackInfoMode` | `passthrough` | — | 节点没显式指定时用哪种模式（`rewrite` 改写 / `passthrough` 透传） |
 | 视频回传进度控制 | `videoProgressForwardEnabled` | 开 | — | 客户端上报的播放进度经 Worker 转给上游 |
-| 视频回传进度控制间隔 | `videoProgressForwardIntervalSec` | 3 秒 | 0–60 | 同一会话两次上报的最小间隔 |
+| 视频回传进度控制间隔 | `videoProgressForwardIntervalSec` | 8 秒 | 0–60 | 同一会话两次上报的最小间隔 |
 
 ### 放置
 

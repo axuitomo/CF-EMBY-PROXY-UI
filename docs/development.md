@@ -30,7 +30,7 @@ npm.cmd run --workspace frontend sync:admin-runtime
 npm.cmd run --workspace frontend build
 ```
 
-同步脚本把 `admin-runtime.template.html` 的占位符（`__ADMIN_BOOTSTRAP_JSON__`、`__ADMIN_APP_ROOT__`、`__APP_VERSION__`）替换为 bootstrap、`#app` 和版本号，注入 `admin-runtime-enhancements.mjs` 的 style/script，再跑一遍 `applyHeadProbeContract` 改写编译产物（节点探测 HEAD→GET、注入 `hedgeProbePreferGet`），然后用 `build-admin-tailwind.mjs` 把模板里的 `<style type="text/tailwindcss">` 主题块预编译成静态 CSS 内联进壳，写出 `frontend/index.html`（日志会打印 `预编译 Tailwind CSS <bytes> B（候选 N 个）`）。随后 `publish-dist.mjs` 把组合产物拷贝到 `frontend/dist/index.html`；管理端是单文件交付，`dist/` 只允许存在这一个文件，所以构建不再经过 Vite（模板没有 module script，打包只会原样搬运）。不要直接改这两个生成 HTML；模板里看起来是 HEAD 语义的节点探测 UI 会被 sync 改写，改那部分必须先读 `applyHeadProbeContract`（说明见 `docs/architecture.md` §4）。
+同步脚本把 `admin-runtime.template.html` 的占位符（`__ADMIN_BOOTSTRAP_JSON__`、`__ADMIN_APP_ROOT__`、`__APP_VERSION__`）替换为 bootstrap、`#app` 和版本号，注入 `admin-runtime-enhancements.mjs` 的 style/script，再跑一遍 `applyHeadProbeContract` 改写编译产物（节点探测 HEAD→GET、注入 `hedgeProbePreferGet`），然后用 `build-admin-tailwind.mjs` 把模板里的 `<style type="text/tailwindcss">` 主题块预编译成静态 CSS 内联进壳，写出 `frontend/index.html`（日志会打印 `预编译 Tailwind CSS <bytes> B（候选 N 个）`）。随后 `publish-dist.mjs` 把组合产物拷贝到 `frontend/dist/index.html`；同时将摇树后的 vendor 脚本发布到 `dist/vendor/`；HTML 壳仍为单文件，构建不再经过 Vite（模板没有 module script，打包只会原样搬运）。不要直接改这两个生成 HTML；模板里看起来是 HEAD 语义的节点探测 UI 会被 sync 改写，改那部分必须先读 `applyHeadProbeContract`（说明见 `docs/architecture.md` §4）。
 
 `wrangler.toml` 将 `frontend/dist` 声明为 `ASSETS` 静态资产目录。GitHub Actions 部署会先执行 `npm ci`、`npm run check` 和 `npm run build:cdn`，再由 Wrangler 将前端与 Worker 一起上传；Worker 在没有 KV/远端管理端 HTML 配置时直接使用该构建产物。`npm run check` 挡在部署前，同步漂移、CDN 资源策略、2 MiB 壳上限和 `worker.js` 新鲜度都会在那里失败。
 
@@ -133,7 +133,7 @@ npm.cmd run test:e2e
 
 注意：
 
-- e2e **不进入** `npm.cmd run check`：它要下 Chromium、要起进程、要访问 jsdelivr 取那 3 个 CDN 脚本，放进快速门禁会把每次检查拖成分钟级。CI 需要时单独加一个 job，先跑 `npx playwright install chromium`。
+- e2e **不进入** `npm.cmd run check`：它要下 Chromium、要起进程、要加载管理端的 3 个 vendor 脚本，放进快速门禁会把每次检查拖成分钟级。CI 需要时单独加一个 job，先跑 `npx playwright install chromium`。
 - 首次使用本机需要装浏览器：`npx playwright install chromium`。
 - e2e 用的是根目录已提交的 `worker.js`，怀疑过期先跑 `npm.cmd run check:worker-bundle`。
 - 空库时日志页会提示“请先初始化日志表”、DNS 页会提示“完善 Zone ID 和 API 令牌”，这些都是预期行为，冒烟只验证视图能渲染，不验证空库业务结果。

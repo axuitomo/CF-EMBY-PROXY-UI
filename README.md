@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-V20.3-2563eb">
+  <img alt="version" src="https://img.shields.io/badge/version-V20.4-2563eb">
   <img alt="platform" src="https://img.shields.io/badge/platform-Cloudflare%20Workers-orange">
   <img alt="storage" src="https://img.shields.io/badge/storage-KV%20%2B%20D1-green">
   <img alt="ui" src="https://img.shields.io/badge/panel-SaaS%20UI-purple">
@@ -17,7 +17,7 @@ CF-EMBY-PROXY-UI 用一台 Cloudflare Worker 给多台 Emby / Jellyfin 服务器
 - 配置与节点存在 KV（`ENI_KV`），日志与统计存在 D1（`DB`，可选）
 - 大视频流尽量不经过 Worker 内存，交给 Cloudflare 数据面转发
 
-> 当前 **V20.3** 的重心是不让配置再被写坏：`saveConfig` 落盘前先与 KV 里的现有配置逐字段比对，出现「非默认值 → 默认值 / 空」的字段超过 8 个就直接返回 409 `CONFIG_MASS_RESET_BLOCKED`，KV 一个字节都不写，管理台列清字段名、二次确认后才放行；每次覆盖配置前另存一份上一代快照，「备份与恢复」新增「恢复上次配置」，连点两次可以来回切。管理面的 Cloudflare 调用补上 8 秒超时（此前是裸 fetch，卡住时 bootstrap 会被拖到 89–331 秒），并新增 `config.write.rejected` / `config.write.snapshot` / `config.bootstrap.slow` 三条结构化日志。管理端同时修掉优选 IP 工作台的两处几何问题：导出下拉菜单不再被工具栏的横向滚动容器裁掉，删完 IP 后列表由服务端重新结算、不再残留共享快照。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
+> 当前 **V20.4** 的重心是不让分片流被误杀、也不让整流被误当分片：受管流式响应不再自动预读，只在下游真正来取时才读上游并起计时，客户端取消、消费者取消与上游空闲超时收敛到同一个中止分支，分别记 499 / 499 / 504，流只终结一次、`reader` 锁与上游 `AbortController` 只释放一次；`/Videos/{id}/stream.ts`、`/Items/{id}/Download` 以及带 `Static=true` / `Download=true` 的整流请求不再套 15 秒分片超时，而 HLS / DASH / `stream/…` / `universal/…` 分片路径优先于这两个参数，`.ts` 后缀的中间目录也不再整块被当成整流。协议回退重试顺带修掉一处解绑问题：旧 fetch 释放时不会再把重试用的 `AbortController` 顺手摘掉。逐条变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ![CF-EMBY-PROXY-UI 管理后台截图](https://web.axuitomo.qzz.io/api/p/img/github/PixPin_2026-08-03_14-00-35.png?download=true&sign=TltPfTfUurzkQ5FsY4rpQ1Wd%2Bwu1Oji3rC%2FVo2NbV%2BM%3D%3A0)
 
