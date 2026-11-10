@@ -27446,13 +27446,13 @@ function definePlaybackSessionControlMethods(dependencies = {}, kernel = {}) {
       let sessionKey = "";
       let sessionIdentity = "";
       let sessionStrength = "weak";
-      if (sessionId) {
-        sessionKey = `session:${sessionId}`;
-        sessionIdentity = `session:${sessionId}`;
-        sessionStrength = "strong";
-      } else if (playSessionId) {
+      if (playSessionId) {
         sessionKey = `play:${playSessionId}`;
         sessionIdentity = `play:${playSessionId}`;
+        sessionStrength = "strong";
+      } else if (sessionId) {
+        sessionKey = `session:${sessionId}:${itemId}`;
+        sessionIdentity = `session:${sessionId}:${itemId}`;
         sessionStrength = "strong";
       } else if (deviceId) {
         sessionKey = `device-item:${deviceId}:${itemId}`;
@@ -27484,6 +27484,7 @@ function definePlaybackSessionControlMethods(dependencies = {}, kernel = {}) {
           `${sessionIdentityFingerprint}|${itemId}`,
         ),
         sessionStrength,
+        hasPlaySessionId: !!playSessionId,
         itemId,
         parseError: parsedPayload.parseError === true,
       };
@@ -27807,22 +27808,38 @@ function definePlaybackProgressRelayMethods(dependencies = {}, kernel = {}) {
       }
       const sessionInfo = kernel.resolvePlaybackProgressSessionKey(execution, transport);
       execution.progressForwardSessionKey = String(sessionInfo.sessionKey || "").trim();
+      execution.progressForwardHasPlaySessionId = sessionInfo.hasPlaySessionId === true;
       if (sessionInfo.parseError) {
         execution.progressForwardMode = "parse_bypass";
         return null;
       }
       if (execution.requestTraits.isPlaybackStartedRequest === true) {
         execution.progressForwardMode = "started_passthrough";
-        if (execution.progressForwardSessionKey)
-          deletePlaybackProgressRelayEntry(execution.progressForwardSessionKey);
+        if (execution.progressForwardSessionKey) {
+          await kernel.flushPlaybackProgressBeforeStopped(execution);
+          const entry = cacheState.PlaybackProgressRelay.get(execution.progressForwardSessionKey);
+          if (entry?.pendingSnapshot) {
+            entry.terminalState = "";
+            entry.terminalAt = 0;
+            entry.terminalTombstoneUntil = 0;
+            kernel.schedulePlaybackProgressRelayFlush(execution.progressForwardSessionKey, entry);
+          } else deletePlaybackProgressRelayEntry(execution.progressForwardSessionKey);
+        }
         return null;
       }
       if (execution.requestTraits.isPlaybackStoppedRequest === true) {
-        execution.progressForwardMode = (await kernel.flushPlaybackProgressBeforeStopped(execution))
-          ? "flush_before_stopped"
-          : "stopped_passthrough";
-        if (execution.progressForwardSessionKey)
-          kernel.markPlaybackProgressRelayStopped(execution.progressForwardSessionKey, execution);
+        const flushed = await kernel.flushPlaybackProgressBeforeStopped(execution);
+        const entry = cacheState.PlaybackProgressRelay.get(execution.progressForwardSessionKey);
+        if (entry?.pendingSnapshot) {
+          execution.progressForwardMode = "stopped_flush_retry";
+          return null;
+        }
+        execution.progressForwardMode = flushed ? "flush_before_stopped" : "stopped_passthrough";
+        if (execution.progressForwardSessionKey) {
+          if (execution.progressForwardHasPlaySessionId)
+            kernel.markPlaybackProgressRelayStopped(execution.progressForwardSessionKey, execution);
+          else deletePlaybackProgressRelayEntry(execution.progressForwardSessionKey);
+        }
         return null;
       }
       if (execution.requestTraits.isPlaybackProgressRequest !== true) return null;
@@ -29444,8 +29461,10 @@ function defineProxyTransportMethods(dependencies = {}, kernel = {}) {
         0,
         365 * 86400,
       );
+      const shortImageNotFound =
+        requestTraits.isImage === true && (response.status === 404 || response.status === 410);
       if (
-        response.status >= 400 ||
+        (response.status >= 400 && !shortImageNotFound) ||
         // 206 是部分内容：共享缓存（CDN、代理、浏览器）都不能按“换一个偏移就能复用”来存它。
         response.status === 206 ||
         requestTraits.isManifest ||
@@ -29453,7 +29472,10 @@ function defineProxyTransportMethods(dependencies = {}, kernel = {}) {
         requestTraits.isSmartStrmMedia
       )
         modifiedHeaders.set("Cache-Control", "no-store");
-      else if (options.proxiedExternalRedirect) modifiedHeaders.set("Cache-Control", "no-store");
+      else if (shortImageNotFound) {
+        const cacheVisibility = hasWorkerMetadataPrivateIdentity(request) ? "private" : "public";
+        modifiedHeaders.set("Cache-Control", `${cacheVisibility}, max-age=60`);
+      } else if (options.proxiedExternalRedirect) modifiedHeaders.set("Cache-Control", "no-store");
       else if (requestTraits.isImage || requestTraits.isStaticFile || requestTraits.isSubtitle) {
         const cacheVisibility = hasWorkerMetadataPrivateIdentity(request) ? "private" : "public";
         modifiedHeaders.set("Cache-Control", `${cacheVisibility}, max-age=${imageCacheMaxAge}`);

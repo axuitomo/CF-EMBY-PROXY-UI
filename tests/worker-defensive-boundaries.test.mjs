@@ -3106,6 +3106,36 @@ test("private metadata responses stay browser-private and upstream fetch bypasse
   assert.equal(Object.hasOwn(fetchOptions, "cf"), false);
 });
 
+test("only image 404/410 responses receive a short client cache lifetime", () => {
+  const imageTraits = { isImage: true };
+  const otherTraits = { isImage: false };
+  const headersFor = (
+    status,
+    requestTraits = imageTraits,
+    requestUrl = "https://worker.test/image",
+  ) =>
+    proxyService
+      .buildProxyResponseHeaders(
+        new Response("error", { status }),
+        new Request(requestUrl),
+        {},
+        "*",
+        requestTraits,
+        { imageCacheMaxAge: 3600 },
+      )
+      .get("Cache-Control");
+
+  assert.equal(headersFor(404), "public, max-age=60");
+  assert.equal(headersFor(410), "public, max-age=60");
+  assert.equal(headersFor(403), "no-store");
+  assert.equal(headersFor(500), "no-store");
+  assert.equal(headersFor(404, otherTraits), "no-store");
+  assert.equal(
+    headersFor(404, imageTraits, "https://worker.test/image?api_key=secret"),
+    "private, max-age=60",
+  );
+});
+
 test("single-flight deduplicates equal keys while distinct keys run independently", async () => {
   isolateState.SingleFlightTasks.clear();
   const sharedGate = createDeferred();
@@ -10567,12 +10597,40 @@ test("playback session keys are partitioned by node even when Emby session ids m
     makeExecution("server-b"),
     transport,
   );
-  assert.equal(first.sessionKey, "server-a|session:shared-session");
-  assert.equal(second.sessionKey, "server-b|session:shared-session");
+  assert.equal(first.sessionKey, "server-a|play:shared-play");
+  assert.equal(second.sessionKey, "server-b|play:shared-play");
   assert.notEqual(first.sessionKey, second.sessionKey);
   assert.match(first.sessionIdentityFingerprint, /^[0-9a-f]{16}$/);
   assert.match(first.sessionFingerprint, /^[0-9a-f]{16}$/);
   assert.notEqual(first.sessionFingerprint, second.sessionFingerprint);
+
+  const nextPlayback = proxyService.resolvePlaybackProgressSessionKey(makeExecution("server-a"), {
+    ...transport,
+    preparedBodyText: JSON.stringify({
+      SessionId: "shared-session",
+      PlaySessionId: "next-play",
+      ItemId: "movie-2",
+    }),
+  });
+  assert.equal(nextPlayback.sessionKey, "server-a|play:next-play");
+  assert.notEqual(first.sessionKey, nextPlayback.sessionKey);
+
+  const sessionFallback = proxyService.resolvePlaybackProgressSessionKey(
+    makeExecution("server-a"),
+    {
+      ...transport,
+      preparedBodyText: JSON.stringify({ SessionId: "shared-session", ItemId: "movie-1" }),
+    },
+  );
+  const nextItemFallback = proxyService.resolvePlaybackProgressSessionKey(
+    makeExecution("server-a"),
+    {
+      ...transport,
+      preparedBodyText: JSON.stringify({ SessionId: "shared-session", ItemId: "movie-2" }),
+    },
+  );
+  assert.equal(sessionFallback.sessionKey, "server-a|session:shared-session:movie-1");
+  assert.notEqual(sessionFallback.sessionKey, nextItemFallback.sessionKey);
 
   const deviceTransport = {
     preparedBodyMode: "buffered",
@@ -10621,6 +10679,125 @@ test("playback session keys are partitioned by node even when Emby session ids m
     `${started.sessionIdentityFingerprint}:${started.sessionFingerprint}`,
     /private|device-1|movie-1/,
   );
+});
+
+test("playback progress for a new PlaySessionId is not blocked by the prior stop tombstone", async () => {
+  const relayMap = isolateState.PlaybackProgressRelay;
+  relayMap.clear();
+  const targetRecord = createTargetRecord("https://origin.example");
+  const makeExecution = (itemId, playSessionId) => {
+    const requestUrl = new URL("https://proxy.test/Sessions/Playing/Progress");
+    return {
+      nodeName: "server-a",
+      requestMethod: "POST",
+      requestUrl,
+      proxyPath: "/Sessions/Playing/Progress",
+      clientIp: "203.0.113.10",
+      request: new Request(requestUrl, { method: "POST" }),
+      requestTraits: {
+        isPlaybackSessionControlRequest: true,
+        isPlaybackProgressRequest: true,
+      },
+      videoProgressForwardEnabled: true,
+      videoProgressForwardIntervalSec: 3,
+      ctx: { waitUntil() {} },
+      nodeDerivedCacheRevision: "rev-1",
+      finalOrigin: "*",
+      itemId,
+      playSessionId,
+    };
+  };
+  const makeTransport = (itemId, playSessionId) => {
+    const preparedBodyText = JSON.stringify({
+      SessionId: "shared-client-session",
+      PlaySessionId: playSessionId,
+      ItemId: itemId,
+    });
+    return {
+      preparedBodyMode: "buffered",
+      preparedBodyText,
+      preparedBody: new TextEncoder().encode(preparedBodyText),
+      newHeaders: new Headers({ "Content-Type": "application/json" }),
+    };
+  };
+  const oldInfo = proxyService.resolvePlaybackProgressSessionKey(
+    makeExecution("movie-1", "play-1"),
+    makeTransport("movie-1", "play-1"),
+  );
+  proxyService.markPlaybackProgressRelayStopped(oldInfo.sessionKey, {
+    videoProgressForwardIntervalSec: 3,
+    nodeName: "server-a",
+  });
+
+  const nextExecution = makeExecution("movie-2", "play-2");
+  const response = await proxyService.maybeHandlePlaybackProgressRelay(
+    nextExecution,
+    makeTransport("movie-2", "play-2"),
+    () => ({}),
+    [targetRecord],
+  );
+  assert.equal(response, null);
+  assert.equal(nextExecution.progressForwardMode, "forward_now");
+  assert.notEqual(nextExecution.progressForwardSessionKey, oldInfo.sessionKey);
+  relayMap.clear();
+});
+
+test("stopped playback keeps an acknowledged progress snapshot when flush fails", async () => {
+  const relayMap = isolateState.PlaybackProgressRelay;
+  relayMap.clear();
+  const originalForward = kernel.forwardPlaybackProgressSnapshot;
+  const scheduledTasks = [];
+  kernel.forwardPlaybackProgressSnapshot = async () => {
+    throw new Error("temporary upstream failure");
+  };
+  try {
+    const sessionKey = "server-a|play:play-1";
+    const entry = proxyService.buildPlaybackProgressRelayEntry(3000, {
+      waitUntil(task) {
+        scheduledTasks.push(task);
+      },
+    });
+    const pendingSnapshot = { requestUrl: new URL("https://origin.test/progress") };
+    entry.pendingSnapshot = pendingSnapshot;
+    relayMap.set(sessionKey, entry);
+    const requestUrl = new URL("https://proxy.test/Sessions/Playing/Stopped");
+    const execution = {
+      nodeName: "server-a",
+      requestMethod: "POST",
+      requestUrl,
+      proxyPath: "/Sessions/Playing/Stopped",
+      request: new Request(requestUrl, { method: "POST" }),
+      requestTraits: {
+        isPlaybackSessionControlRequest: true,
+        isPlaybackStoppedRequest: true,
+      },
+      videoProgressForwardEnabled: true,
+      videoProgressForwardIntervalSec: 3,
+      ctx: { waitUntil() {} },
+    };
+    const preparedBodyText = JSON.stringify({
+      SessionId: "client-session",
+      PlaySessionId: "play-1",
+      ItemId: "movie-1",
+    });
+    const transport = {
+      preparedBodyMode: "buffered",
+      preparedBodyText,
+      preparedBody: new TextEncoder().encode(preparedBodyText),
+      newHeaders: new Headers({ "Content-Type": "application/json" }),
+    };
+
+    await proxyService.maybeHandlePlaybackProgressRelay(execution, transport, () => ({}), []);
+    assert.equal(execution.progressForwardMode, "stopped_flush_retry");
+    assert.equal(entry.pendingSnapshot, pendingSnapshot);
+    assert.notEqual(entry.terminalState, "stopped");
+    assert.equal(scheduledTasks.length, 1);
+    entry.cancelScheduledDelay?.();
+    await scheduledTasks[0];
+  } finally {
+    kernel.forwardPlaybackProgressSnapshot = originalForward;
+    relayMap.clear();
+  }
 });
 
 test("node probes treat redirects as reachable", async () => {
