@@ -29,14 +29,14 @@
     "test:visual": "playwright test tests/e2e/visual.spec.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
+    "@playwright/test": "^1.65.0",
     "acorn": "^8.19.0",
     "acorn-walk": "^8.3.5",
     "miniflare": "^4.20260730.0",
-    "oxfmt": "^0.75.0",
-    "oxlint": "^1.90.0",
-    "vite": "^8.1.5",
-    "wrangler": "^4.0.0"
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
+    "vite": "^8.3.8",
+    "wrangler": "^4.160.1"
   },
   "overrides": {
     "workerd": "1.20261023.1",
